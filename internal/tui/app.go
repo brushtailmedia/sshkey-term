@@ -4,6 +4,8 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -61,14 +63,17 @@ type App struct {
 	appConfig   *config.Config
 	configDir   string
 	serverIdx   int // index of the active server in config
-	bell          BellConfig
-	muted         map[string]bool // room name or conv ID -> muted
-	showHelpHint  bool
+	bell              BellConfig
+	muted             map[string]bool // room name or conv ID -> muted
+	showHelpHint      bool
+	reconnectAttempt  int
 
-	width  int
-	height int
-	focus  Focus
-	layout Layout
+	width       int
+	height      int
+	focus       Focus
+	layout      Layout
+	contextMenu ContextMenuModel
+	memberMenu  MemberMenuModel
 }
 
 // Focus tracks which panel has keyboard focus.
@@ -183,6 +188,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Member menu intercepts all keys
+		if a.memberMenu.IsVisible() {
+			var cmd tea.Cmd
+			a.memberMenu, cmd = a.memberMenu.Update(msg)
+			return a, cmd
+		}
+
+		// Context menu intercepts all keys
+		if a.contextMenu.IsVisible() {
+			var cmd tea.Cmd
+			a.contextMenu, cmd = a.contextMenu.Update(msg)
+			return a, cmd
+		}
+
 		// Quit confirmation intercepts all keys
 		if a.quitConfirm.IsVisible() {
 			var cmd tea.Cmd
@@ -283,8 +302,34 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5", "ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9":
 			idx := int(msg.String()[len(msg.String())-1]-'0') - 1
 			if a.appConfig != nil && idx < len(a.appConfig.Servers) && idx != a.serverIdx {
-				a.statusBar.SetError(fmt.Sprintf("Switch to %s requires restart", a.appConfig.Servers[idx].Name))
-				// TODO: disconnect current, connect to new server
+				// Disconnect current server
+				if a.client != nil {
+					a.client.Close()
+				}
+
+				// Switch to new server
+				srv := a.appConfig.Servers[idx]
+				a.serverIdx = idx
+				a.connected = false
+				a.reconnectAttempt = 0
+
+				// Update config for new server
+				a.cfg.Host = srv.Host
+				a.cfg.Port = srv.Port
+				a.cfg.KeyPath = srv.Key
+				a.cfg.DataDir = filepath.Join(a.configDir, srv.Host)
+
+				// Clear UI state
+				a.messages.SetContext("", "")
+				a.sidebar.SetRooms(nil)
+				a.sidebar.SetConversations(nil)
+				a.pinnedBar = PinnedBarModel{}
+				a.statusBar.SetError("Switching to " + srv.Name + "...")
+				a.statusBar.SetConnected(false)
+				a.updateTitle()
+
+				// Connect to new server
+				return a, a.connect()
 			}
 			return a, nil
 
@@ -407,6 +452,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case UnpinRequestMsg:
+		if a.client != nil && a.messages.room != "" {
+			a.client.Enc().Encode(protocol.Unpin{
+				Type: "unpin",
+				Room: a.messages.room,
+				ID:   msg.MessageID,
+			})
+		}
+		return a, nil
+
 	case MuteToggleMsg:
 		a.muted[msg.Target] = msg.Muted
 		// Persist to config
@@ -422,9 +477,34 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MemberActionMsg:
 		a.infoPanel.Hide()
-		if msg.Action == "message" && a.client != nil {
-			// Create/open 1:1 DM
-			a.client.CreateDM([]string{msg.User}, "")
+		a.memberMenu.Hide()
+		switch msg.Action {
+		case "message":
+			if a.client != nil {
+				a.client.CreateDM([]string{msg.User}, "")
+			}
+		case "create_group":
+			if a.client != nil {
+				var allMembers []string
+				a.client.ForEachProfile(func(p *protocol.Profile) {
+					if p.User != a.client.Username() {
+						allMembers = append(allMembers, p.User)
+					}
+				})
+				a.newConv.Show(allMembers, msg.User)
+			}
+		case "verify":
+			if a.client != nil {
+				a.verify.Show(msg.User, a.client)
+			}
+		case "profile":
+			// Show info panel focused on this user's details
+			if a.client != nil {
+				p := a.client.Profile(msg.User)
+				if p != nil {
+					a.statusBar.SetError(fmt.Sprintf("%s — %s", p.DisplayName, p.KeyFingerprint))
+				}
+			}
 		}
 		return a, nil
 
@@ -505,11 +585,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case EmojiSelectedMsg:
-		// Send reaction to server
-		// TODO: encrypt the reaction payload and send via React message
-		// For now, log it
 		if a.client != nil {
-			a.statusBar.SetError("Reacted with " + msg.Emoji)
+			var err error
+			if msg.Target.Room != "" {
+				err = a.client.SendRoomReaction(msg.Target.Room, msg.Target.ID, msg.Emoji)
+			} else if msg.Target.Conversation != "" {
+				err = a.client.SendDMReaction(msg.Target.Conversation, msg.Target.ID, msg.Emoji)
+			}
+			if err != nil {
+				a.statusBar.SetError("React failed: " + err.Error())
+			}
 		}
 		return a, nil
 
@@ -551,15 +636,61 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "pin":
 			if a.client != nil && a.messages.room != "" {
-				a.client.Enc().Encode(protocol.Pin{
-					Type: "pin",
-					Room: a.messages.room,
-					ID:   msg.Msg.ID,
-				})
+				// Toggle: if already pinned, unpin
+				isPinned := false
+				for _, pin := range a.pinnedBar.pins {
+					if pin.ID == msg.Msg.ID {
+						isPinned = true
+						break
+					}
+				}
+				if isPinned {
+					a.client.Enc().Encode(protocol.Unpin{
+						Type: "unpin",
+						Room: a.messages.room,
+						ID:   msg.Msg.ID,
+					})
+				} else {
+					a.client.Enc().Encode(protocol.Pin{
+						Type: "pin",
+						Room: a.messages.room,
+						ID:   msg.Msg.ID,
+					})
+				}
 			}
 		case "copy":
 			CopyToClipboard(msg.Msg.Body)
 			a.statusBar.SetError("Copied to clipboard")
+		case "open_attachment":
+			if a.client != nil && len(msg.Msg.Attachments) > 0 {
+				att := msg.Msg.Attachments[0]
+				go func() {
+					a.statusBar.SetError("Downloading " + att.Name + "...")
+					// TODO: get decryption key based on room epoch or DM per-message key
+					path, err := a.client.DownloadFile(att.FileID, nil)
+					if err != nil {
+						a.statusBar.SetError("Download failed: " + err.Error())
+						return
+					}
+					client.OpenFile(path)
+				}()
+			}
+		case "save_attachment":
+			if a.client != nil && len(msg.Msg.Attachments) > 0 {
+				att := msg.Msg.Attachments[0]
+				go func() {
+					a.statusBar.SetError("Downloading " + att.Name + "...")
+					path, err := a.client.DownloadFile(att.FileID, nil)
+					if err != nil {
+						a.statusBar.SetError("Download failed: " + err.Error())
+						return
+					}
+					home, _ := os.UserHomeDir()
+					dst := filepath.Join(home, "Downloads", att.Name)
+					client.SaveFileAs(path, dst)
+					a.statusBar.SetError("Saved: " + dst)
+				}()
+			}
 		case "react":
 			a.emojiPicker.Show(msg.Msg)
 		}
@@ -575,6 +706,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case connectedWithClient:
 		a.client = msg.client
 		a.connected = true
+		a.reconnectAttempt = 0
 
 		// Populate sidebar and messages
 		a.sidebar.SetRooms(a.client.Rooms())
@@ -606,6 +738,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case reconnectAttemptMsg:
+		// Try to reconnect
+		a.statusBar.SetReconnecting(msg.attempt, 0)
+		return a, a.connect() // reuse the existing connect logic
+
 	case ReconnectStatusMsg:
 		switch msg.Status {
 		case "reconnecting":
@@ -622,6 +759,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ErrMsg:
 		a.err = msg.Err
 		a.statusBar.SetConnected(false)
+		// Auto-reconnect if we were previously connected
+		if a.connected || a.reconnectAttempt > 0 {
+			a.connected = false
+			a.reconnectAttempt++
+			delay := time.Duration(a.reconnectAttempt) * time.Second
+			if delay > 60*time.Second {
+				delay = 60 * time.Second
+			}
+			a.statusBar.SetReconnecting(a.reconnectAttempt, delay)
+			cmds = append(cmds, a.reconnect(a.reconnectAttempt))
+		}
 	}
 
 	return a, tea.Batch(cmds...)
@@ -633,7 +781,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if a.help.IsVisible() || a.search.IsVisible() || a.newConv.IsVisible() ||
 		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.settings.IsVisible() ||
 		a.addServer.IsVisible() || a.verify.IsVisible() || a.keyWarning.IsVisible() ||
-		a.quitConfirm.IsVisible() {
+		a.quitConfirm.IsVisible() || a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
 		return a, nil
 	}
 
@@ -709,9 +857,42 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 
 	case "messages":
 		a.focus = FocusMessages
+
+		// Check if click is on the pinned bar (top 1-2 rows of messages panel)
+		pinnedBarRows := 0
+		if a.pinnedBar.HasPins() {
+			pinnedBarRows = 1 // collapsed = 1 row
+			if a.pinnedBar.expanded {
+				pinnedBarRows = len(a.pinnedBar.pins) + 2 // header + pins + hint
+			}
+		}
+
+		relY := y - a.layout.MessagesY0 - 1 // relative to panel content
+		if a.pinnedBar.HasPins() && relY < pinnedBarRows {
+			if !a.pinnedBar.expanded {
+				// Click on collapsed bar — expand
+				a.pinnedBar.Toggle()
+			} else if relY > 0 && relY <= len(a.pinnedBar.pins) {
+				// Click on a specific pin — jump to it
+				pinIdx := relY - 1
+				if pinIdx >= 0 && pinIdx < len(a.pinnedBar.pins) {
+					a.pinnedBar.cursor = pinIdx
+					// TODO: jump to pinned message in stream
+				}
+			}
+			return a, nil
+		}
+
 		idx := a.layout.MessageItemAt(y)
 		if idx >= 0 && idx < len(a.messages.messages) {
 			a.messages.cursor = idx
+			msg := a.messages.messages[idx]
+			if !msg.IsSystem {
+				isOwn := a.client != nil && msg.From == a.client.Username()
+				isAdmin := a.client != nil && a.client.IsAdmin()
+				isRoom := a.messages.room != ""
+				a.contextMenu.Show(msg, x, y, isOwn, isAdmin, isRoom, a.pinnedBar.PinIDs())
+			}
 		}
 
 	case "members":
@@ -721,6 +902,9 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			idx := a.layout.MemberItemAt(y)
 			if idx >= 0 && idx < len(a.memberPanel.members) {
 				a.memberPanel.cursor = idx
+				// Show member context menu
+				user := a.memberPanel.members[idx].User
+				a.memberMenu.Show(user, x, y)
 			}
 		}
 
@@ -730,6 +914,35 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 	}
 
 	return a, nil
+}
+
+// reconnect attempts to reconnect after a delay with exponential backoff.
+func (a App) reconnect(attempt int) tea.Cmd {
+	delay := time.Second * time.Duration(attempt)
+	if delay > 60*time.Second {
+		delay = 60 * time.Second
+	}
+	return tea.Tick(delay, func(t time.Time) tea.Msg {
+		return reconnectAttemptMsg{attempt: attempt}
+	})
+}
+
+type reconnectAttemptMsg struct {
+	attempt int
+}
+
+// setUnreadDividerAfter finds the first message after lastReadID and sets the unread divider there.
+func (a *App) setUnreadDividerAfter(lastReadID string) {
+	found := false
+	for _, msg := range a.messages.messages {
+		if found && msg.ID != "" && !msg.IsSystem {
+			a.messages.SetUnreadFrom(msg.ID)
+			return
+		}
+		if msg.ID == lastReadID {
+			found = true
+		}
+	}
 }
 
 // updateTitle updates the terminal title with the total unread count.
@@ -755,6 +968,8 @@ func (a *App) sendReadReceipt() {
 		return
 	}
 	a.client.SendRead(a.messages.room, a.messages.conversation, lastID)
+	// Clear unread divider — user has now seen everything
+	a.messages.SetUnreadFrom("")
 }
 
 // handleSlashCommand processes slash commands that need app-level handling.
@@ -775,8 +990,35 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 	case "/help":
 		a.help.Toggle()
 	case "/upload":
-		// TODO: file upload flow
-		a.statusBar.SetError("File upload not yet implemented")
+		if sc.Arg == "" {
+			a.statusBar.SetError("Usage: /upload <file path>")
+			return
+		}
+		// Check if file exists
+		path := sc.Arg
+		if _, err := os.Stat(path); err != nil {
+			// Check if running over SSH
+			msg := "File not found: " + path
+			if os.Getenv("SSH_CLIENT") != "" || os.Getenv("SSH_TTY") != "" {
+				msg += " (running remotely — copy the file first with scp)"
+			}
+			a.statusBar.SetError(msg)
+			return
+		}
+		// Upload in background
+		go func() {
+			if a.client == nil {
+				return
+			}
+			a.statusBar.SetError("Uploading " + filepath.Base(path) + "...")
+			fileID, err := a.client.UploadFile(path, sc.Room, sc.Conv)
+			if err != nil {
+				a.statusBar.SetError("Upload failed: " + err.Error())
+				return
+			}
+			a.statusBar.SetError("Uploaded: " + fileID)
+			// TODO: send message referencing the file_id with attachment metadata
+		}()
 	}
 }
 
@@ -861,8 +1103,15 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		json.Unmarshal(msg.Raw, &m)
 		if m.Room != "" {
 			a.sidebar.SetUnread(m.Room, m.Count)
+			// Set unread divider for the active room
+			if m.Room == a.messages.room && m.Count > 0 && m.LastRead != "" {
+				a.setUnreadDividerAfter(m.LastRead)
+			}
 		} else if m.Conversation != "" {
 			a.sidebar.SetUnreadConv(m.Conversation, m.Count)
+			if m.Conversation == a.messages.conversation && m.Count > 0 && m.LastRead != "" {
+				a.setUnreadDividerAfter(m.LastRead)
+			}
 		}
 		a.updateTitle()
 	case "deleted":
@@ -872,7 +1121,7 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 	case "reaction":
 		var m protocol.Reaction
 		json.Unmarshal(msg.Raw, &m)
-		a.messages.AddReaction(m)
+		a.messages.AddReactionDecrypted(m, a.client)
 	case "reaction_removed":
 		var m protocol.ReactionRemoved
 		json.Unmarshal(msg.Raw, &m)
@@ -895,15 +1144,42 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		var m protocol.Pins
 		json.Unmarshal(msg.Raw, &m)
 		if m.Room == a.messages.room {
-			a.pinnedBar.SetPins(m.Room, m.Messages)
+			// Decrypt bundled pinned messages and add to the display list for previews
+			var pinnedDisplayMsgs []DisplayMessage
+			pinnedDisplayMsgs = append(pinnedDisplayMsgs, a.messages.messages...)
+			for _, raw := range m.MessageData {
+				var pm protocol.Message
+				if err := json.Unmarshal(raw, &pm); err != nil {
+					continue
+				}
+				body := "(encrypted)"
+				if a.client != nil {
+					payload, err := a.client.DecryptRoomMessage(pm.Room, pm.Epoch, pm.Payload)
+					if err == nil {
+						body = payload.Body
+					}
+				}
+				pinnedDisplayMsgs = append(pinnedDisplayMsgs, DisplayMessage{
+					ID:   pm.ID,
+					From: pm.From,
+					Body: body,
+					TS:   pm.TS,
+					Room: pm.Room,
+				})
+			}
+			a.pinnedBar.SetPins(m.Room, m.Messages, pinnedDisplayMsgs)
 		}
 	case "pinned":
 		var m protocol.Pinned
 		json.Unmarshal(msg.Raw, &m)
 		if m.Room == a.messages.room {
-			// Add to pinned bar
-			pins := append(a.pinnedBar.pins, m.ID)
-			a.pinnedBar.SetPins(m.Room, pins)
+			a.pinnedBar.AddPin(m.ID, a.messages.messages)
+		}
+	case "unpinned":
+		var m protocol.Unpinned
+		json.Unmarshal(msg.Raw, &m)
+		if m.Room == a.messages.room {
+			a.pinnedBar.RemovePin(m.ID)
 		}
 	case "error":
 		var m protocol.Error
@@ -1031,6 +1307,12 @@ func (a App) View() string {
 	}
 	if a.quitConfirm.IsVisible() {
 		return a.quitConfirm.View(a.width)
+	}
+	if a.contextMenu.IsVisible() {
+		return screen + "\n" + a.contextMenu.View()
+	}
+	if a.memberMenu.IsVisible() {
+		return screen + "\n" + a.memberMenu.View()
 	}
 
 	return screen

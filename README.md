@@ -20,7 +20,7 @@ Terminal client for [sshkey](https://github.com/brushtailmedia/sshkey) -- a priv
 │  sshkey-chat (terminal client)       │
 ├──────────────────────────────────────┤
 │  Bubble Tea         UI chrome        │
-│  libghostty (Zig)   terminal render  │
+│  rasterm            inline images    │
 ├──────────────────────────────────────┤
 │  Go core                             │
 │  x/crypto/ssh       SSH connection   │
@@ -39,14 +39,13 @@ Terminal client for [sshkey](https://github.com/brushtailmedia/sshkey) -- a priv
 ```
 
 - **Bubble Tea** -- sidebar, room list, input bar, navigation
-- **libghostty** (embedded, via cgo) -- terminal rendering, image protocols, scrollback
+- **rasterm** -- inline image rendering (kitty, iTerm2, sixel protocols)
 - **Go core** -- SSH connection, protocol handling, E2E crypto, local encrypted DB (go-sqlcipher, requires cgo)
 
 ## Requirements
 
 - Go 1.25 or later
 - C compiler (for go-sqlcipher / CGO -- gcc, clang, or Xcode command line tools)
-- Zig toolchain (for libghostty compilation)
 
 ## Recommended Terminals
 
@@ -71,6 +70,10 @@ Works over SSH -- the image protocol passes through to your local terminal. Use 
 ## Quick start
 
 ```bash
+# Build with FTS5 full-text search support (recommended)
+CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o sshkey-chat .
+
+# Or build without FTS5 (search falls back to LIKE queries)
 go build -o sshkey-chat .
 
 ./sshkey-chat

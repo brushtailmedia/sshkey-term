@@ -110,7 +110,9 @@ func (s *Store) DeleteMessage(id string) error {
 }
 
 // SearchMessages performs full-text search across all messages.
+// Tries FTS5 first, falls back to LIKE if FTS5 is not available.
 func (s *Store) SearchMessages(query string, limit int) ([]StoredMessage, error) {
+	// Try FTS5 first
 	rows, err := s.db.Query(`
 		SELECT m.id, m.sender, m.body, m.ts, m.room, m.conversation, m.epoch, m.reply_to, m.mentions
 		FROM messages_fts f
@@ -118,6 +120,20 @@ func (s *Store) SearchMessages(query string, limit int) ([]StoredMessage, error)
 		WHERE messages_fts MATCH ?
 		ORDER BY m.ts DESC LIMIT ?`,
 		query, limit,
+	)
+	if err == nil {
+		defer rows.Close()
+		return scanMessages(rows)
+	}
+
+	// FTS5 not available — fall back to LIKE
+	likeQuery := "%" + query + "%"
+	rows, err = s.db.Query(`
+		SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions
+		FROM messages
+		WHERE body LIKE ? OR sender LIKE ?
+		ORDER BY ts DESC LIMIT ?`,
+		likeQuery, likeQuery, limit,
 	)
 	if err != nil {
 		return nil, err

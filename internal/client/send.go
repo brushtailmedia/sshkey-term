@@ -211,6 +211,143 @@ func (c *Client) DecryptDMMessage(wrappedKeys map[string]string, payloadBase64 s
 	return &payload, nil
 }
 
+// SendRoomReaction sends an encrypted reaction to a room message.
+func (c *Client) SendRoomReaction(room, targetMsgID, emoji string) error {
+	c.mu.Lock()
+	epoch := c.currentEpoch[room]
+	key := c.epochKeys[room][epoch]
+	seqKey := "room:" + room
+	c.seqCounters[seqKey]++
+	seq := c.seqCounters[seqKey]
+	c.mu.Unlock()
+
+	if key == nil {
+		return fmt.Errorf("no epoch key for room %s", room)
+	}
+
+	// Build reaction payload
+	reactionPayload := protocol.DecryptedReaction{
+		Emoji:    emoji,
+		Target:   targetMsgID,
+		Seq:      seq,
+		DeviceID: c.cfg.DeviceID,
+	}
+	payloadJSON, _ := json.Marshal(reactionPayload)
+
+	// Encrypt
+	encrypted, err := crypto.Encrypt(key, payloadJSON)
+	if err != nil {
+		return err
+	}
+
+	// Sign
+	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
+	sig := crypto.SignRoom(c.privKey, payloadBytes, room, epoch)
+
+	return c.enc.Encode(protocol.React{
+		Type:      "react",
+		ID:        targetMsgID,
+		Room:      room,
+		Epoch:     epoch,
+		Payload:   encrypted,
+		Signature: base64.StdEncoding.EncodeToString(sig),
+	})
+}
+
+// SendDMReaction sends an encrypted reaction to a DM message.
+func (c *Client) SendDMReaction(conversation, targetMsgID, emoji string) error {
+	msgKey, err := crypto.GenerateKey()
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	seqKey := "conv:" + conversation
+	c.seqCounters[seqKey]++
+	seq := c.seqCounters[seqKey]
+	c.mu.Unlock()
+
+	reactionPayload := protocol.DecryptedReaction{
+		Emoji:    emoji,
+		Target:   targetMsgID,
+		Seq:      seq,
+		DeviceID: c.cfg.DeviceID,
+	}
+	payloadJSON, _ := json.Marshal(reactionPayload)
+
+	encrypted, err := crypto.Encrypt(msgKey, payloadJSON)
+	if err != nil {
+		return err
+	}
+
+	wrappedKeys, err := c.wrapKeyForConversation(conversation, msgKey)
+	if err != nil {
+		return err
+	}
+
+	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
+	sig := crypto.SignDM(c.privKey, payloadBytes, conversation, wrappedKeys)
+
+	return c.enc.Encode(protocol.React{
+		Type:         "react",
+		ID:           targetMsgID,
+		Conversation: conversation,
+		WrappedKeys:  wrappedKeys,
+		Payload:      encrypted,
+		Signature:    base64.StdEncoding.EncodeToString(sig),
+	})
+}
+
+// DecryptRoomReaction decrypts a reaction payload from a room.
+func (c *Client) DecryptRoomReaction(room string, epoch int64, payloadBase64 string) (*protocol.DecryptedReaction, error) {
+	c.mu.RLock()
+	key := c.epochKeys[room][epoch]
+	c.mu.RUnlock()
+
+	if key == nil {
+		return nil, fmt.Errorf("no epoch key for room %s epoch %d", room, epoch)
+	}
+
+	plaintext, err := crypto.Decrypt(key, payloadBase64)
+	if err != nil {
+		return nil, err
+	}
+
+	var reaction protocol.DecryptedReaction
+	if err := json.Unmarshal(plaintext, &reaction); err != nil {
+		return nil, err
+	}
+	return &reaction, nil
+}
+
+// DecryptDMReaction decrypts a reaction payload from a DM.
+func (c *Client) DecryptDMReaction(wrappedKeys map[string]string, payloadBase64 string) (*protocol.DecryptedReaction, error) {
+	c.mu.RLock()
+	username := c.username
+	c.mu.RUnlock()
+
+	wrappedKey, ok := wrappedKeys[username]
+	if !ok {
+		return nil, fmt.Errorf("no wrapped key for user %s", username)
+	}
+
+	msgKey, err := c.UnwrapKey(wrappedKey)
+	if err != nil {
+		return nil, err
+	}
+
+	plaintext, err := crypto.Decrypt(msgKey, payloadBase64)
+	if err != nil {
+		return nil, err
+	}
+
+	var reaction protocol.DecryptedReaction
+	if err := json.Unmarshal(plaintext, &reaction); err != nil {
+		return nil, err
+	}
+	return &reaction, nil
+}
+
 // SendTyping sends a typing indicator.
 func (c *Client) SendTyping(room, conversation string) error {
 	return c.enc.Encode(protocol.Typing{

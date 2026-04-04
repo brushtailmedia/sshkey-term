@@ -7,11 +7,17 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/term"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/tui"
 )
+
+func readPassword() ([]byte, error) {
+	fd := int(os.Stdin.Fd())
+	return term.ReadPassword(fd)
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -44,7 +50,32 @@ func run() error {
 		port := 2222
 		keyPath := os.Getenv("SSHKEY_KEY")
 		if keyPath == "" {
-			keyPath = os.ExpandEnv("$HOME/.ssh/id_ed25519")
+			// Scan for Ed25519 keys
+			homeDir, _ := os.UserHomeDir()
+			defaultKey := filepath.Join(homeDir, ".ssh", "id_ed25519")
+			if _, err := os.Stat(defaultKey); err == nil {
+				keyPath = defaultKey
+			} else {
+				// Look for any ed25519 key
+				sshDir := filepath.Join(homeDir, ".ssh")
+				entries, _ := os.ReadDir(sshDir)
+				for _, e := range entries {
+					if !e.IsDir() && filepath.Ext(e.Name()) == "" {
+						pubPath := filepath.Join(sshDir, e.Name()+".pub")
+						if data, err := os.ReadFile(pubPath); err == nil {
+							if len(data) > 11 && string(data[:11]) == "ssh-ed25519" {
+								keyPath = filepath.Join(sshDir, e.Name())
+								break
+							}
+						}
+					}
+				}
+				if keyPath == "" {
+					fmt.Fprintln(os.Stderr, "No Ed25519 SSH key found. Generate one with:")
+					fmt.Fprintln(os.Stderr, "  ssh-keygen -t ed25519")
+					return fmt.Errorf("no SSH key found")
+				}
+			}
 		}
 		if len(os.Args) > 1 {
 			host = os.Args[1]
@@ -80,8 +111,10 @@ func run() error {
 		DataDir:  dataDir,
 		Logger:   logger,
 		OnPassphrase: func() ([]byte, error) {
-			// TODO: TUI passphrase prompt
-			return nil, fmt.Errorf("passphrase-protected keys require interactive input (coming soon)")
+			fmt.Fprint(os.Stderr, "Enter passphrase for SSH key: ")
+			pass, err := readPassword()
+			fmt.Fprintln(os.Stderr)
+			return pass, err
 		},
 	}
 

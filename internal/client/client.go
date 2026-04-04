@@ -128,6 +128,15 @@ func (c *Client) Connect() error {
 	c.enc = protocol.NewEncoder(ch)
 	c.dec = protocol.NewDecoder(ch)
 
+	// Open Channel 2 (binary file transfer) — non-fatal if it fails
+	binCh, binReqs, err := conn.OpenChannel("session", nil)
+	if err != nil {
+		c.logger.Warn("failed to open binary channel", "error", err)
+	} else {
+		go ssh.DiscardRequests(binReqs)
+		c.binChan = binCh
+	}
+
 	// Perform handshake
 	if err := c.handshake(); err != nil {
 		ch.Close()
@@ -353,6 +362,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 				c.convMembers[ce.Conversation] = filtered
 			}
 			c.mu.Unlock()
+		}
+	case "upload_complete":
+		var uc protocol.UploadComplete
+		if err := json.Unmarshal(raw, &uc); err == nil {
+			HandleUploadComplete(uc.UploadID, uc.FileID)
 		}
 	case "deleted":
 		var d protocol.Deleted

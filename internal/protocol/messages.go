@@ -253,9 +253,10 @@ type Unpinned struct {
 }
 
 type Pins struct {
-	Type     string   `json:"type"`
-	Room     string   `json:"room"`
-	Messages []string `json:"messages"`
+	Type        string       `json:"type"`
+	Room        string       `json:"room"`
+	Messages    []string     `json:"messages"`
+	MessageData []RawMessage `json:"message_data,omitempty"` // full message envelopes
 }
 
 // Profiles

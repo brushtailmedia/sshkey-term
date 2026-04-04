@@ -61,8 +61,18 @@ type DisplayMessage struct {
 	ReplyTo      string
 	Mentions     []string
 	Reactions    map[string]int // emoji -> count
+	Attachments  []DisplayAttachment
 	IsSystem     bool
 	SystemText   string
+}
+
+type DisplayAttachment struct {
+	FileID    string
+	Name      string
+	Size      int64
+	Mime      string
+	IsImage   bool
+	LocalPath string // set after download
 }
 
 // MessagesModel manages the message stream.
@@ -198,23 +208,35 @@ func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
 	replyTo := ""
 	var mentions []string
 
+	var attachments []DisplayAttachment
+
 	if c != nil {
 		payload, err := c.DecryptRoomMessage(msg.Room, msg.Epoch, msg.Payload)
 		if err == nil {
 			body = payload.Body
 			replyTo = payload.ReplyTo
 			mentions = payload.Mentions
+			for _, a := range payload.Attachments {
+				attachments = append(attachments, DisplayAttachment{
+					FileID:  a.FileID,
+					Name:    a.Name,
+					Size:    a.Size,
+					Mime:    a.Mime,
+					IsImage: isImageMime(a.Mime),
+				})
+			}
 		}
 	}
 
 	m.messages = append(m.messages, DisplayMessage{
-		ID:       msg.ID,
-		From:     msg.From,
-		Body:     body,
-		TS:       msg.TS,
-		Room:     msg.Room,
-		ReplyTo:  replyTo,
-		Mentions: mentions,
+		ID:          msg.ID,
+		From:        msg.From,
+		Body:        body,
+		TS:          msg.TS,
+		Room:        msg.Room,
+		ReplyTo:     replyTo,
+		Mentions:    mentions,
+		Attachments: attachments,
 	})
 }
 
@@ -226,6 +248,7 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 	body := "(encrypted)"
 	replyTo := ""
 	var mentions []string
+	var attachments []DisplayAttachment
 
 	if c != nil {
 		payload, err := c.DecryptDMMessage(msg.WrappedKeys, msg.Payload)
@@ -233,6 +256,15 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 			body = payload.Body
 			replyTo = payload.ReplyTo
 			mentions = payload.Mentions
+			for _, a := range payload.Attachments {
+				attachments = append(attachments, DisplayAttachment{
+					FileID:  a.FileID,
+					Name:    a.Name,
+					Size:    a.Size,
+					Mime:    a.Mime,
+					IsImage: isImageMime(a.Mime),
+				})
+			}
 		}
 	}
 
@@ -244,7 +276,17 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 		Conversation: msg.Conversation,
 		ReplyTo:      replyTo,
 		Mentions:     mentions,
+		Attachments:  attachments,
 	})
+}
+
+// isImageMime returns true for image mime types.
+func isImageMime(mime string) bool {
+	switch mime {
+	case "image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp":
+		return true
+	}
+	return false
 }
 
 func (m *MessagesModel) AddSystemMessage(text string) {
@@ -265,20 +307,90 @@ func (m *MessagesModel) RemoveMessage(id string) {
 }
 
 func (m *MessagesModel) AddReaction(r protocol.Reaction) {
+	// Legacy — use AddReactionDecrypted instead
 	for i, msg := range m.messages {
 		if msg.ID == r.ID {
 			if m.messages[i].Reactions == nil {
 				m.messages[i].Reactions = make(map[string]int)
 			}
-			// TODO: decrypt reaction emoji
-			m.messages[i].Reactions["?"] ++ // placeholder until decryption
+			m.messages[i].Reactions["?"]++
 			return
 		}
 	}
 }
 
+// AddReactionDecrypted decrypts the reaction and adds it to the target message.
+func (m *MessagesModel) AddReactionDecrypted(r protocol.Reaction, c *client.Client) {
+	if c == nil {
+		m.AddReaction(r)
+		return
+	}
+
+	var emoji string
+
+	if r.Room != "" {
+		// Room reaction — decrypt with epoch key
+		dr, err := c.DecryptRoomReaction(r.Room, r.Epoch, r.Payload)
+		if err == nil {
+			emoji = dr.Emoji
+			// Verify target matches envelope
+			if dr.Target != r.ID {
+				return // server tampering — reaction re-targeted
+			}
+		}
+	} else if r.Conversation != "" {
+		// DM reaction — decrypt with per-message key
+		dr, err := c.DecryptDMReaction(r.WrappedKeys, r.Payload)
+		if err == nil {
+			emoji = dr.Emoji
+			if dr.Target != r.ID {
+				return
+			}
+		}
+	}
+
+	if emoji == "" {
+		emoji = "?"
+	}
+
+	for i, msg := range m.messages {
+		if msg.ID == r.ID {
+			if m.messages[i].Reactions == nil {
+				m.messages[i].Reactions = make(map[string]int)
+			}
+			m.messages[i].Reactions[emoji]++
+			// Track for removal
+			reactionTracker[r.ReactionID] = struct {
+				msgID string
+				emoji string
+			}{r.ID, emoji}
+			return
+		}
+	}
+}
+
+// reactionTracker maps reaction_id -> (message_id, emoji) for removal.
+var reactionTracker = make(map[string]struct {
+	msgID string
+	emoji string
+})
+
 func (m *MessagesModel) RemoveReaction(reactionID string) {
-	// TODO: track reaction IDs to remove specific reactions
+	tracked, ok := reactionTracker[reactionID]
+	if !ok {
+		return
+	}
+	delete(reactionTracker, reactionID)
+
+	for i, msg := range m.messages {
+		if msg.ID == tracked.msgID && m.messages[i].Reactions != nil {
+			m.messages[i].Reactions[tracked.emoji]--
+			if m.messages[i].Reactions[tracked.emoji] <= 0 {
+				delete(m.messages[i].Reactions, tracked.emoji)
+			}
+			return
+		}
+	}
 }
 
 func (m *MessagesModel) SetTyping(user, room, conversation string) {
@@ -355,6 +467,18 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 		if sel := m.SelectedMessage(); sel != nil {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "copy", Msg: *sel}
+			}
+		}
+	case "o": // open attachment
+		if sel := m.SelectedMessage(); sel != nil && len(sel.Attachments) > 0 {
+			return m, func() tea.Msg {
+				return MessageAction{Action: "open_attachment", Msg: *sel}
+			}
+		}
+	case "s": // save attachment
+		if sel := m.SelectedMessage(); sel != nil && len(sel.Attachments) > 0 {
+			return m, func() tea.Msg {
+				return MessageAction{Action: "save_attachment", Msg: *sel}
 			}
 		}
 	case "e": // react (emoji picker)
@@ -450,6 +574,32 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 				line += "\n   " + strings.Join(reactions, "  ")
 			}
 
+			// Attachments
+			for _, att := range msg.Attachments {
+				if att.IsImage && att.LocalPath != "" && CanRenderImages() {
+					// Inline image rendering
+					// Image takes up most of the panel — width minus padding, height up to 2/3 of visible area
+				imgMaxRows := visibleHeight * 2 / 3
+				if imgMaxRows < 10 {
+					imgMaxRows = 10
+				}
+				imgStr := RenderImageInline(att.LocalPath, width-8, imgMaxRows)
+					if imgStr != "" {
+						line += "\n" + imgStr
+						line += "\n " + fmt.Sprintf("%s (%s)", att.Name, formatSize(att.Size))
+					} else {
+						line += "\n " + fmt.Sprintf("🖼 %s (%s)", att.Name, formatSize(att.Size))
+					}
+				} else if att.IsImage {
+					line += "\n " + fmt.Sprintf("🖼 %s (%s)", att.Name, formatSize(att.Size))
+				} else {
+					line += "\n " + fmt.Sprintf("📎 %s (%s)", att.Name, formatSize(att.Size))
+				}
+				if i == m.cursor && focused {
+					line += timestampStyle.Render("  o=open  s=save")
+				}
+			}
+
 			if i == m.cursor && focused {
 				line = selectedMsgStyle.Width(width - 2).Render(line)
 			}
@@ -487,6 +637,17 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 	}
 
 	return style.Width(width).Height(height).Render(content)
+}
+
+func formatSize(b int64) string {
+	switch {
+	case b < 1024:
+		return fmt.Sprintf("%d B", b)
+	case b < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(b)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(b)/(1024*1024))
+	}
 }
 
 // highlightMentions replaces @username with styled version.
