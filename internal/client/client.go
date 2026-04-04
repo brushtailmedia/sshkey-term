@@ -420,6 +420,15 @@ func (c *Client) ConvMembers(convID string) []string {
 	return c.convMembers[convID]
 }
 
+// ForEachProfile calls fn for each known user profile.
+func (c *Client) ForEachProfile(fn func(p *protocol.Profile)) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, p := range c.profiles {
+		fn(p)
+	}
+}
+
 // Enc returns the protocol encoder for sending raw messages.
 func (c *Client) Enc() *protocol.Encoder {
 	return c.enc

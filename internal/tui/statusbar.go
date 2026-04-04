@@ -14,6 +14,9 @@ var (
 	statusConnected = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#22C55E")).Render("●")
 
+	statusReconnecting = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#F59E0B")).Render("●")
+
 	statusDisconnected = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#EF4444")).Render("●")
 
@@ -23,11 +26,13 @@ var (
 
 // StatusBarModel manages the bottom status bar.
 type StatusBarModel struct {
-	username  string
-	admin     bool
-	connected bool
-	errorMsg  string
-	errorTime time.Time
+	username     string
+	admin        bool
+	connected    bool
+	reconnecting bool
+	reconnAttempt int
+	errorMsg     string
+	errorTime    time.Time
 }
 
 func NewStatusBar() StatusBarModel {
@@ -41,6 +46,15 @@ func (s *StatusBarModel) SetUser(username string, admin bool) {
 
 func (s *StatusBarModel) SetConnected(connected bool) {
 	s.connected = connected
+	if connected {
+		s.reconnecting = false
+	}
+}
+
+func (s *StatusBarModel) SetReconnecting(attempt int, nextRetry time.Duration) {
+	s.reconnecting = true
+	s.reconnAttempt = attempt
+	s.connected = false
 }
 
 func (s *StatusBarModel) SetError(msg string) {
@@ -51,11 +65,17 @@ func (s *StatusBarModel) SetError(msg string) {
 func (s StatusBarModel) View(width int) string {
 	// Left side: encryption + connection status
 	dot := statusDisconnected
+	connLabel := ""
 	if s.connected {
 		dot = statusConnected
+	} else if s.reconnecting {
+		dot = statusReconnecting
+		connLabel = fmt.Sprintf(" (reconnecting #%d)", s.reconnAttempt)
+	} else {
+		connLabel = " (offline)"
 	}
 
-	left := statusBarStyle.Render(" E2E encrypted") + " " + dot
+	left := statusBarStyle.Render(" E2E encrypted") + " " + dot + statusBarStyle.Render(connLabel)
 
 	// Right side: user
 	right := ""

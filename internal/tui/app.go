@@ -4,6 +4,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -23,6 +24,13 @@ type ErrMsg struct{ Err error }
 // ConnectedMsg signals successful connection.
 type ConnectedMsg struct{}
 
+// ReconnectStatusMsg signals reconnection state changes.
+type ReconnectStatusMsg struct {
+	Status    string // "reconnecting", "connected", "failed"
+	Attempt   int
+	NextRetry time.Duration
+}
+
 // App is the top-level Bubble Tea model.
 type App struct {
 	client    *client.Client
@@ -36,7 +44,10 @@ type App struct {
 	input     InputModel
 	statusBar StatusBarModel
 	help      HelpModel
-	search    SearchModel
+	search      SearchModel
+	newConv     NewConvModel
+	emojiPicker EmojiPickerModel
+	infoPanel   InfoPanelModel
 
 	width  int
 	height int
@@ -61,7 +72,9 @@ func New(cfg client.Config) App {
 		input:     NewInput(),
 		statusBar: NewStatusBar(),
 		search:    NewSearch(),
-		focus:     FocusInput,
+		newConv:     NewNewConv(),
+		emojiPicker: NewEmojiPicker(),
+		focus:       FocusInput,
 	}
 }
 
@@ -143,6 +156,27 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
+		// Info panel intercepts keys when visible
+		if a.infoPanel.IsVisible() {
+			var cmd tea.Cmd
+			a.infoPanel, cmd = a.infoPanel.Update(msg)
+			return a, cmd
+		}
+
+		// Emoji picker intercepts keys when visible
+		if a.emojiPicker.IsVisible() {
+			var cmd tea.Cmd
+			a.emojiPicker, cmd = a.emojiPicker.Update(msg)
+			return a, cmd
+		}
+
+		// New conversation dialog intercepts keys when visible
+		if a.newConv.IsVisible() {
+			var cmd tea.Cmd
+			a.newConv, cmd = a.newConv.Update(msg, a.client)
+			return a, cmd
+		}
+
 		// Search screen intercepts keys when visible
 		if a.search.IsVisible() {
 			var cmd tea.Cmd
@@ -165,6 +199,33 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "ctrl+f":
 			a.search.Show()
+			return a, nil
+
+		case "ctrl+i":
+			if a.client != nil {
+				if a.messages.room != "" {
+					a.infoPanel.ShowRoom(a.messages.room, a.client, a.sidebar.online)
+				} else if a.messages.conversation != "" {
+					a.infoPanel.ShowConversation(a.messages.conversation, a.client, a.sidebar.online)
+				}
+			}
+			return a, nil
+
+		case "ctrl+n":
+			// Get all known user names from profiles
+			if a.client != nil {
+				var allMembers []string
+				for _, room := range a.client.Rooms() {
+					_ = room // profiles are global, not per-room
+				}
+				// Collect all known users except self
+				a.client.ForEachProfile(func(p *protocol.Profile) {
+					if p.User != a.client.Username() {
+						allMembers = append(allMembers, p.User)
+					}
+				})
+				a.newConv.Show(allMembers)
+			}
 			return a, nil
 
 		case "tab":
@@ -211,6 +272,28 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case MemberActionMsg:
+		a.infoPanel.Hide()
+		if msg.Action == "message" && a.client != nil {
+			// Create/open 1:1 DM
+			a.client.CreateDM([]string{msg.User}, "")
+		}
+		return a, nil
+
+	case EmojiSelectedMsg:
+		// Send reaction to server
+		// TODO: encrypt the reaction payload and send via React message
+		// For now, log it
+		if a.client != nil {
+			a.statusBar.SetError("Reacted with " + msg.Emoji)
+		}
+		return a, nil
+
+	case CreateConvMsg:
+		// DM created — the dm_created response will come via ServerMsg
+		// and the sidebar will update
+		return a, nil
+
 	case SearchJumpMsg:
 		// Jump to the message in context
 		a.search.Hide()
@@ -253,7 +336,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "copy":
 			// TODO: copy to clipboard via OSC 52 or atotto/clipboard
 		case "react":
-			// TODO: open emoji picker overlay
+			a.emojiPicker.Show(msg.Msg)
 		}
 		return a, nil
 
@@ -290,6 +373,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.client.Done()))
 			}
 		}
+
+	case ReconnectStatusMsg:
+		switch msg.Status {
+		case "reconnecting":
+			a.statusBar.SetReconnecting(msg.Attempt, msg.NextRetry)
+		case "connected":
+			a.statusBar.SetConnected(true)
+			a.connected = true
+		case "failed":
+			a.statusBar.SetError("Reconnection failed")
+			a.statusBar.SetConnected(false)
+		}
+		return a, nil
 
 	case ErrMsg:
 		a.err = msg.Err
@@ -441,11 +537,18 @@ func (a App) View() string {
 	body := joinHorizontal(sidebar, mainPanel)
 	screen := body + "\n" + status
 
-	// Help overlay
+	// Overlays
 	if a.help.IsVisible() {
-		helpView := a.help.View(a.width, a.height)
-		// Center the help overlay
-		return helpView
+		return a.help.View(a.width, a.height)
+	}
+	if a.newConv.IsVisible() {
+		return a.newConv.View(a.width)
+	}
+	if a.emojiPicker.IsVisible() {
+		return a.emojiPicker.View()
+	}
+	if a.infoPanel.IsVisible() {
+		return a.infoPanel.View(a.width)
 	}
 
 	return screen
