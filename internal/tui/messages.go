@@ -67,19 +67,22 @@ type DisplayMessage struct {
 
 // MessagesModel manages the message stream.
 type MessagesModel struct {
-	messages     []DisplayMessage
-	room         string
-	conversation string
-	cursor       int  // selected message index (-1 = none)
-	scrollOffset int
-	typingUsers  map[string]time.Time // user -> last typing time
-	currentUser  string               // for @mention highlighting
+	messages       []DisplayMessage
+	room           string
+	conversation   string
+	cursor         int  // selected message index (-1 = none)
+	scrollOffset   int
+	typingUsers    map[string]time.Time // user -> last typing time
+	currentUser    string               // for @mention highlighting
+	loadingHistory bool
+	hasMore        bool // server indicated more history available
 }
 
 func NewMessages() MessagesModel {
 	return MessagesModel{
 		cursor:      -1,
 		typingUsers: make(map[string]time.Time),
+		hasMore:     true,
 	}
 }
 
@@ -133,6 +136,36 @@ func loadRoom(c *client.Client, room string) ([]store.StoredMessage, error) {
 
 func loadConv(c *client.Client, conv string) ([]store.StoredMessage, error) {
 	return c.LoadConvMessages(conv, 200)
+}
+
+// requestHistory sends a history request for older messages.
+func (m *MessagesModel) requestHistory() tea.Cmd {
+	if !m.hasMore || m.loadingHistory || len(m.messages) == 0 {
+		return nil
+	}
+
+	firstMsg := m.messages[0]
+	room := m.room
+	conv := m.conversation
+	beforeID := firstMsg.ID
+
+	m.loadingHistory = true
+
+	return func() tea.Msg {
+		return HistoryRequestMsg{
+			Room:         room,
+			Conversation: conv,
+			BeforeID:     beforeID,
+		}
+	}
+}
+
+// PrependMessages adds older messages at the top (from history response).
+func (m *MessagesModel) PrependMessages(msgs []DisplayMessage, hasMore bool) {
+	m.messages = append(msgs, m.messages...)
+	m.cursor += len(msgs) // keep cursor on the same message
+	m.loadingHistory = false
+	m.hasMore = hasMore
 }
 
 func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
@@ -246,14 +279,35 @@ type MessageAction struct {
 	Msg    DisplayMessage
 }
 
+// HistoryRequestMsg is sent when the user scrolls to the top and needs older messages.
+type HistoryRequestMsg struct {
+	Room         string
+	Conversation string
+	BeforeID     string
+}
+
 func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
+			// At the top — request history
+			if m.cursor == 0 && len(m.messages) > 0 && !m.loadingHistory {
+				return m, m.requestHistory()
+			}
 		} else if m.cursor == -1 && len(m.messages) > 0 {
 			m.cursor = len(m.messages) - 1
 		}
+	case "pageup":
+		// Jump up a page and request history if near top
+		m.cursor -= 20
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		if m.cursor == 0 && len(m.messages) > 0 && !m.loadingHistory {
+			return m, m.requestHistory()
+		}
+		return m, nil
 	case "down", "j":
 		if m.cursor < len(m.messages)-1 {
 			m.cursor++

@@ -56,11 +56,12 @@ type Client struct {
 	rooms       []string
 	convs       []string
 	capabilities []string
-	profiles    map[string]*protocol.Profile
-	epochKeys   map[string]map[int64][]byte // room -> epoch -> unwrapped key
-	currentEpoch map[string]int64           // room -> current epoch number
-	seqCounters  map[string]int64           // "room:x" or "conv:x" -> next seq
-	privKey     ed25519.PrivateKey
+	profiles     map[string]*protocol.Profile
+	convMembers  map[string][]string         // conversation ID -> member usernames
+	epochKeys    map[string]map[int64][]byte // room -> epoch -> unwrapped key
+	currentEpoch map[string]int64            // room -> current epoch number
+	seqCounters  map[string]int64            // "room:x" or "conv:x" -> next seq
+	privKey      ed25519.PrivateKey
 	signer      ssh.Signer
 	lastSynced  string
 
@@ -76,6 +77,7 @@ func New(cfg Config) *Client {
 		cfg:          cfg,
 		logger:       cfg.Logger,
 		profiles:     make(map[string]*protocol.Profile),
+		convMembers:  make(map[string][]string),
 		epochKeys:    make(map[string]map[int64][]byte),
 		currentEpoch: make(map[string]int64),
 		seqCounters:  make(map[string]int64),
@@ -320,6 +322,42 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		c.storeRoomMessage(raw)
 	case "dm":
 		c.storeDMMessage(raw)
+	case "dm_created":
+		var dm protocol.DMCreated
+		if err := json.Unmarshal(raw, &dm); err == nil {
+			c.mu.Lock()
+			c.convMembers[dm.Conversation] = dm.Members
+			c.mu.Unlock()
+		}
+	case "conversation_list":
+		var cl protocol.ConversationList
+		if err := json.Unmarshal(raw, &cl); err == nil {
+			c.mu.Lock()
+			for _, conv := range cl.Conversations {
+				c.convMembers[conv.ID] = conv.Members
+			}
+			c.mu.Unlock()
+		}
+	case "conversation_event":
+		var ce protocol.ConversationEvent
+		if err := json.Unmarshal(raw, &ce); err == nil && ce.Event == "leave" {
+			c.mu.Lock()
+			if members, ok := c.convMembers[ce.Conversation]; ok {
+				filtered := members[:0]
+				for _, m := range members {
+					if m != ce.User {
+						filtered = append(filtered, m)
+					}
+				}
+				c.convMembers[ce.Conversation] = filtered
+			}
+			c.mu.Unlock()
+		}
+	case "deleted":
+		var d protocol.Deleted
+		if err := json.Unmarshal(raw, &d); err == nil && c.store != nil {
+			c.store.DeleteMessage(d.ID)
+		}
 	case "sync_batch":
 		c.handleSyncBatchKeys(raw)
 		return // sync_batch messages are forwarded from handleSyncBatchKeys
@@ -373,6 +411,13 @@ func (c *Client) Profile(user string) *protocol.Profile {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.profiles[user]
+}
+
+// ConvMembers returns the member list for a conversation.
+func (c *Client) ConvMembers(convID string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.convMembers[convID]
 }
 
 // Enc returns the protocol encoder for sending raw messages.

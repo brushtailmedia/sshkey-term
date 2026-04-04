@@ -111,23 +111,45 @@ func (c *Client) SendDMMessage(conversation, body string, replyTo string, mentio
 
 // wrapKeyForConversation wraps a symmetric key for all members of a conversation.
 func (c *Client) wrapKeyForConversation(conversation string, key []byte) (map[string]string, error) {
-	// TODO: get member list from local conversation state
-	// For now, look up profiles for all known members
 	c.mu.RLock()
-	defer c.mu.RUnlock()
+	members := c.convMembers[conversation]
+	c.mu.RUnlock()
+
+	if len(members) == 0 {
+		return nil, fmt.Errorf("no members for conversation %s", conversation)
+	}
 
 	wrappedKeys := make(map[string]string)
 
-	// Wrap for self (multi-device)
-	selfPub := c.privKey.Public().(ed25519.PublicKey)
-	wrapped, err := crypto.WrapKey(key, selfPub)
-	if err != nil {
-		return nil, fmt.Errorf("wrap for self: %w", err)
-	}
-	wrappedKeys[c.username] = wrapped
+	for _, member := range members {
+		var pubKey ed25519.PublicKey
 
-	// TODO: wrap for other members using their pubkeys from profiles
-	// This requires knowing the conversation member list
+		if member == c.Username() {
+			// Self — use our own public key
+			pubKey = c.privKey.Public().(ed25519.PublicKey)
+		} else {
+			// Other member — get pubkey from profile
+			c.mu.RLock()
+			profile := c.profiles[member]
+			c.mu.RUnlock()
+
+			if profile == nil {
+				return nil, fmt.Errorf("no profile for member %s", member)
+			}
+
+			var err error
+			pubKey, err = crypto.ParseSSHPubKey(profile.PubKey)
+			if err != nil {
+				return nil, fmt.Errorf("parse pubkey for %s: %w", member, err)
+			}
+		}
+
+		wrapped, err := crypto.WrapKey(key, pubKey)
+		if err != nil {
+			return nil, fmt.Errorf("wrap for %s: %w", member, err)
+		}
+		wrappedKeys[member] = wrapped
+	}
 
 	return wrappedKeys, nil
 }

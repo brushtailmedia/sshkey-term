@@ -2,6 +2,7 @@ package tui
 
 import (
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,9 +25,12 @@ var (
 
 // InputModel manages the text input bar.
 type InputModel struct {
-	textInput textinput.Model
-	replyTo   string // message ID being replied to
-	replyText string // preview of the message being replied to
+	textInput      textinput.Model
+	replyTo        string           // message ID being replied to
+	replyText      string           // preview of the message being replied to
+	lastTypingSent time.Time        // throttle typing indicators
+	completion     *CompletionModel // active completion popup
+	members        []string         // current room/conv members for @completion
 }
 
 func NewInput() InputModel {
@@ -46,7 +50,43 @@ func (i InputModel) Init() tea.Cmd {
 }
 
 func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, conversation string) (InputModel, tea.Cmd) {
+	// Handle completion popup if active
+	if i.completion != nil && i.completion.visible {
+		switch msg.String() {
+		case "tab", "enter":
+			// Accept completion
+			sel := i.completion.Selected()
+			text := i.textInput.Value()
+			// Replace the prefix with the completion
+			pos := strings.LastIndex(text, i.completion.prefix)
+			if pos >= 0 {
+				newText := text[:pos] + sel.Text
+				i.textInput.SetValue(newText)
+				i.textInput.SetCursor(len(newText))
+			}
+			i.completion = nil
+			return i, nil
+		case "up":
+			i.completion.Prev()
+			return i, nil
+		case "down":
+			i.completion.Next()
+			return i, nil
+		case "esc":
+			i.completion = nil
+			return i, nil
+		}
+		// Any other key dismisses completion and falls through
+		i.completion = nil
+	}
+
 	switch msg.String() {
+	case "tab":
+		// Trigger completion
+		text := i.textInput.Value()
+		pos := i.textInput.Position()
+		i.completion = Complete(text, pos, i.members)
+		return i, nil
 	case "enter":
 		text := strings.TrimSpace(i.textInput.Value())
 		if text == "" {
@@ -73,6 +113,15 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, conversation 
 		i.textInput.Reset()
 		i.clearReply()
 		return i, nil
+	}
+
+	// Send typing indicator (throttled to 1 per second)
+	if c != nil && time.Since(i.lastTypingSent) > time.Second {
+		text := i.textInput.Value()
+		if len(text) > 0 && !strings.HasPrefix(text, "/") {
+			c.SendTyping(room, conversation)
+			i.lastTypingSent = time.Now()
+		}
 	}
 
 	var cmd tea.Cmd
@@ -115,8 +164,19 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, conversa
 	}
 }
 
+// SetMembers updates the member list for @completion.
+func (i *InputModel) SetMembers(members []string) {
+	i.members = members
+}
+
 func (i InputModel) View(width int, focused bool) string {
 	var b strings.Builder
+
+	// Completion popup (above input)
+	if i.completion != nil && i.completion.visible {
+		b.WriteString(i.completion.View(width))
+		b.WriteString("\n")
+	}
 
 	if i.replyTo != "" {
 		preview := i.replyText

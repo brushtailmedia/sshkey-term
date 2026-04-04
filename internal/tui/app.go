@@ -35,6 +35,8 @@ type App struct {
 	messages  MessagesModel
 	input     InputModel
 	statusBar StatusBarModel
+	help      HelpModel
+	search    SearchModel
 
 	width  int
 	height int
@@ -53,12 +55,13 @@ const (
 // New creates the app model.
 func New(cfg client.Config) App {
 	return App{
-		cfg:     cfg,
-		sidebar: NewSidebar(),
-		messages: NewMessages(),
-		input:   NewInput(),
+		cfg:       cfg,
+		sidebar:   NewSidebar(),
+		messages:  NewMessages(),
+		input:     NewInput(),
 		statusBar: NewStatusBar(),
-		focus:   FocusInput,
+		search:    NewSearch(),
+		focus:     FocusInput,
 	}
 }
 
@@ -132,12 +135,37 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Help screen intercepts all keys when visible
+		if a.help.IsVisible() {
+			if msg.String() == "esc" || msg.String() == "?" {
+				a.help.Hide()
+			}
+			return a, nil
+		}
+
+		// Search screen intercepts keys when visible
+		if a.search.IsVisible() {
+			var cmd tea.Cmd
+			a.search, cmd = a.search.Update(msg, a.client)
+			return a, cmd
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "ctrl+q":
 			if a.client != nil {
 				a.client.Close()
 			}
 			return a, tea.Quit
+
+		case "?":
+			if a.focus != FocusInput {
+				a.help.Toggle()
+				return a, nil
+			}
+
+		case "ctrl+f":
+			a.search.Show()
+			return a, nil
 
 		case "tab":
 			// Cycle focus: input -> sidebar -> messages -> input
@@ -182,6 +210,24 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		}
+
+	case SearchJumpMsg:
+		// Jump to the message in context
+		a.search.Hide()
+		if msg.Room != "" {
+			a.messages.SetContext(msg.Room, "")
+		} else {
+			a.messages.SetContext("", msg.Conversation)
+		}
+		a.messages.LoadFromDB(a.client)
+		// TODO: scroll to the specific message ID
+		return a, nil
+
+	case HistoryRequestMsg:
+		if a.client != nil {
+			a.client.RequestHistory(msg.Room, msg.Conversation, msg.BeforeID, 100)
+		}
+		return a, nil
 
 	case MessageAction:
 		switch msg.Action {
@@ -260,10 +306,30 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		var m protocol.Message
 		json.Unmarshal(msg.Raw, &m)
 		a.messages.AddRoomMessage(m, a.client)
+		// Desktop notification for messages not from self
+		if a.client != nil && m.From != a.client.Username() {
+			payload, err := a.client.DecryptRoomMessage(m.Room, m.Epoch, m.Payload)
+			body := "(encrypted)"
+			if err == nil {
+				body = payload.Body
+			}
+			SendDesktopNotification(
+				fmt.Sprintf("%s in #%s", m.From, m.Room),
+				body,
+			)
+		}
 	case "dm":
 		var m protocol.DM
 		json.Unmarshal(msg.Raw, &m)
 		a.messages.AddDMMessage(m, a.client)
+		if a.client != nil && m.From != a.client.Username() {
+			payload, err := a.client.DecryptDMMessage(m.WrappedKeys, m.Payload)
+			body := "(encrypted)"
+			if err == nil {
+				body = payload.Body
+			}
+			SendDesktopNotification(m.From, body)
+		}
 	case "typing":
 		var m protocol.Typing
 		json.Unmarshal(msg.Raw, &m)
@@ -359,15 +425,30 @@ func (a App) View() string {
 
 	// Render panels
 	sidebar := a.sidebar.View(sidebarWidth, a.height-statusBarHeight-1, a.focus == FocusSidebar)
-	messages := a.messages.View(mainWidth, mainHeight, a.focus == FocusMessages)
-	input := a.input.View(mainWidth, a.focus == FocusInput)
+
+	var mainPanel string
+	if a.search.IsVisible() {
+		searchView := a.search.View(mainWidth, mainHeight+inputHeight)
+		mainPanel = searchView
+	} else {
+		messages := a.messages.View(mainWidth, mainHeight, a.focus == FocusMessages)
+		input := a.input.View(mainWidth, a.focus == FocusInput)
+		mainPanel = messages + "\n" + input
+	}
+
 	status := a.statusBar.View(a.width)
 
-	// Compose layout
-	mainPanel := messages + "\n" + input
 	body := joinHorizontal(sidebar, mainPanel)
+	screen := body + "\n" + status
 
-	return body + "\n" + status
+	// Help overlay
+	if a.help.IsVisible() {
+		helpView := a.help.View(a.width, a.height)
+		// Center the help overlay
+		return helpView
+	}
+
+	return screen
 }
 
 // joinHorizontal places two strings side by side.
