@@ -85,7 +85,12 @@ func run() error {
 		},
 	}
 
-	app := tui.New(clientCfg)
+	serverIdx := 0
+	if len(cfg.Servers) > 1 {
+		// TODO: server selection on startup
+	}
+
+	app := tui.New(clientCfg, cfg, configDir, serverIdx)
 
 	p := tea.NewProgram(app,
 		tea.WithAltScreen(),

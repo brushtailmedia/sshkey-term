@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
@@ -48,6 +49,16 @@ type App struct {
 	newConv     NewConvModel
 	emojiPicker EmojiPickerModel
 	infoPanel   InfoPanelModel
+	settings    SettingsModel
+	addServer   AddServerModel
+	verify      VerifyModel
+	keyWarning  KeyWarningModel
+	quitConfirm QuitConfirmModel
+
+	// Config state
+	appConfig   *config.Config
+	configDir   string
+	serverIdx   int // index of the active server in config
 
 	width  int
 	height int
@@ -64,16 +75,21 @@ const (
 )
 
 // New creates the app model.
-func New(cfg client.Config) App {
+func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx int) App {
 	return App{
-		cfg:       cfg,
-		sidebar:   NewSidebar(),
-		messages:  NewMessages(),
-		input:     NewInput(),
-		statusBar: NewStatusBar(),
-		search:    NewSearch(),
+		cfg:         cfg,
+		sidebar:     NewSidebar(),
+		messages:    NewMessages(),
+		input:       NewInput(),
+		statusBar:   NewStatusBar(),
+		search:      NewSearch(),
 		newConv:     NewNewConv(),
 		emojiPicker: NewEmojiPicker(),
+		settings:    NewSettings(),
+		addServer:   NewAddServer(),
+		appConfig:   appCfg,
+		configDir:   configDir,
+		serverIdx:   serverIdx,
 		focus:       FocusInput,
 	}
 }
@@ -148,12 +164,52 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Quit confirmation intercepts all keys
+		if a.quitConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.quitConfirm, cmd = a.quitConfirm.Update(msg)
+			if cmd != nil {
+				if a.client != nil {
+					a.client.Close()
+				}
+			}
+			return a, cmd
+		}
+
+		// Key warning intercepts all keys
+		if a.keyWarning.IsVisible() {
+			var cmd tea.Cmd
+			a.keyWarning, cmd = a.keyWarning.Update(msg)
+			return a, cmd
+		}
+
+		// Verify dialog intercepts all keys
+		if a.verify.IsVisible() {
+			var cmd tea.Cmd
+			a.verify, cmd = a.verify.Update(msg)
+			return a, cmd
+		}
+
 		// Help screen intercepts all keys when visible
 		if a.help.IsVisible() {
 			if msg.String() == "esc" || msg.String() == "?" {
 				a.help.Hide()
 			}
 			return a, nil
+		}
+
+		// Settings intercepts keys when visible
+		if a.settings.IsVisible() {
+			var cmd tea.Cmd
+			a.settings, cmd = a.settings.Update(msg)
+			return a, cmd
+		}
+
+		// Add server dialog intercepts keys when visible
+		if a.addServer.IsVisible() {
+			var cmd tea.Cmd
+			a.addServer, cmd = a.addServer.Update(msg)
+			return a, cmd
 		}
 
 		// Info panel intercepts keys when visible
@@ -185,11 +241,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case "ctrl+c", "ctrl+q":
+		case "ctrl+c":
 			if a.client != nil {
 				a.client.Close()
 			}
 			return a, tea.Quit
+
+		case "ctrl+q":
+			serverName := "server"
+			if a.appConfig != nil && a.serverIdx < len(a.appConfig.Servers) {
+				serverName = a.appConfig.Servers[a.serverIdx].Name
+			}
+			a.quitConfirm.Show(serverName)
+			return a, nil
 
 		case "?":
 			if a.focus != FocusInput {
@@ -199,6 +263,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "ctrl+f":
 			a.search.Show()
+			return a, nil
+
+		case "ctrl+,":
+			username := ""
+			if a.client != nil {
+				username = a.client.Username()
+			}
+			a.settings.Show(a.appConfig, a.configDir, username, a.serverIdx)
 			return a, nil
 
 		case "ctrl+i":
@@ -277,6 +349,62 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Action == "message" && a.client != nil {
 			// Create/open 1:1 DM
 			a.client.CreateDM([]string{msg.User}, "")
+		}
+		return a, nil
+
+	case SettingsActionMsg:
+		switch msg.Action {
+		case "clear_history":
+			if a.client != nil && a.appConfig != nil && msg.ServerIdx < len(a.appConfig.Servers) {
+				config.ClearServerData(a.configDir, a.appConfig.Servers[a.serverIdx])
+				a.statusBar.SetError("Local history cleared")
+			}
+		case "remove_server":
+			if a.appConfig != nil {
+				config.RemoveServer(a.configDir, a.appConfig, msg.ServerIdx)
+				a.statusBar.SetError("Server removed")
+				// If we removed the active server, close
+				if msg.ServerIdx == a.serverIdx {
+					if a.client != nil {
+						a.client.Close()
+					}
+					return a, tea.Quit
+				}
+			}
+		case "add_server":
+			a.settings.Hide()
+			a.addServer.Show()
+		}
+		return a, nil
+
+	case VerifyActionMsg:
+		if a.client != nil && a.client.Store() != nil {
+			a.client.Store().MarkVerified(msg.User)
+			a.statusBar.SetError(msg.User + " marked as verified")
+		}
+		return a, nil
+
+	case KeyWarningAcceptMsg:
+		// Key was accepted — re-pin happened during StoreProfile
+		a.statusBar.SetError("New key accepted for " + msg.User)
+		return a, nil
+
+	case KeyWarningDisconnectMsg:
+		if a.client != nil {
+			a.client.Close()
+		}
+		return a, tea.Quit
+
+	case AddServerMsg:
+		if a.appConfig != nil {
+			srv := config.ServerConfig{
+				Name: msg.Name,
+				Host: msg.Host,
+				Port: msg.Port,
+				Key:  msg.Key,
+			}
+			config.AddServer(a.configDir, a.appConfig, srv)
+			a.statusBar.SetError("Server added: " + msg.Name)
 		}
 		return a, nil
 
@@ -549,6 +677,21 @@ func (a App) View() string {
 	}
 	if a.infoPanel.IsVisible() {
 		return a.infoPanel.View(a.width)
+	}
+	if a.settings.IsVisible() {
+		return a.settings.View(a.width, a.height)
+	}
+	if a.addServer.IsVisible() {
+		return a.addServer.View(a.width)
+	}
+	if a.verify.IsVisible() {
+		return a.verify.View(a.width)
+	}
+	if a.keyWarning.IsVisible() {
+		return a.keyWarning.View(a.width)
+	}
+	if a.quitConfirm.IsVisible() {
+		return a.quitConfirm.View(a.width)
 	}
 
 	return screen

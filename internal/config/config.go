@@ -87,6 +87,72 @@ func generateDeviceID() string {
 	return "dev_" + string(b)
 }
 
+// AddServer adds a server to the config. Saves to disk.
+func AddServer(dir string, cfg *Config, server ServerConfig) error {
+	// Check for duplicate
+	for _, s := range cfg.Servers {
+		if s.Host == server.Host && s.Port == server.Port {
+			return fmt.Errorf("server %s:%d already exists", server.Host, server.Port)
+		}
+	}
+	cfg.Servers = append(cfg.Servers, server)
+	return Save(dir, cfg)
+}
+
+// RemoveServer removes a server from the config by index. Saves to disk.
+// Also removes the server's local data directory.
+func RemoveServer(dir string, cfg *Config, index int) error {
+	if index < 0 || index >= len(cfg.Servers) {
+		return fmt.Errorf("invalid server index: %d", index)
+	}
+
+	server := cfg.Servers[index]
+
+	// Remove local data for this server
+	dataDir := filepath.Join(dir, server.Host)
+	os.RemoveAll(dataDir)
+
+	// Remove known_host
+	os.Remove(filepath.Join(dataDir, "known_host"))
+
+	// Remove from config
+	cfg.Servers = append(cfg.Servers[:index], cfg.Servers[index+1:]...)
+	return Save(dir, cfg)
+}
+
+// ServerDataDir returns the local data directory for a server.
+func ServerDataDir(configDir string, server ServerConfig) string {
+	return filepath.Join(configDir, server.Host)
+}
+
+// ServerDataSize returns the total size of a server's local data in bytes.
+func ServerDataSize(configDir string, server ServerConfig) (int64, error) {
+	dataDir := filepath.Join(configDir, server.Host)
+	var total int64
+	err := filepath.Walk(dataDir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip errors
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
+}
+
+// ClearServerData removes all local data for a server (messages, keys, etc.)
+// but keeps the server in the config.
+func ClearServerData(configDir string, server ServerConfig) error {
+	dataDir := filepath.Join(configDir, server.Host)
+	// Remove messages.db but keep known_host
+	os.Remove(filepath.Join(dataDir, "messages.db"))
+	os.Remove(filepath.Join(dataDir, "messages.db-wal"))
+	os.Remove(filepath.Join(dataDir, "messages.db-shm"))
+	os.RemoveAll(filepath.Join(dataDir, "files"))
+	return nil
+}
+
 // GenerateSSHKey generates a new Ed25519 SSH key pair and saves to disk.
 func GenerateSSHKey(path string) error {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)

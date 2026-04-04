@@ -148,6 +148,8 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, conversa
 	}
 
 	switch cmd {
+	case "/verify":
+		// Handled by app via slash command
 	case "/typing":
 		if c != nil {
 			c.SendTyping(room, conversation)
