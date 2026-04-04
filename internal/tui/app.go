@@ -54,6 +54,7 @@ type App struct {
 	verify      VerifyModel
 	keyWarning  KeyWarningModel
 	quitConfirm QuitConfirmModel
+	pinnedBar   PinnedBarModel
 
 	// Config state
 	appConfig   *config.Config
@@ -261,6 +262,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, nil
 			}
 
+		case "ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5", "ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9":
+			idx := int(msg.String()[len(msg.String())-1]-'0') - 1
+			if a.appConfig != nil && idx < len(a.appConfig.Servers) && idx != a.serverIdx {
+				a.statusBar.SetError(fmt.Sprintf("Switch to %s requires restart", a.appConfig.Servers[idx].Name))
+				// TODO: disconnect current, connect to new server
+			}
+			return a, nil
+
+		case "ctrl+p":
+			a.pinnedBar.Toggle()
+			return a, nil
+
 		case "ctrl+f":
 			a.search.Show()
 			return a, nil
@@ -341,6 +354,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.input, cmd = a.input.Update(msg, a.client, a.messages.room, a.messages.conversation)
 			if cmd != nil {
 				cmds = append(cmds, cmd)
+			}
+			// Check for pending slash commands
+			if sc := a.input.PendingCommand(); sc != nil {
+				a.handleSlashCommand(sc)
 			}
 		}
 
@@ -523,6 +540,29 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(cmds...)
 }
 
+// handleSlashCommand processes slash commands that need app-level handling.
+func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
+	switch sc.Command {
+	case "/verify":
+		if sc.Arg != "" && a.client != nil {
+			a.verify.Show(sc.Arg, a.client)
+		}
+	case "/search":
+		a.search.Show()
+	case "/settings":
+		username := ""
+		if a.client != nil {
+			username = a.client.Username()
+		}
+		a.settings.Show(a.appConfig, a.configDir, username, a.serverIdx)
+	case "/help":
+		a.help.Toggle()
+	case "/upload":
+		// TODO: file upload flow
+		a.statusBar.SetError("File upload not yet implemented")
+	}
+}
+
 // handleServerMessage processes incoming server messages for the UI.
 func (a *App) handleServerMessage(msg ServerMsg) {
 	switch msg.Type {
@@ -607,6 +647,20 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		for _, raw := range result.Messages {
 			histType, _ := protocol.TypeOf(raw)
 			a.handleServerMessage(ServerMsg{Type: histType, Raw: raw})
+		}
+	case "pins":
+		var m protocol.Pins
+		json.Unmarshal(msg.Raw, &m)
+		if m.Room == a.messages.room {
+			a.pinnedBar.SetPins(m.Room, m.Messages)
+		}
+	case "pinned":
+		var m protocol.Pinned
+		json.Unmarshal(msg.Raw, &m)
+		if m.Room == a.messages.room {
+			// Add to pinned bar
+			pins := append(a.pinnedBar.pins, m.ID)
+			a.pinnedBar.SetPins(m.Room, pins)
 		}
 	case "error":
 		var m protocol.Error

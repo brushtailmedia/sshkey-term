@@ -75,7 +75,8 @@ type MessagesModel struct {
 	typingUsers    map[string]time.Time // user -> last typing time
 	currentUser    string               // for @mention highlighting
 	loadingHistory bool
-	hasMore        bool // server indicated more history available
+	hasMore        bool   // server indicated more history available
+	unreadFromID   string // first unread message ID (for divider)
 }
 
 func NewMessages() MessagesModel {
@@ -92,6 +93,12 @@ func (m *MessagesModel) SetContext(room, conversation string) {
 	m.messages = nil
 	m.cursor = -1
 	m.scrollOffset = 0
+	m.unreadFromID = ""
+}
+
+// SetUnreadFrom sets the first unread message ID for the divider.
+func (m *MessagesModel) SetUnreadFrom(msgID string) {
+	m.unreadFromID = msgID
 }
 
 // LoadFromDB populates the message list from the local DB.
@@ -365,8 +372,16 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 		start = len(m.messages) - visibleHeight
 	}
 
+	unreadShown := false
 	for i := start; i < len(m.messages); i++ {
 		msg := m.messages[i]
+
+		// Unread divider
+		if !unreadShown && m.unreadFromID != "" && msg.ID == m.unreadFromID {
+			divider := systemMsgStyle.Render(" ── new messages ──────────────────────────")
+			b.WriteString(divider + "\n")
+			unreadShown = true
+		}
 
 		if msg.IsSystem {
 			line := systemMsgStyle.Render(" ── " + msg.SystemText + " ──")
@@ -376,7 +391,7 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 			header := usernameStyle.Render(msg.From) + "  " + timestampStyle.Render(ts)
 
 			// Highlight @mentions in the body
-			body := " " + highlightMentions(msg.Body, m.currentUser)
+			body := " " + highlightLinks(highlightMentions(msg.Body, m.currentUser))
 
 			// Check if this message mentions the current user
 			isMentioned := false

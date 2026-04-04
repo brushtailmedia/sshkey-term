@@ -44,6 +44,7 @@ type Client struct {
 	cfg     Config
 	conn    *ssh.Client
 	channel ssh.Channel
+	binChan ssh.Channel  // Channel 2 for file transfer
 	enc     *protocol.Encoder
 	dec     *protocol.Decoder
 	logger  *slog.Logger

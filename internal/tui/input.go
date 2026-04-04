@@ -31,6 +31,7 @@ type InputModel struct {
 	lastTypingSent time.Time        // throttle typing indicators
 	completion     *CompletionModel // active completion popup
 	members        []string         // current room/conv members for @completion
+	pendingCmd     *SlashCommandMsg // slash command needing app-level handling
 }
 
 func NewInput() InputModel {
@@ -139,6 +140,14 @@ func (i *InputModel) clearReply() {
 	i.replyText = ""
 }
 
+// SlashCommandMsg is sent to the app when the user types a slash command that needs app-level handling.
+type SlashCommandMsg struct {
+	Command string
+	Arg     string
+	Room    string
+	Conv    string
+}
+
 func (i *InputModel) handleCommand(text string, c *client.Client, room, conversation string) {
 	parts := strings.SplitN(text, " ", 2)
 	cmd := parts[0]
@@ -148,22 +157,40 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, conversa
 	}
 
 	switch cmd {
-	case "/verify":
-		// Handled by app via slash command
 	case "/typing":
 		if c != nil {
 			c.SendTyping(room, conversation)
 		}
 	case "/leave":
 		if c != nil && conversation != "" {
-			c.CreateDM(nil, "") // TODO: send leave_conversation
+			c.Enc().Encode(map[string]string{
+				"type": "leave_conversation", "conversation": conversation,
+			})
 		}
 	case "/rename":
 		if c != nil && conversation != "" && arg != "" {
-			// TODO: send rename_conversation
-			_ = arg
+			c.Enc().Encode(map[string]string{
+				"type": "rename_conversation", "conversation": conversation, "name": arg,
+			})
+		}
+	case "/mute":
+		// Handled via info panel toggle — just set a flag
+	case "/verify", "/search", "/settings", "/help":
+		// These need to be handled at the app level
+		// Store the command for the app to pick up
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Conv: conversation}
+	case "/upload":
+		if arg != "" {
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Conv: conversation}
 		}
 	}
+}
+
+// PendingCommand returns and clears a pending slash command that needs app-level handling.
+func (i *InputModel) PendingCommand() *SlashCommandMsg {
+	cmd := i.pendingCmd
+	i.pendingCmd = nil
+	return cmd
 }
 
 // SetMembers updates the member list for @completion.
