@@ -1,0 +1,372 @@
+// Package tui implements the Bubble Tea terminal UI.
+package tui
+
+import (
+	"encoding/json"
+	"fmt"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/brushtailmedia/sshkey-term/internal/client"
+	"github.com/brushtailmedia/sshkey-term/internal/protocol"
+)
+
+// ServerMsg wraps a protocol message received from the server.
+type ServerMsg struct {
+	Type string
+	Raw  json.RawMessage
+}
+
+// ErrMsg wraps a connection error.
+type ErrMsg struct{ Err error }
+
+// ConnectedMsg signals successful connection.
+type ConnectedMsg struct{}
+
+// App is the top-level Bubble Tea model.
+type App struct {
+	client    *client.Client
+	cfg       client.Config
+	connected bool
+	err       error
+
+	// UI state
+	sidebar   SidebarModel
+	messages  MessagesModel
+	input     InputModel
+	statusBar StatusBarModel
+
+	width  int
+	height int
+	focus  Focus
+}
+
+// Focus tracks which panel has keyboard focus.
+type Focus int
+
+const (
+	FocusInput Focus = iota
+	FocusSidebar
+	FocusMessages
+)
+
+// New creates the app model.
+func New(cfg client.Config) App {
+	return App{
+		cfg:     cfg,
+		sidebar: NewSidebar(),
+		messages: NewMessages(),
+		input:   NewInput(),
+		statusBar: NewStatusBar(),
+		focus:   FocusInput,
+	}
+}
+
+func (a App) Init() tea.Cmd {
+	return tea.Batch(
+		a.input.Init(),
+		a.connect(),
+	)
+}
+
+// connect starts the SSH connection in a goroutine.
+func (a App) connect() tea.Cmd {
+	return func() tea.Msg {
+		msgCh := make(chan ServerMsg, 100)
+		errCh := make(chan error, 1)
+
+		cfg := a.cfg
+		cfg.OnMessage = func(msgType string, raw json.RawMessage) {
+			msgCh <- ServerMsg{Type: msgType, Raw: raw}
+		}
+		cfg.OnError = func(err error) {
+			errCh <- err
+		}
+
+		c := client.New(cfg)
+		if err := c.Connect(); err != nil {
+			return ErrMsg{Err: err}
+		}
+
+		// Store the client reference via a message
+		go func() {
+			for {
+				select {
+				case msg := <-msgCh:
+					// Forward to tea program (set externally)
+					_ = msg
+				case err := <-errCh:
+					_ = err
+				case <-c.Done():
+					return
+				}
+			}
+		}()
+
+		return connectedWithClient{client: c, msgCh: msgCh, errCh: errCh}
+	}
+}
+
+type connectedWithClient struct {
+	client *client.Client
+	msgCh  chan ServerMsg
+	errCh  chan error
+}
+
+// waitForMsg returns a cmd that waits for the next server message.
+func waitForMsg(msgCh chan ServerMsg, errCh chan error, done <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case msg := <-msgCh:
+			return msg
+		case err := <-errCh:
+			return ErrMsg{Err: err}
+		case <-done:
+			return ErrMsg{Err: fmt.Errorf("disconnected")}
+		}
+	}
+}
+
+func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "ctrl+q":
+			if a.client != nil {
+				a.client.Close()
+			}
+			return a, tea.Quit
+
+		case "tab":
+			// Cycle focus: input -> sidebar -> messages -> input
+			switch a.focus {
+			case FocusInput:
+				a.focus = FocusSidebar
+			case FocusSidebar:
+				a.focus = FocusMessages
+			case FocusMessages:
+				a.focus = FocusInput
+			}
+			return a, nil
+
+		case "esc":
+			a.focus = FocusInput
+			return a, nil
+		}
+
+		// Route key to focused panel
+		switch a.focus {
+		case FocusSidebar:
+			var cmd tea.Cmd
+			a.sidebar, cmd = a.sidebar.Update(msg, a.client)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			// Check if sidebar selected a new room/conversation
+			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedConv() != a.messages.conversation {
+				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedConv())
+			}
+		case FocusMessages:
+			var cmd tea.Cmd
+			a.messages, cmd = a.messages.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		case FocusInput:
+			var cmd tea.Cmd
+			a.input, cmd = a.input.Update(msg, a.client, a.messages.room, a.messages.conversation)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+
+	case tea.WindowSizeMsg:
+		a.width = msg.Width
+		a.height = msg.Height
+
+	case connectedWithClient:
+		a.client = msg.client
+		a.connected = true
+
+		// Populate sidebar
+		a.sidebar.SetRooms(a.client.Rooms())
+		if len(a.client.Rooms()) > 0 {
+			a.messages.SetContext(a.client.Rooms()[0], "")
+		}
+
+		a.statusBar.SetUser(a.client.Username(), a.client.IsAdmin())
+		a.statusBar.SetConnected(true)
+
+		// Start listening for server messages
+		cmds = append(cmds, waitForMsg(msg.msgCh, msg.errCh, a.client.Done()))
+		// Store channels for future waits
+		a.sidebar.msgCh = msg.msgCh
+		a.sidebar.errCh = msg.errCh
+
+	case ServerMsg:
+		a.handleServerMessage(msg)
+		// Continue listening
+		if a.client != nil {
+			if a.sidebar.msgCh != nil {
+				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.client.Done()))
+			}
+		}
+
+	case ErrMsg:
+		a.err = msg.Err
+		a.statusBar.SetConnected(false)
+	}
+
+	return a, tea.Batch(cmds...)
+}
+
+// handleServerMessage processes incoming server messages for the UI.
+func (a *App) handleServerMessage(msg ServerMsg) {
+	switch msg.Type {
+	case "message":
+		var m protocol.Message
+		json.Unmarshal(msg.Raw, &m)
+		a.messages.AddRoomMessage(m)
+	case "dm":
+		var m protocol.DM
+		json.Unmarshal(msg.Raw, &m)
+		a.messages.AddDMMessage(m)
+	case "typing":
+		var m protocol.Typing
+		json.Unmarshal(msg.Raw, &m)
+		a.messages.SetTyping(m.User, m.Room, m.Conversation)
+	case "room_list":
+		var m protocol.RoomList
+		json.Unmarshal(msg.Raw, &m)
+		var names []string
+		for _, r := range m.Rooms {
+			names = append(names, r.Name)
+		}
+		a.sidebar.SetRooms(names)
+	case "conversation_list":
+		var m protocol.ConversationList
+		json.Unmarshal(msg.Raw, &m)
+		a.sidebar.SetConversations(m.Conversations)
+	case "presence":
+		var m protocol.Presence
+		json.Unmarshal(msg.Raw, &m)
+		a.sidebar.SetOnline(m.User, m.Status == "online")
+	case "unread":
+		var m protocol.Unread
+		json.Unmarshal(msg.Raw, &m)
+		if m.Room != "" {
+			a.sidebar.SetUnread(m.Room, m.Count)
+		} else if m.Conversation != "" {
+			a.sidebar.SetUnreadConv(m.Conversation, m.Count)
+		}
+	case "deleted":
+		var m protocol.Deleted
+		json.Unmarshal(msg.Raw, &m)
+		a.messages.RemoveMessage(m.ID)
+	case "reaction":
+		var m protocol.Reaction
+		json.Unmarshal(msg.Raw, &m)
+		a.messages.AddReaction(m)
+	case "reaction_removed":
+		var m protocol.ReactionRemoved
+		json.Unmarshal(msg.Raw, &m)
+		a.messages.RemoveReaction(m.ReactionID)
+	case "error":
+		var m protocol.Error
+		json.Unmarshal(msg.Raw, &m)
+		a.statusBar.SetError(m.Message)
+	case "server_shutdown":
+		var m protocol.ServerShutdown
+		json.Unmarshal(msg.Raw, &m)
+		a.statusBar.SetError(fmt.Sprintf("Server shutting down: %s", m.Message))
+		a.statusBar.SetConnected(false)
+	}
+}
+
+func (a App) View() string {
+	if a.width == 0 || a.height == 0 {
+		return "Loading..."
+	}
+
+	if a.err != nil && !a.connected {
+		return fmt.Sprintf("\n  Connection error: %v\n\n  Press Ctrl+C to quit.\n", a.err)
+	}
+
+	if !a.connected {
+		return "\n  Connecting...\n"
+	}
+
+	// Layout dimensions
+	sidebarWidth := 20
+	statusBarHeight := 1
+	inputHeight := 3
+	mainWidth := a.width - sidebarWidth - 3 // borders
+	mainHeight := a.height - statusBarHeight - inputHeight - 2
+
+	if mainWidth < 20 {
+		mainWidth = 20
+	}
+	if mainHeight < 5 {
+		mainHeight = 5
+	}
+
+	// Render panels
+	sidebar := a.sidebar.View(sidebarWidth, a.height-statusBarHeight-1, a.focus == FocusSidebar)
+	messages := a.messages.View(mainWidth, mainHeight, a.focus == FocusMessages)
+	input := a.input.View(mainWidth, a.focus == FocusInput)
+	status := a.statusBar.View(a.width)
+
+	// Compose layout
+	mainPanel := messages + "\n" + input
+	body := joinHorizontal(sidebar, mainPanel)
+
+	return body + "\n" + status
+}
+
+// joinHorizontal places two strings side by side.
+func joinHorizontal(left, right string) string {
+	leftLines := splitLines(left)
+	rightLines := splitLines(right)
+
+	maxLines := len(leftLines)
+	if len(rightLines) > maxLines {
+		maxLines = len(rightLines)
+	}
+
+	result := ""
+	for i := 0; i < maxLines; i++ {
+		l := ""
+		r := ""
+		if i < len(leftLines) {
+			l = leftLines[i]
+		}
+		if i < len(rightLines) {
+			r = rightLines[i]
+		}
+		if i > 0 {
+			result += "\n"
+		}
+		result += l + " " + r
+	}
+	return result
+}
+
+func splitLines(s string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			lines = append(lines, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	return lines
+}
