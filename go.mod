@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	filippo.io/edwards25519 v1.2.0
+	github.com/BourgeoisBear/rasterm v1.1.2
 	github.com/BurntSushi/toml v1.6.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -13,7 +14,6 @@ require (
 )
 
 require (
-	github.com/BourgeoisBear/rasterm v1.1.2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect

@@ -1,23 +1,18 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"golang.org/x/term"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/tui"
 )
-
-func readPassword() ([]byte, error) {
-	fd := int(os.Stdin.Fd())
-	return term.ReadPassword(fd)
-}
 
 func main() {
 	if err := run(); err != nil {
@@ -27,6 +22,13 @@ func main() {
 }
 
 func run() error {
+	// CLI flags for power users (bypass wizard)
+	hostFlag := flag.String("host", "", "server hostname (bypasses wizard)")
+	portFlag := flag.Int("port", 2222, "server port")
+	keyFlag := flag.String("key", "", "path to Ed25519 SSH key (bypasses wizard)")
+	nameFlag := flag.String("name", "", "server display name")
+	flag.Parse()
+
 	configDir := config.DefaultConfigDir()
 
 	// Load or create config
@@ -34,61 +36,53 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-
-	// Ensure device ID
 	config.EnsureDeviceID(cfg)
 
-	// Determine which server to connect to
 	var server config.ServerConfig
 
-	if len(cfg.Servers) > 0 {
-		// Use first server (TODO: server selection UI)
+	if *hostFlag != "" && *keyFlag != "" {
+		// CLI bypass — skip wizard entirely
+		name := *nameFlag
+		if name == "" {
+			name = *hostFlag
+		}
+		server = config.ServerConfig{
+			Name: name,
+			Host: *hostFlag,
+			Port: *portFlag,
+			Key:  *keyFlag,
+		}
+		// Save to config
+		if len(cfg.Servers) == 0 {
+			cfg.Servers = append(cfg.Servers, server)
+			config.Save(configDir, cfg)
+		}
+	} else if len(cfg.Servers) > 0 {
+		// Existing config — use first server
 		server = cfg.Servers[0]
 	} else {
-		// No servers configured — use CLI args or defaults
-		host := "localhost"
-		port := 2222
-		keyPath := os.Getenv("SSHKEY_KEY")
-		if keyPath == "" {
-			// Scan for Ed25519 keys
-			homeDir, _ := os.UserHomeDir()
-			defaultKey := filepath.Join(homeDir, ".ssh", "id_ed25519")
-			if _, err := os.Stat(defaultKey); err == nil {
-				keyPath = defaultKey
-			} else {
-				// Look for any ed25519 key
-				sshDir := filepath.Join(homeDir, ".ssh")
-				entries, _ := os.ReadDir(sshDir)
-				for _, e := range entries {
-					if !e.IsDir() && filepath.Ext(e.Name()) == "" {
-						pubPath := filepath.Join(sshDir, e.Name()+".pub")
-						if data, err := os.ReadFile(pubPath); err == nil {
-							if len(data) > 11 && string(data[:11]) == "ssh-ed25519" {
-								keyPath = filepath.Join(sshDir, e.Name())
-								break
-							}
-						}
-					}
-				}
-				if keyPath == "" {
-					fmt.Fprintln(os.Stderr, "No Ed25519 SSH key found. Generate one with:")
-					fmt.Fprintln(os.Stderr, "  ssh-keygen -t ed25519")
-					return fmt.Errorf("no SSH key found")
-				}
-			}
-		}
-		if len(os.Args) > 1 {
-			host = os.Args[1]
+		// No config, no CLI flags — run the wizard
+		wizard := tui.NewWizard()
+		p := tea.NewProgram(wizard, tea.WithAltScreen())
+		model, err := p.Run()
+		if err != nil {
+			return err
 		}
 
+		wiz, ok := model.(tui.WizardModel)
+		if !ok || !wiz.IsComplete() {
+			return fmt.Errorf("setup cancelled")
+		}
+
+		result := wiz.Result()
 		server = config.ServerConfig{
-			Name: host,
-			Host: host,
-			Port: port,
-			Key:  keyPath,
+			Name: result.ServerName,
+			Host: result.ServerHost,
+			Port: result.ServerPort,
+			Key:  result.KeyPath,
 		}
 
-		// Save for next time
+		// Save config
 		cfg.Servers = append(cfg.Servers, server)
 		config.Save(configDir, cfg)
 	}
@@ -110,26 +104,24 @@ func run() error {
 		DeviceID: cfg.Device.ID,
 		DataDir:  dataDir,
 		Logger:   logger,
-		OnPassphrase: func() ([]byte, error) {
-			fmt.Fprint(os.Stderr, "Enter passphrase for SSH key: ")
-			pass, err := readPassword()
-			fmt.Fprintln(os.Stderr)
-			return pass, err
-		},
+		// OnPassphrase is handled by the TUI passphrase dialog
 	}
 
 	serverIdx := 0
-	if len(cfg.Servers) > 1 {
-		// TODO: server selection on startup
+	for i, s := range cfg.Servers {
+		if s.Host == server.Host && s.Port == server.Port {
+			serverIdx = i
+			break
+		}
 	}
 
 	app := tui.New(clientCfg, cfg, configDir, serverIdx)
 
-	p := tea.NewProgram(app,
+	chatProgram := tea.NewProgram(app,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
 
-	_, err = p.Run()
+	_, err = chatProgram.Run()
 	return err
 }

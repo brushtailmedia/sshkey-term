@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,6 +27,9 @@ type ErrMsg struct{ Err error }
 
 // ConnectedMsg signals successful connection.
 type ConnectedMsg struct{}
+
+// passphraseNeededMsg signals that the SSH key needs a passphrase.
+type passphraseNeededMsg struct{}
 
 // ReconnectStatusMsg signals reconnection state changes.
 type ReconnectStatusMsg struct {
@@ -68,12 +72,15 @@ type App struct {
 	showHelpHint      bool
 	reconnectAttempt  int
 
-	width       int
-	height      int
-	focus       Focus
-	layout      Layout
-	contextMenu ContextMenuModel
-	memberMenu  MemberMenuModel
+	width          int
+	height         int
+	focus          Focus
+	layout         Layout
+	contextMenu    ContextMenuModel
+	memberMenu     MemberMenuModel
+	passphrase         PassphraseModel
+	passphraseCh       chan []byte
+	passphraseCache    map[string][]byte // keyPath -> passphrase
 }
 
 // Focus tracks which panel has keyboard focus.
@@ -98,9 +105,12 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		newConv:     NewNewConv(),
 		emojiPicker: NewEmojiPicker(),
 		memberPanel: NewMemberPanel(),
-		settings:    NewSettings(),
-		addServer:   NewAddServer(),
-		appConfig:   appCfg,
+		settings:     NewSettings(),
+		addServer:    NewAddServer(),
+		passphrase:      NewPassphrase(),
+		passphraseCh:    make(chan []byte, 1),
+		passphraseCache: make(map[string][]byte),
+		appConfig:    appCfg,
 		configDir:   configDir,
 		serverIdx:   serverIdx,
 		bell:         NewBellConfig(appCfg.Notifications),
@@ -130,9 +140,25 @@ func (a App) connect() tea.Cmd {
 		cfg.OnError = func(err error) {
 			errCh <- err
 		}
+		// Passphrase callback — return cached passphrase for this key if available,
+		// otherwise signal the TUI to show the dialog.
+		keyPath := cfg.KeyPath
+		cached := a.passphraseCache[keyPath]
+		passCh := a.passphraseCh
+		cfg.OnPassphrase = func() ([]byte, error) {
+			if len(cached) > 0 {
+				return cached, nil
+			}
+			return <-passCh, nil
+		}
 
 		c := client.New(cfg)
 		if err := c.Connect(); err != nil {
+			// Check if it's a passphrase error
+			errStr := err.Error()
+			if strings.Contains(errStr, "passphrase") {
+				return passphraseNeededMsg{}
+			}
 			return ErrMsg{Err: err}
 		}
 
@@ -186,6 +212,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.appConfig != nil {
 				config.MarkHelpShown(a.configDir, a.appConfig)
 			}
+		}
+
+		// Passphrase dialog intercepts all keys
+		if a.passphrase.IsVisible() {
+			var cmd tea.Cmd
+			a.passphrase, cmd = a.passphrase.Update(msg)
+			return a, cmd
 		}
 
 		// Member menu intercepts all keys
@@ -737,6 +770,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.client.Done()))
 			}
 		}
+
+	case passphraseNeededMsg:
+		a.passphrase.Show("")
+		return a, nil
+
+	case PassphraseResultMsg:
+		if msg.Cancelled {
+			return a, tea.Quit
+		}
+		// Cache passphrase by key path for reconnects and server switching
+		a.passphraseCache[a.cfg.KeyPath] = msg.Passphrase
+		a.passphraseCh <- msg.Passphrase
+		return a, a.connect()
 
 	case reconnectAttemptMsg:
 		// Try to reconnect
@@ -1313,6 +1359,9 @@ func (a App) View() string {
 	}
 	if a.memberMenu.IsVisible() {
 		return screen + "\n" + a.memberMenu.View()
+	}
+	if a.passphrase.IsVisible() {
+		return a.passphrase.View(a.width)
 	}
 
 	return screen
