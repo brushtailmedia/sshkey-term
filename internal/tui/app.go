@@ -68,6 +68,7 @@ type App struct {
 	width  int
 	height int
 	focus  Focus
+	layout Layout
 }
 
 // Focus tracks which panel has keyboard focus.
@@ -557,7 +558,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 		case "copy":
-			// TODO: copy to clipboard via OSC 52 or atotto/clipboard
+			CopyToClipboard(msg.Msg.Body)
+			a.statusBar.SetError("Copied to clipboard")
 		case "react":
 			a.emojiPicker.Show(msg.Msg)
 		}
@@ -566,6 +568,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
+
+	case tea.MouseMsg:
+		return a.handleMouse(msg)
 
 	case connectedWithClient:
 		a.client = msg.client
@@ -584,6 +589,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		a.statusBar.SetUser(a.client.Username(), a.client.IsAdmin())
 		a.statusBar.SetConnected(true)
+		a.updateTitle()
 
 		// Start listening for server messages
 		cmds = append(cmds, waitForMsg(msg.msgCh, msg.errCh, a.client.Done()))
@@ -619,6 +625,124 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return a, tea.Batch(cmds...)
+}
+
+// handleMouse processes mouse events — clicks and scroll wheel.
+func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Ignore mouse when overlays are visible
+	if a.help.IsVisible() || a.search.IsVisible() || a.newConv.IsVisible() ||
+		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.settings.IsVisible() ||
+		a.addServer.IsVisible() || a.verify.IsVisible() || a.keyWarning.IsVisible() ||
+		a.quitConfirm.IsVisible() {
+		return a, nil
+	}
+
+	x := msg.X
+	y := msg.Y
+
+	switch msg.Button {
+	case tea.MouseButtonLeft:
+		if msg.Action == tea.MouseActionRelease {
+			return a.handleMouseClick(x, y)
+		}
+
+	case tea.MouseButtonWheelUp:
+		panel := a.layout.HitTest(x, y)
+		if panel == "messages" {
+			// Scroll up in messages
+			if a.messages.cursor == -1 && len(a.messages.messages) > 0 {
+				a.messages.cursor = len(a.messages.messages) - 1
+			}
+			a.messages.cursor -= 3
+			if a.messages.cursor < 0 {
+				a.messages.cursor = 0
+				// At top — request history
+				if !a.messages.loadingHistory && len(a.messages.messages) > 0 {
+					return a, a.messages.requestHistory()
+				}
+			}
+		} else if panel == "sidebar" {
+			if a.sidebar.cursor > 0 {
+				a.sidebar.cursor--
+			}
+		}
+
+	case tea.MouseButtonWheelDown:
+		panel := a.layout.HitTest(x, y)
+		if panel == "messages" {
+			a.messages.cursor += 3
+			if a.messages.cursor >= len(a.messages.messages) {
+				a.messages.cursor = len(a.messages.messages) - 1
+			}
+		} else if panel == "sidebar" {
+			if a.sidebar.cursor < a.sidebar.totalItems()-1 {
+				a.sidebar.cursor++
+			}
+		}
+	}
+
+	return a, nil
+}
+
+// handleMouseClick processes a left click at the given coordinates.
+func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
+	panel := a.layout.HitTest(x, y)
+
+	switch panel {
+	case "sidebar":
+		a.focus = FocusSidebar
+		idx := a.layout.SidebarItemAt(y)
+		if idx >= 0 && idx < a.sidebar.totalItems() {
+			a.sidebar.cursor = idx
+			a.sidebar.updateSelection()
+			// Switch to selected room/conversation
+			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedConv() != a.messages.conversation {
+				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedConv())
+				a.messages.LoadFromDB(a.client)
+				if a.memberPanel.IsVisible() {
+					a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
+					a.input.SetMembers(a.memberPanel.MemberNames())
+				}
+				a.sendReadReceipt()
+			}
+		}
+
+	case "messages":
+		a.focus = FocusMessages
+		idx := a.layout.MessageItemAt(y)
+		if idx >= 0 && idx < len(a.messages.messages) {
+			a.messages.cursor = idx
+		}
+
+	case "members":
+		if a.memberPanel.IsVisible() {
+			a.focus = FocusMembers
+			a.memberPanel.SetFocused(true)
+			idx := a.layout.MemberItemAt(y)
+			if idx >= 0 && idx < len(a.memberPanel.members) {
+				a.memberPanel.cursor = idx
+			}
+		}
+
+	case "input":
+		a.focus = FocusInput
+		a.memberPanel.SetFocused(false)
+	}
+
+	return a, nil
+}
+
+// updateTitle updates the terminal title with the total unread count.
+func (a *App) updateTitle() {
+	total := 0
+	for _, count := range a.sidebar.unread {
+		total += count
+	}
+	serverName := ""
+	if a.appConfig != nil && a.serverIdx < len(a.appConfig.Servers) {
+		serverName = a.appConfig.Servers[a.serverIdx].Name
+	}
+	UpdateTitle(serverName, total)
 }
 
 // sendReadReceipt sends a read receipt for the latest message in the active room/conversation.
@@ -740,6 +864,7 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		} else if m.Conversation != "" {
 			a.sidebar.SetUnreadConv(m.Conversation, m.Count)
 		}
+		a.updateTitle()
 	case "deleted":
 		var m protocol.Deleted
 		json.Unmarshal(msg.Raw, &m)
@@ -818,6 +943,27 @@ func (a App) View() string {
 		mainWidth -= 1 // extra gap
 	}
 	mainHeight := a.height - statusBarHeight - inputHeight - 2
+
+	// Store layout for mouse hit testing
+	a.layout = Layout{
+		SidebarX0: 0, SidebarX1: sidebarWidth + 2,
+		SidebarY0: 0, SidebarY1: a.height - statusBarHeight - 1,
+		SidebarWidth: sidebarWidth,
+
+		MessagesX0: sidebarWidth + 2, MessagesX1: sidebarWidth + 2 + mainWidth + 2,
+		MessagesY0: 0, MessagesY1: mainHeight + 2,
+		MessagesWidth: mainWidth,
+
+		InputX0: sidebarWidth + 2, InputX1: sidebarWidth + 2 + mainWidth + 2,
+		InputY0: mainHeight + 2, InputY1: a.height - statusBarHeight - 1,
+
+		MemberX0: sidebarWidth + 2 + mainWidth + 3, MemberX1: a.width,
+		MemberY0: 0, MemberY1: a.height - statusBarHeight - 1,
+		MemberWidth: memberWidth,
+
+		StatusY: a.height - 1,
+		Height:  a.height,
+	}
 
 	if mainWidth < 20 {
 		mainWidth = 20

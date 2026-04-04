@@ -387,6 +387,8 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 	}
 
 	unreadShown := false
+	prevSender := ""
+	prevTS := int64(0)
 	for i := start; i < len(m.messages); i++ {
 		msg := m.messages[i]
 
@@ -400,9 +402,16 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 		if msg.IsSystem {
 			line := systemMsgStyle.Render(" ── " + msg.SystemText + " ──")
 			b.WriteString(line)
+			prevSender = ""
+			prevTS = 0
 		} else {
-			ts := time.Unix(msg.TS, 0).Format("3:04 PM")
-			header := usernameStyle.Render(msg.From) + "  " + timestampStyle.Render(ts)
+			// Group consecutive messages from the same sender within 5 minutes
+			showHeader := true
+			if msg.From == prevSender && !msg.IsSystem && msg.TS-prevTS < 300 {
+				showHeader = false
+			}
+			prevSender = msg.From
+			prevTS = msg.TS
 
 			// Highlight @mentions in the body
 			body := " " + highlightLinks(highlightMentions(msg.Body, m.currentUser))
@@ -416,7 +425,15 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 				}
 			}
 
-			line := " " + header + "\n" + body
+			var line string
+			if showHeader {
+				ts := time.Unix(msg.TS, 0).Format("3:04 PM")
+				header := usernameStyle.Render(msg.From) + "  " + timestampStyle.Render(ts)
+				line = " " + header + "\n" + body
+			} else {
+				line = body
+			}
+
 			if isMentioned {
 				line = mentionBorder.Render(line)
 			}
