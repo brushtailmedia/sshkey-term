@@ -4,7 +4,7 @@ Terminal client for [sshkey](https://github.com/brushtailmedia/sshkey) -- a priv
 
 ## Features
 
-- End-to-end encrypted rooms and DMs (AES-256-GCM, X25519 key wrapping)
+- End-to-end encrypted rooms and DMs (AES-256-GCM, X25519 key wrapping) 
 - SSH key is your identity -- no accounts, no passwords
 - Rooms with epoch-based key rotation, DMs with per-message keys
 - File sharing, reactions, typing indicators, read receipts, presence
