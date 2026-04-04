@@ -27,7 +27,7 @@ Terminal client for [sshkey](https://github.com/brushtailmedia/sshkey) -- a priv
 │  AES-256-GCM        encryption       │
 │  X25519 + HKDF      key wrapping     │
 │  Ed25519            signatures       │
-│  SQLCipher          local DB         │
+│  go-sqlcipher       encrypted DB     │
 └──────────────────────────────────────┘
           │
           │ SSH (:2222)
@@ -40,11 +40,12 @@ Terminal client for [sshkey](https://github.com/brushtailmedia/sshkey) -- a priv
 
 - **Bubble Tea** -- sidebar, room list, input bar, navigation
 - **libghostty** (embedded, via cgo) -- terminal rendering, image protocols, scrollback
-- **Go core** -- SSH connection, protocol handling, E2E crypto, local encrypted DB
+- **Go core** -- SSH connection, protocol handling, E2E crypto, local encrypted DB (go-sqlcipher, requires cgo)
 
 ## Requirements
 
 - Go 1.25 or later
+- C compiler (for go-sqlcipher / CGO -- gcc, clang, or Xcode command line tools)
 - Zig toolchain (for libghostty compilation)
 
 ## Recommended Terminals
