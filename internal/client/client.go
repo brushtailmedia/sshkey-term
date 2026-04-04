@@ -32,8 +32,9 @@ type Config struct {
 	DataDir  string // per-server data directory (e.g., ~/.sshkey-chat/chat.example.com/)
 
 	// Callbacks
-	OnMessage func(msgType string, raw json.RawMessage)
-	OnError   func(err error)
+	OnMessage    func(msgType string, raw json.RawMessage)
+	OnError      func(err error)
+	OnPassphrase PassphraseFunc // called if key is passphrase-protected
 
 	Logger *slog.Logger
 }
@@ -84,15 +85,15 @@ func New(cfg Config) *Client {
 
 // Connect establishes the SSH connection and performs the protocol handshake.
 func (c *Client) Connect() error {
-	// Parse SSH key
-	signer, err := loadSSHKey(c.cfg.KeyPath)
+	// Parse SSH key (with passphrase support)
+	signer, err := loadSSHKey(c.cfg.KeyPath, c.cfg.OnPassphrase)
 	if err != nil {
 		return fmt.Errorf("load key: %w", err)
 	}
 	c.signer = signer
 
 	// Extract raw ed25519 private key for crypto operations
-	c.privKey, err = ParseRawEd25519Key(c.cfg.KeyPath)
+	c.privKey, err = ParseRawEd25519Key(c.cfg.KeyPath, c.cfg.OnPassphrase)
 	if err != nil {
 		return fmt.Errorf("extract ed25519 key: %w", err)
 	}
@@ -101,7 +102,7 @@ func (c *Client) Connect() error {
 	addr := net.JoinHostPort(c.cfg.Host, fmt.Sprintf("%d", c.cfg.Port))
 	sshCfg := &ssh.ClientConfig{
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: implement TOFU
+		HostKeyCallback: hostKeyCallback(c.cfg.DataDir, c.cfg.Host),
 		Timeout:         10 * time.Second,
 	}
 
@@ -131,10 +132,17 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("handshake: %w", err)
 	}
 
-	// Open local DB
+	// Open encrypted local DB (key derived from SSH private key)
 	if c.cfg.DataDir != "" {
 		dbPath := filepath.Join(c.cfg.DataDir, "messages.db")
-		st, err := store.Open(dbPath)
+
+		// Derive DB encryption key from the SSH private key seed
+		dbKey, err := store.DeriveDBKey(c.privKey.Seed())
+		if err != nil {
+			c.logger.Warn("failed to derive DB key", "error", err)
+		}
+
+		st, err := store.Open(dbPath, dbKey)
 		if err != nil {
 			c.logger.Warn("failed to open local DB", "path", dbPath, "error", err)
 		} else {

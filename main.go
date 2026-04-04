@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/tui"
 )
 
@@ -20,45 +21,77 @@ func main() {
 }
 
 func run() error {
-	// TODO: load config from ~/.sshkey-chat/config.toml
-	// For now, use env vars and defaults
-	host := "localhost"
-	port := 2222
-	keyPath := os.Getenv("SSHKEY_KEY")
-	deviceID := "dev_term_001"
+	configDir := config.DefaultConfigDir()
 
-	if keyPath == "" {
-		keyPath = os.ExpandEnv("$HOME/.ssh/id_ed25519")
+	// Load or create config
+	cfg, err := config.Load(configDir)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
 	}
 
-	if len(os.Args) > 1 {
-		host = os.Args[1]
+	// Ensure device ID
+	config.EnsureDeviceID(cfg)
+
+	// Determine which server to connect to
+	var server config.ServerConfig
+
+	if len(cfg.Servers) > 0 {
+		// Use first server (TODO: server selection UI)
+		server = cfg.Servers[0]
+	} else {
+		// No servers configured — use CLI args or defaults
+		host := "localhost"
+		port := 2222
+		keyPath := os.Getenv("SSHKEY_KEY")
+		if keyPath == "" {
+			keyPath = os.ExpandEnv("$HOME/.ssh/id_ed25519")
+		}
+		if len(os.Args) > 1 {
+			host = os.Args[1]
+		}
+
+		server = config.ServerConfig{
+			Name: host,
+			Host: host,
+			Port: port,
+			Key:  keyPath,
+		}
+
+		// Save for next time
+		cfg.Servers = append(cfg.Servers, server)
+		config.Save(configDir, cfg)
+	}
+
+	if server.Port == 0 {
+		server.Port = 2222
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	}))
 
-	// Data directory per server
-	homeDir, _ := os.UserHomeDir()
-	dataDir := filepath.Join(homeDir, ".sshkey-chat", host)
+	dataDir := filepath.Join(configDir, server.Host)
 
-	cfg := client.Config{
-		Host:     host,
-		Port:     port,
-		KeyPath:  keyPath,
-		DeviceID: deviceID,
+	clientCfg := client.Config{
+		Host:     server.Host,
+		Port:     server.Port,
+		KeyPath:  server.Key,
+		DeviceID: cfg.Device.ID,
 		DataDir:  dataDir,
 		Logger:   logger,
+		OnPassphrase: func() ([]byte, error) {
+			// TODO: TUI passphrase prompt
+			return nil, fmt.Errorf("passphrase-protected keys require interactive input (coming soon)")
+		},
 	}
 
-	app := tui.New(cfg)
+	app := tui.New(clientCfg)
 
 	p := tea.NewProgram(app,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
 
-	_, err := p.Run()
+	_, err = p.Run()
 	return err
 }

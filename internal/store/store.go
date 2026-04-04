@@ -1,37 +1,51 @@
 // Package store implements the client-side encrypted local database.
-// One SQLite DB per server. Stores decrypted message content, epoch keys,
-// pinned keys, read positions, and search index.
+// One SQLite DB per server, encrypted with SQLCipher.
+// Key derived from the user's SSH private key via HKDF-SHA256.
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/mutecomm/go-sqlcipher/v4"
+	"golang.org/x/crypto/hkdf"
 )
 
-// Store is the client-side local database for a single server.
+// Store is the client-side encrypted local database for a single server.
 type Store struct {
 	db *sql.DB
 }
 
-// Open creates or opens a local database at the given path.
-func Open(path string) (*Store, error) {
+// Open creates or opens an encrypted local database.
+// The dbKey is derived from the user's SSH private key seed bytes.
+// If dbKey is nil, the DB is opened unencrypted (for testing).
+func Open(path string, dbKey []byte) (*Store, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create dir: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, err
 	}
 
+	// Set encryption key if provided
+	if len(dbKey) > 0 {
+		hexKey := hex.EncodeToString(dbKey)
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA key = \"x'%s'\"", hexKey)); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("set encryption key: %w", err)
+		}
+	}
+
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("set WAL mode: %w (is the key correct?)", err)
 	}
 	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
 		db.Close()
@@ -44,6 +58,17 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// DeriveDBKey derives a 256-bit database encryption key from an Ed25519 private key seed.
+// Uses HKDF-SHA256 with a fixed info string so the same key always produces the same DB key.
+func DeriveDBKey(privateKeySeed []byte) ([]byte, error) {
+	hkdfReader := hkdf.New(sha256.New, privateKeySeed, nil, []byte("sshkey-chat local db"))
+	key := make([]byte, 32)
+	if _, err := hkdfReader.Read(key); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
 func (s *Store) Close() error {

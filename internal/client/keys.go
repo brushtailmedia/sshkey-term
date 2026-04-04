@@ -8,8 +8,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// PassphraseFunc is called when a key requires a passphrase.
+// It should prompt the user and return the passphrase bytes.
+type PassphraseFunc func() ([]byte, error)
+
 // loadSSHKey reads and parses an SSH private key file.
-func loadSSHKey(path string) (ssh.Signer, error) {
+// If the key is passphrase-protected, calls the passphrase function.
+func loadSSHKey(path string, passphraseFn ...PassphraseFunc) (ssh.Signer, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read key file: %w", err)
@@ -17,9 +22,22 @@ func loadSSHKey(path string) (ssh.Signer, error) {
 
 	signer, err := ssh.ParsePrivateKey(data)
 	if err != nil {
-		// Try with passphrase
-		// TODO: prompt for passphrase
-		return nil, fmt.Errorf("parse key: %w (passphrase-protected keys not yet supported)", err)
+		// Check if it's a passphrase error
+		if _, ok := err.(*ssh.PassphraseMissingError); ok {
+			if len(passphraseFn) == 0 || passphraseFn[0] == nil {
+				return nil, fmt.Errorf("key is passphrase-protected but no passphrase provided")
+			}
+			passphrase, err := passphraseFn[0]()
+			if err != nil {
+				return nil, fmt.Errorf("get passphrase: %w", err)
+			}
+			signer, err = ssh.ParsePrivateKeyWithPassphrase(data, passphrase)
+			if err != nil {
+				return nil, fmt.Errorf("parse key with passphrase: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("parse key: %w", err)
+		}
 	}
 
 	// Verify it's Ed25519
@@ -61,7 +79,7 @@ func extractEd25519Key(signer ssh.Signer) (ed25519.PrivateKey, error) {
 }
 
 // ParseRawEd25519Key reads a key file and returns the raw ed25519 private key.
-func ParseRawEd25519Key(path string) (ed25519.PrivateKey, error) {
+func ParseRawEd25519Key(path string, passphraseFn ...PassphraseFunc) (ed25519.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -69,7 +87,21 @@ func ParseRawEd25519Key(path string) (ed25519.PrivateKey, error) {
 
 	rawKey, err := ssh.ParseRawPrivateKey(data)
 	if err != nil {
-		return nil, err
+		if _, ok := err.(*ssh.PassphraseMissingError); ok {
+			if len(passphraseFn) == 0 || passphraseFn[0] == nil {
+				return nil, fmt.Errorf("key is passphrase-protected but no passphrase provided")
+			}
+			passphrase, err := passphraseFn[0]()
+			if err != nil {
+				return nil, err
+			}
+			rawKey, err = ssh.ParseRawPrivateKeyWithPassphrase(data, passphrase)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 
 	edKey, ok := rawKey.(*ed25519.PrivateKey)
