@@ -47,6 +47,26 @@ Terminal client for [sshkey](https://github.com/brushtailmedia/sshkey) -- a priv
 - Go 1.25 or later
 - Zig toolchain (for libghostty compilation)
 
+## Recommended Terminals
+
+Inline image rendering requires a terminal that supports an image protocol. Everything else (text, reactions, TUI layout, navigation) works in any terminal.
+
+| Terminal | Images | Protocol | Platform |
+|---|---|---|---|
+| **kitty** | ✓ | kitty graphics | Linux, macOS |
+| **iTerm2** | ✓ | iTerm2 inline | macOS |
+| **WezTerm** | ✓ | sixel, kitty | Linux, macOS, Windows |
+| **foot** | ✓ | sixel | Linux (Wayland) |
+| **Ghostty** | ✓ | kitty graphics | Linux, macOS |
+| **Contour** | ✓ | sixel | Linux, macOS |
+| Terminal.app | text only | -- | macOS |
+| Windows Terminal | text only | -- | Windows |
+| basic xterm | text only | -- | Linux |
+
+The client auto-detects your terminal and uses the best available image protocol. Unsupported terminals fall back to text placeholders (`📎 photo.jpg 230KB`).
+
+Works over SSH -- the image protocol passes through to your local terminal. Use one of the recommended terminals locally for the full experience.
+
 ## Quick start
 
 ```bash

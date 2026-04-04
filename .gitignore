@@ -38,5 +38,8 @@ Thumbs.db
 *.swo
 *~
 
+# Design docs (internal reference only)
+terminal-design.md
+
 # env file
 .env
