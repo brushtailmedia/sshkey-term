@@ -1,2 +1,108 @@
-# sshkey-term
-Terminal client for sshkey. Go + Bubble Tea + libghostty.
+# sshkey-chat
+
+Terminal client for [sshkey](https://github.com/brushtailmedia/sshkey) -- a private messaging server over SSH with E2E encryption.
+
+## Features
+
+- End-to-end encrypted rooms and DMs (AES-256-GCM, X25519 key wrapping)
+- SSH key is your identity -- no accounts, no passwords
+- Rooms with epoch-based key rotation, DMs with per-message keys
+- File sharing, reactions, typing indicators, read receipts, presence
+- Inline images via sixel/kitty/iterm2 protocols
+- Local encrypted database (SQLCipher) with full-text search
+- Multi-server support
+- Offline message history (lazy scroll-back)
+
+## Architecture
+
+```
+┌──────────────────────────────────────┐
+│  sshkey-chat (terminal client)       │
+├──────────────────────────────────────┤
+│  Bubble Tea         UI chrome        │
+│  libghostty (Zig)   terminal render  │
+├──────────────────────────────────────┤
+│  Go core                             │
+│  x/crypto/ssh       SSH connection   │
+│  AES-256-GCM        encryption       │
+│  X25519 + HKDF      key wrapping     │
+│  Ed25519            signatures       │
+│  SQLCipher          local DB         │
+└──────────────────────────────────────┘
+          │
+          │ SSH (:2222)
+          │
+┌──────────────────────────────────────┐
+│  sshkey-server (blind relay)         │
+│  sees metadata, never content        │
+└──────────────────────────────────────┘
+```
+
+- **Bubble Tea** -- sidebar, room list, input bar, navigation
+- **libghostty** (embedded, via cgo) -- terminal rendering, image protocols, scrollback
+- **Go core** -- SSH connection, protocol handling, E2E crypto, local encrypted DB
+
+## Requirements
+
+- Go 1.25 or later
+- Zig toolchain (for libghostty compilation)
+
+## Quick start
+
+```bash
+go build -o sshkey-chat .
+
+./sshkey-chat
+```
+
+On first launch, the client prompts to select or generate an Ed25519 SSH key, then connect to a server.
+
+## Configuration
+
+```
+~/.sshkey-chat/
+��── config.toml              global config, server list, device ID
+├── chat.example.com/
+│   ├── messages.db          encrypted local DB (all rooms + DMs)
+│   └── files/               cached attachments
+└── work.company.com/
+    ├── messages.db
+    └── files/
+```
+
+```toml
+# ~/.sshkey-chat/config.toml
+
+[device]
+id = "dev_V1StGXR8_Z5jdHi6B-myT"
+
+[[servers]]
+name = "Personal"
+host = "chat.example.com"
+port = 2222
+key = "~/.ssh/id_ed25519"
+
+[[servers]]
+name = "Work"
+host = "work.company.com"
+port = 2222
+key = "~/.ssh/work_key"
+```
+
+Each server is independent -- different keys, different rooms, different users. Local DB is per-server.
+
+## Protocol
+
+See [PROTOCOL.md](PROTOCOL.md) for the complete wire format, message types, and crypto specifications. The terminal client implements the full sshkey protocol.
+
+## Related repositories
+
+| Repo | Description |
+|---|---|
+| [sshkey](https://github.com/brushtailmedia/sshkey) | Server + admin tool (Go) |
+| [sshkey-term](https://github.com/brushtailmedia/sshkey-term) | Terminal client (this repo) |
+| [sshkey-app](https://github.com/brushtailmedia/sshkey-app) | Desktop + mobile GUI client (Rust + egui) |
+
+## License
+
+MIT
