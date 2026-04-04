@@ -61,6 +61,9 @@ type App struct {
 	appConfig   *config.Config
 	configDir   string
 	serverIdx   int // index of the active server in config
+	bell          BellConfig
+	muted         map[string]bool // room name or conv ID -> muted
+	showHelpHint  bool
 
 	width  int
 	height int
@@ -94,7 +97,10 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		appConfig:   appCfg,
 		configDir:   configDir,
 		serverIdx:   serverIdx,
-		focus:       FocusInput,
+		bell:         NewBellConfig(appCfg.Notifications),
+		muted:        config.LoadMutedMap(appCfg),
+		showHelpHint: !appCfg.Notifications.HelpShown,
+		focus:        FocusInput,
 	}
 }
 
@@ -168,6 +174,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Dismiss first-time help hint on any keypress
+		if a.showHelpHint {
+			a.showHelpHint = false
+			if a.appConfig != nil {
+				config.MarkHelpShown(a.configDir, a.appConfig)
+			}
+		}
+
 		// Quit confirmation intercepts all keys
 		if a.quitConfirm.IsVisible() {
 			var cmd tea.Cmd
@@ -392,11 +406,44 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case MuteToggleMsg:
+		a.muted[msg.Target] = msg.Muted
+		// Persist to config
+		if a.appConfig != nil {
+			config.SaveMutedMap(a.configDir, a.appConfig, a.muted)
+		}
+		if msg.Muted {
+			a.statusBar.SetError("Muted: " + msg.Target)
+		} else {
+			a.statusBar.SetError("Unmuted: " + msg.Target)
+		}
+		return a, nil
+
 	case MemberActionMsg:
 		a.infoPanel.Hide()
 		if msg.Action == "message" && a.client != nil {
 			// Create/open 1:1 DM
 			a.client.CreateDM([]string{msg.User}, "")
+		}
+		return a, nil
+
+	case ProfileUpdateMsg:
+		if a.client != nil {
+			a.client.Enc().Encode(protocol.SetProfile{
+				Type:        "set_profile",
+				DisplayName: msg.DisplayName,
+			})
+			a.statusBar.SetError("Display name updated")
+		}
+		return a, nil
+
+	case StatusUpdateMsg:
+		if a.client != nil {
+			a.client.Enc().Encode(protocol.SetStatus{
+				Type: "set_status",
+				Text: msg.Text,
+			})
+			a.statusBar.SetError("Status updated")
 		}
 		return a, nil
 
@@ -620,17 +667,29 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		if m.Room == a.messages.room {
 			a.sendReadReceipt()
 		}
-		// Desktop notification for messages not from self
+		// Notifications for messages not from self
 		if a.client != nil && m.From != a.client.Username() {
 			payload, err := a.client.DecryptRoomMessage(m.Room, m.Epoch, m.Payload)
 			body := "(encrypted)"
+			isMention := false
 			if err == nil {
 				body = payload.Body
+				for _, mention := range payload.Mentions {
+					if mention == a.client.Username() {
+						isMention = true
+						break
+					}
+				}
 			}
-			SendDesktopNotification(
-				fmt.Sprintf("%s in #%s", m.From, m.Room),
-				body,
-			)
+			if !a.muted[m.Room] {
+				SendDesktopNotification(
+					fmt.Sprintf("%s in #%s", m.From, m.Room),
+					body,
+				)
+			}
+			if a.bell.ShouldBell(m.Room, "", m.From, a.client.Username(), isMention, a.muted) {
+				Ring()
+			}
 		}
 	case "dm":
 		var m protocol.DM
@@ -646,7 +705,12 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 			if err == nil {
 				body = payload.Body
 			}
-			SendDesktopNotification(m.From, body)
+			if !a.muted[m.Conversation] {
+				SendDesktopNotification(m.From, body)
+			}
+			if a.bell.ShouldBell("", m.Conversation, m.From, a.client.Username(), false, a.muted) {
+				Ring()
+			}
 		}
 	case "typing":
 		var m protocol.Typing
@@ -770,9 +834,17 @@ func (a App) View() string {
 		searchView := a.search.View(mainWidth, mainHeight+inputHeight)
 		mainPanel = searchView
 	} else {
-		messages := a.messages.View(mainWidth, mainHeight, a.focus == FocusMessages)
+		msgHeight := mainHeight
+		if a.showHelpHint {
+			msgHeight-- // make room for the hint
+		}
+		messages := a.messages.View(mainWidth, msgHeight, a.focus == FocusMessages)
+		hint := ""
+		if a.showHelpHint {
+			hint = helpDescStyle.Render("  Press ? for help or / for commands") + "\n"
+		}
 		input := a.input.View(mainWidth, a.focus == FocusInput)
-		mainPanel = messages + "\n" + input
+		mainPanel = messages + "\n" + hint + input
 	}
 
 	status := a.statusBar.View(a.width)

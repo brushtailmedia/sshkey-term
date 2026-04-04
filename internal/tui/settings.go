@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/brushtailmedia/sshkey-term/internal/config"
@@ -17,6 +18,9 @@ type SettingsModel struct {
 	cursor    int
 	items     []settingsItem
 	confirm   *confirmDialog
+	editing   bool           // true when inline editing a field
+	editInput textinput.Model
+	editAction string        // which field is being edited
 }
 
 type settingsItem struct {
@@ -35,8 +39,18 @@ type confirmDialog struct {
 
 // SettingsActionMsg is sent when the user performs an action in settings.
 type SettingsActionMsg struct {
-	Action   string
+	Action    string
 	ServerIdx int
+}
+
+// ProfileUpdateMsg is sent when the user changes their display name.
+type ProfileUpdateMsg struct {
+	DisplayName string
+}
+
+// StatusUpdateMsg is sent when the user changes their status.
+type StatusUpdateMsg struct {
+	Text string
 }
 
 func NewSettings() SettingsModel {
@@ -55,12 +69,26 @@ func (s *SettingsModel) Show(cfg *config.Config, configDir string, username stri
 func (s *SettingsModel) buildItems(username string, currentServer int) {
 	s.items = nil
 
-	// Profile section
-	s.items = append(s.items, settingsItem{label: "── Profile ──", value: "", action: ""})
-	s.items = append(s.items, settingsItem{label: "  Display name", value: username, action: "edit_name"})
-	s.items = append(s.items, settingsItem{label: "  Status", value: "(not set)", action: "edit_status"})
+	// Active server section (profile is per-server)
+	if s.cfg != nil && currentServer < len(s.cfg.Servers) {
+		srv := s.cfg.Servers[currentServer]
+		s.items = append(s.items, settingsItem{label: fmt.Sprintf("── %s ──", srv.Name), value: "", action: ""})
+		s.items = append(s.items, settingsItem{label: "  Host", value: fmt.Sprintf("%s:%d", srv.Host, srv.Port), action: ""})
+		s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
+		s.items = append(s.items, settingsItem{label: "  Profile", value: "", action: ""})
+		s.items = append(s.items, settingsItem{label: "    Display name", value: username, action: "edit_name"})
+		s.items = append(s.items, settingsItem{label: "    Status", value: "(not set)", action: "edit_status"})
+		s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
+		s.items = append(s.items, settingsItem{label: "  Storage", value: "", action: ""})
+		size, _ := config.ServerDataSize(s.configDir, srv)
+		s.items = append(s.items, settingsItem{label: "    Local DB", value: formatBytes(size), action: ""})
+		s.items = append(s.items, settingsItem{label: "    [Clear local history]", value: "", action: "clear_history"})
+		s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
+		s.items = append(s.items, settingsItem{label: "  Keys", value: "", action: ""})
+		s.items = append(s.items, settingsItem{label: "    SSH key", value: srv.Key, action: ""})
+	}
 
-	// Servers section
+	// All servers section
 	s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
 	s.items = append(s.items, settingsItem{label: "── Servers ──", value: "", action: ""})
 
@@ -84,25 +112,9 @@ func (s *SettingsModel) buildItems(username string, currentServer int) {
 
 	s.items = append(s.items, settingsItem{label: "  [Add server]", value: "", action: "add_server"})
 
-	// Storage section
+	// Device section
 	s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
-	s.items = append(s.items, settingsItem{label: "── Storage ──", value: "", action: ""})
-
-	if s.cfg != nil && currentServer < len(s.cfg.Servers) {
-		size, _ := config.ServerDataSize(s.configDir, s.cfg.Servers[currentServer])
-		sizeStr := formatBytes(size)
-		s.items = append(s.items, settingsItem{label: "  Local DB", value: sizeStr, action: ""})
-	}
-	s.items = append(s.items, settingsItem{label: "  [Clear local history]", value: "", action: "clear_history"})
-
-	// Keys section
-	s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
-	s.items = append(s.items, settingsItem{label: "── Keys ──", value: "", action: ""})
-
-	if s.cfg != nil && currentServer < len(s.cfg.Servers) {
-		srv := s.cfg.Servers[currentServer]
-		s.items = append(s.items, settingsItem{label: "  SSH key", value: srv.Key, action: ""})
-	}
+	s.items = append(s.items, settingsItem{label: "── Device ──", value: "", action: ""})
 	s.items = append(s.items, settingsItem{label: "  Device ID", value: s.cfg.Device.ID, action: ""})
 }
 
@@ -116,6 +128,36 @@ func (s *SettingsModel) IsVisible() bool {
 }
 
 func (s SettingsModel) Update(msg tea.KeyMsg) (SettingsModel, tea.Cmd) {
+	// Handle inline editing
+	if s.editing {
+		switch msg.String() {
+		case "enter":
+			value := strings.TrimSpace(s.editInput.Value())
+			action := s.editAction
+			s.editing = false
+			s.editInput.Blur()
+
+			switch action {
+			case "edit_name":
+				return s, func() tea.Msg {
+					return ProfileUpdateMsg{DisplayName: value}
+				}
+			case "edit_status":
+				return s, func() tea.Msg {
+					return StatusUpdateMsg{Text: value}
+				}
+			}
+			return s, nil
+		case "esc":
+			s.editing = false
+			s.editInput.Blur()
+			return s, nil
+		}
+		var cmd tea.Cmd
+		s.editInput, cmd = s.editInput.Update(msg)
+		return s, cmd
+	}
+
 	// Handle confirmation dialog
 	if s.confirm != nil {
 		switch msg.String() {
@@ -162,13 +204,20 @@ func (s SettingsModel) Update(msg tea.KeyMsg) (SettingsModel, tea.Cmd) {
 		if s.cursor < len(s.items) {
 			item := s.items[s.cursor]
 			switch {
+			case item.action == "edit_name" || item.action == "edit_status":
+				s.editing = true
+				s.editAction = item.action
+				s.editInput = textinput.New()
+				s.editInput.SetValue(item.value)
+				s.editInput.Focus()
+				s.editInput.Prompt = ""
+				s.editInput.CharLimit = 100
 			case item.action == "clear_history":
 				s.confirm = &confirmDialog{
 					message: "Clear all local message history? This cannot be undone.",
 					action:  "clear_history",
 				}
 			case item.isServer:
-				// Show server options
 				s.confirm = &confirmDialog{
 					message: fmt.Sprintf("Remove server %q and all its local data?", s.cfg.Servers[item.serverIdx].Name),
 					action:  "remove_server",
@@ -209,6 +258,12 @@ func (s SettingsModel) View(width, height int) string {
 	for i, item := range s.items {
 		if item.label == "" {
 			b.WriteString("\n")
+			continue
+		}
+
+		if s.editing && i == s.cursor {
+			// Show inline edit input
+			b.WriteString(item.label + ": " + s.editInput.View() + "\n")
 			continue
 		}
 

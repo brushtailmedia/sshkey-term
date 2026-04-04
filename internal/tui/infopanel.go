@@ -30,6 +30,12 @@ type memberInfo struct {
 	Verified    bool
 }
 
+// MuteToggleMsg is sent when the user toggles mute on a room or conversation.
+type MuteToggleMsg struct {
+	Target string // room name or conversation ID
+	Muted  bool
+}
+
 // MemberActionMsg is sent when the user selects a member from the info panel.
 type MemberActionMsg struct {
 	Action string // "message", "create_group", "verify", "profile"
@@ -117,6 +123,14 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 		}
 	case "m":
 		i.ToggleMute()
+		target := i.room
+		if target == "" {
+			target = i.conversation
+		}
+		muted := i.muted
+		return i, func() tea.Msg {
+			return MuteToggleMsg{Target: target, Muted: muted}
+		}
 	}
 	return i, nil
 }

@@ -13,8 +13,20 @@ import (
 
 // Config represents the client configuration.
 type Config struct {
-	Device  DeviceConfig   `toml:"device"`
-	Servers []ServerConfig `toml:"servers"`
+	Device        DeviceConfig        `toml:"device"`
+	Servers       []ServerConfig      `toml:"servers"`
+	Notifications NotificationConfig  `toml:"notifications"`
+}
+
+type NotificationConfig struct {
+	Desktop          string   `toml:"desktop"`            // "all", "mentions", "off" (default: "all")
+	Bell             string   `toml:"bell"`               // "all", "mentions", "dms", "off" (default: "mentions")
+	BellMuteRooms    []string `toml:"bell_mute_rooms"`    // room names where bell is silenced
+	BellMuteDMs      bool     `toml:"bell_mute_dms"`      // silence bell for all DMs
+	BellMuteMentions bool     `toml:"bell_mute_mentions"` // silence bell for @mentions
+	MutedRooms       []string `toml:"muted_rooms"`        // rooms muted via info panel
+	MutedConversations []string `toml:"muted_conversations"` // conversations muted via info panel
+	HelpShown        bool     `toml:"help_shown"`         // true after first-time help hint dismissed
 }
 
 type DeviceConfig struct {
@@ -151,6 +163,42 @@ func ClearServerData(configDir string, server ServerConfig) error {
 	os.Remove(filepath.Join(dataDir, "messages.db-shm"))
 	os.RemoveAll(filepath.Join(dataDir, "files"))
 	return nil
+}
+
+// LoadMutedMap returns a map of muted rooms/conversations from config.
+func LoadMutedMap(cfg *Config) map[string]bool {
+	muted := make(map[string]bool)
+	for _, r := range cfg.Notifications.MutedRooms {
+		muted[r] = true
+	}
+	for _, c := range cfg.Notifications.MutedConversations {
+		muted[c] = true
+	}
+	return muted
+}
+
+// SaveMutedMap writes the mute state back to config.
+func SaveMutedMap(dir string, cfg *Config, muted map[string]bool) error {
+	cfg.Notifications.MutedRooms = nil
+	cfg.Notifications.MutedConversations = nil
+	for target, isMuted := range muted {
+		if !isMuted {
+			continue
+		}
+		// Convention: rooms don't have underscores after prefix, conversations start with conv_
+		if len(target) > 5 && target[:5] == "conv_" {
+			cfg.Notifications.MutedConversations = append(cfg.Notifications.MutedConversations, target)
+		} else {
+			cfg.Notifications.MutedRooms = append(cfg.Notifications.MutedRooms, target)
+		}
+	}
+	return Save(dir, cfg)
+}
+
+// MarkHelpShown marks the first-time help hint as shown.
+func MarkHelpShown(dir string, cfg *Config) error {
+	cfg.Notifications.HelpShown = true
+	return Save(dir, cfg)
 }
 
 // GenerateSSHKey generates a new Ed25519 SSH key pair and saves to disk.
