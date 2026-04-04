@@ -8,12 +8,14 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
+	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
 
 const (
@@ -27,6 +29,7 @@ type Config struct {
 	Port     int
 	KeyPath  string
 	DeviceID string
+	DataDir  string // per-server data directory (e.g., ~/.sshkey-chat/chat.example.com/)
 
 	// Callbacks
 	OnMessage func(msgType string, raw json.RawMessage)
@@ -43,6 +46,7 @@ type Client struct {
 	enc     *protocol.Encoder
 	dec     *protocol.Decoder
 	logger  *slog.Logger
+	store   *store.Store
 
 	mu          sync.RWMutex
 	username    string
@@ -127,6 +131,22 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("handshake: %w", err)
 	}
 
+	// Open local DB
+	if c.cfg.DataDir != "" {
+		dbPath := filepath.Join(c.cfg.DataDir, "messages.db")
+		st, err := store.Open(dbPath)
+		if err != nil {
+			c.logger.Warn("failed to open local DB", "path", dbPath, "error", err)
+		} else {
+			c.store = st
+
+			// Load last_synced from DB
+			if synced, err := st.GetState("last_synced"); err == nil && synced != "" {
+				c.lastSynced = synced
+			}
+		}
+	}
+
 	// Start message loop
 	go c.readLoop()
 
@@ -139,6 +159,9 @@ func (c *Client) Close() error {
 	case <-c.done:
 	default:
 		close(c.done)
+	}
+	if c.store != nil {
+		c.store.Close()
 	}
 	if c.channel != nil {
 		c.channel.Close()
@@ -264,6 +287,7 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			c.mu.Lock()
 			c.profiles[p.User] = &p
 			c.mu.Unlock()
+			c.StoreProfile(&p)
 		}
 	case "epoch_key":
 		var ek protocol.EpochKey
@@ -280,7 +304,14 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			c.mu.Lock()
 			c.lastSynced = sc.SyncedTo
 			c.mu.Unlock()
+			if c.store != nil {
+				c.store.SetState("last_synced", sc.SyncedTo)
+			}
 		}
+	case "message":
+		c.storeRoomMessage(raw)
+	case "dm":
+		c.storeDMMessage(raw)
 	case "sync_batch":
 		c.handleSyncBatchKeys(raw)
 		return // sync_batch messages are forwarded from handleSyncBatchKeys

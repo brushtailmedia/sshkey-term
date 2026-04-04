@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -38,11 +39,16 @@ func run() error {
 		Level: slog.LevelWarn,
 	}))
 
+	// Data directory per server
+	homeDir, _ := os.UserHomeDir()
+	dataDir := filepath.Join(homeDir, ".sshkey-chat", host)
+
 	cfg := client.Config{
 		Host:     host,
 		Port:     port,
 		KeyPath:  keyPath,
 		DeviceID: deviceID,
+		DataDir:  dataDir,
 		Logger:   logger,
 	}
 

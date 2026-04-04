@@ -167,6 +167,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Check if sidebar selected a new room/conversation
 			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedConv() != a.messages.conversation {
 				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedConv())
+				a.messages.LoadFromDB(a.client)
 			}
 		case FocusMessages:
 			var cmd tea.Cmd
@@ -223,6 +224,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.messages.currentUser = a.client.Username()
 		if len(a.client.Rooms()) > 0 {
 			a.messages.SetContext(a.client.Rooms()[0], "")
+			a.messages.LoadFromDB(a.client)
 		}
 
 		a.statusBar.SetUser(a.client.Username(), a.client.IsAdmin())

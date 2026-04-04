@@ -10,6 +10,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
+	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
 
 var (
@@ -85,9 +86,53 @@ func NewMessages() MessagesModel {
 func (m *MessagesModel) SetContext(room, conversation string) {
 	m.room = room
 	m.conversation = conversation
-	m.messages = nil // clear when switching — will be repopulated from local DB later
+	m.messages = nil
 	m.cursor = -1
 	m.scrollOffset = 0
+}
+
+// LoadFromDB populates the message list from the local DB.
+func (m *MessagesModel) LoadFromDB(c *client.Client) {
+	if c == nil {
+		return
+	}
+
+	var stored []storeMsg
+	var err error
+
+	if m.room != "" {
+		stored, err = loadRoom(c, m.room)
+	} else if m.conversation != "" {
+		stored, err = loadConv(c, m.conversation)
+	}
+
+	if err != nil || len(stored) == 0 {
+		return
+	}
+
+	m.messages = nil
+	for _, s := range stored {
+		m.messages = append(m.messages, DisplayMessage{
+			ID:           s.ID,
+			From:         s.Sender,
+			Body:         s.Body,
+			TS:           s.TS,
+			Room:         s.Room,
+			Conversation: s.Conversation,
+			ReplyTo:      s.ReplyTo,
+			Mentions:     s.Mentions,
+		})
+	}
+}
+
+type storeMsg = store.StoredMessage
+
+func loadRoom(c *client.Client, room string) ([]store.StoredMessage, error) {
+	return c.LoadRoomMessages(room, 200)
+}
+
+func loadConv(c *client.Client, conv string) ([]store.StoredMessage, error) {
+	return c.LoadConvMessages(conv, 200)
 }
 
 func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {

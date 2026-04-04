@@ -1,4 +1,4 @@
-# sshkey-chat
+# sshkey-term
 
 Terminal client for [sshkey](https://github.com/brushtailmedia/sshkey) -- a private messaging server over SSH with E2E encryption.
 
