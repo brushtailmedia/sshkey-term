@@ -77,9 +77,8 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) init() error {
+	// Create tables in separate execs to handle FTS5 gracefully
 	_, err := s.db.Exec(`
-		-- Messages (decrypted content stored locally)
-		CREATE TABLE IF NOT EXISTS messages (
 			id              TEXT PRIMARY KEY,
 			sender          TEXT NOT NULL,
 			body            TEXT NOT NULL,
@@ -95,20 +94,6 @@ func (s *Store) init() error {
 
 		CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room, ts) WHERE room != '';
 		CREATE INDEX IF NOT EXISTS idx_messages_conv_ts ON messages(conversation, ts) WHERE conversation != '';
-
-		-- FTS5 full-text search index
-		CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-			body, sender, id UNINDEXED,
-			content='messages', content_rowid='rowid'
-		);
-
-		-- Triggers to keep FTS in sync
-		CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-			INSERT INTO messages_fts(rowid, body, sender, id) VALUES (new.rowid, new.body, new.sender, new.id);
-		END;
-		CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-			INSERT INTO messages_fts(messages_fts, rowid, body, sender, id) VALUES ('delete', old.rowid, old.body, old.sender, old.id);
-		END;
 
 		-- Reactions (decrypted emoji stored locally)
 		CREATE TABLE IF NOT EXISTS reactions (
@@ -165,5 +150,22 @@ func (s *Store) init() error {
 			value TEXT NOT NULL
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// FTS5 search index — optional, may not be available in all SQLite builds
+	s.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+		body, sender, id UNINDEXED,
+		content='messages', content_rowid='rowid'
+	)`)
+	s.db.Exec(`CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+		INSERT INTO messages_fts(rowid, body, sender, id) VALUES (new.rowid, new.body, new.sender, new.id);
+	END`)
+	s.db.Exec(`CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+		INSERT INTO messages_fts(messages_fts, rowid, body, sender, id) VALUES ('delete', old.rowid, old.body, old.sender, old.id);
+	END`)
+	// If FTS5 isn't available, search falls back to LIKE queries
+
+	return nil
 }

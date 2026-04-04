@@ -13,6 +13,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
@@ -311,9 +312,10 @@ func ed25519PubToX25519(pub ed25519.PublicKey) ([]byte, error) {
 }
 
 // ed25519PrivToX25519 converts an Ed25519 private key to X25519.
+// Ed25519 derives the scalar from SHA-512 of the seed (not SHA-256).
 func ed25519PrivToX25519(priv ed25519.PrivateKey) []byte {
-	h := sha256.Sum256(priv.Seed())
-	// Clamp
+	h := sha512.Sum512(priv.Seed())
+	// Clamp (standard X25519 clamping)
 	h[0] &= 248
 	h[31] &= 127
 	h[31] |= 64
