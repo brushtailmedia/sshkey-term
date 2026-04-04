@@ -167,6 +167,20 @@ func (m *MessagesModel) requestHistory() tea.Cmd {
 	}
 }
 
+// LatestMessageID returns the ID of the most recent message, or empty if none.
+func (m *MessagesModel) LatestMessageID() string {
+	if len(m.messages) == 0 {
+		return ""
+	}
+	// Find the latest non-system message
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if !m.messages[i].IsSystem && m.messages[i].ID != "" {
+			return m.messages[i].ID
+		}
+	}
+	return ""
+}
+
 // PrependMessages adds older messages at the top (from history response).
 func (m *MessagesModel) PrependMessages(msgs []DisplayMessage, hasMore bool) {
 	m.messages = append(msgs, m.messages...)

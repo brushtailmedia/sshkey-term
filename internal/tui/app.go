@@ -51,6 +51,7 @@ type App struct {
 	infoPanel   InfoPanelModel
 	settings    SettingsModel
 	addServer   AddServerModel
+	memberPanel MemberPanelModel
 	verify      VerifyModel
 	keyWarning  KeyWarningModel
 	quitConfirm QuitConfirmModel
@@ -73,6 +74,7 @@ const (
 	FocusInput Focus = iota
 	FocusSidebar
 	FocusMessages
+	FocusMembers
 )
 
 // New creates the app model.
@@ -86,6 +88,7 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		search:      NewSearch(),
 		newConv:     NewNewConv(),
 		emojiPicker: NewEmojiPicker(),
+		memberPanel: NewMemberPanel(),
 		settings:    NewSettings(),
 		addServer:   NewAddServer(),
 		appConfig:   appCfg,
@@ -270,6 +273,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 
+		case "ctrl+m":
+			a.memberPanel.Toggle()
+			if a.memberPanel.IsVisible() {
+				a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
+				// Also update input members for @completion
+				a.input.SetMembers(a.memberPanel.MemberNames())
+			}
+			return a, nil
+
 		case "ctrl+p":
 			a.pinnedBar.Toggle()
 			return a, nil
@@ -314,15 +326,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 
 		case "tab":
-			// Cycle focus: input -> sidebar -> messages -> input
+			// Cycle focus: input -> sidebar -> messages -> members (if visible) -> input
 			switch a.focus {
 			case FocusInput:
 				a.focus = FocusSidebar
 			case FocusSidebar:
 				a.focus = FocusMessages
 			case FocusMessages:
+				if a.memberPanel.IsVisible() {
+					a.focus = FocusMembers
+				} else {
+					a.focus = FocusInput
+				}
+			case FocusMembers:
 				a.focus = FocusInput
 			}
+			a.memberPanel.SetFocused(a.focus == FocusMembers)
 			return a, nil
 
 		case "esc":
@@ -342,10 +361,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedConv() != a.messages.conversation {
 				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedConv())
 				a.messages.LoadFromDB(a.client)
+				if a.memberPanel.IsVisible() {
+					a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
+					a.input.SetMembers(a.memberPanel.MemberNames())
+				}
+				// Send read receipt for the new context
+				a.sendReadReceipt()
 			}
 		case FocusMessages:
 			var cmd tea.Cmd
 			a.messages, cmd = a.messages.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		case FocusMembers:
+			var cmd tea.Cmd
+			a.memberPanel, cmd = a.memberPanel.Update(msg)
 			if cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -499,6 +530,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(a.client.Rooms()) > 0 {
 			a.messages.SetContext(a.client.Rooms()[0], "")
 			a.messages.LoadFromDB(a.client)
+			// Set up member list for @completion
+			a.memberPanel.Refresh(a.client.Rooms()[0], "", a.client, a.sidebar.online)
+			a.input.SetMembers(a.memberPanel.MemberNames())
 		}
 
 		a.statusBar.SetUser(a.client.Username(), a.client.IsAdmin())
@@ -540,6 +574,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(cmds...)
 }
 
+// sendReadReceipt sends a read receipt for the latest message in the active room/conversation.
+func (a *App) sendReadReceipt() {
+	if a.client == nil {
+		return
+	}
+	lastID := a.messages.LatestMessageID()
+	if lastID == "" {
+		return
+	}
+	a.client.SendRead(a.messages.room, a.messages.conversation, lastID)
+}
+
 // handleSlashCommand processes slash commands that need app-level handling.
 func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 	switch sc.Command {
@@ -570,6 +616,10 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		var m protocol.Message
 		json.Unmarshal(msg.Raw, &m)
 		a.messages.AddRoomMessage(m, a.client)
+		// Auto-send read receipt if this is the active room
+		if m.Room == a.messages.room {
+			a.sendReadReceipt()
+		}
 		// Desktop notification for messages not from self
 		if a.client != nil && m.From != a.client.Username() {
 			payload, err := a.client.DecryptRoomMessage(m.Room, m.Epoch, m.Payload)
@@ -586,6 +636,10 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		var m protocol.DM
 		json.Unmarshal(msg.Raw, &m)
 		a.messages.AddDMMessage(m, a.client)
+		// Auto-send read receipt if this is the active conversation
+		if m.Conversation == a.messages.conversation {
+			a.sendReadReceipt()
+		}
 		if a.client != nil && m.From != a.client.Username() {
 			payload, err := a.client.DecryptDMMessage(m.WrappedKeys, m.Payload)
 			body := "(encrypted)"
@@ -689,9 +743,16 @@ func (a App) View() string {
 
 	// Layout dimensions
 	sidebarWidth := 20
+	memberWidth := 0
+	if a.memberPanel.IsVisible() {
+		memberWidth = 18
+	}
 	statusBarHeight := 1
 	inputHeight := 3
-	mainWidth := a.width - sidebarWidth - 3 // borders
+	mainWidth := a.width - sidebarWidth - memberWidth - 3 // borders
+	if memberWidth > 0 {
+		mainWidth -= 1 // extra gap
+	}
 	mainHeight := a.height - statusBarHeight - inputHeight - 2
 
 	if mainWidth < 20 {
@@ -716,7 +777,13 @@ func (a App) View() string {
 
 	status := a.statusBar.View(a.width)
 
-	body := joinHorizontal(sidebar, mainPanel)
+	var body string
+	if a.memberPanel.IsVisible() {
+		members := a.memberPanel.View(memberWidth, a.height-statusBarHeight-1)
+		body = joinHorizontal(sidebar, joinHorizontal(mainPanel, members))
+	} else {
+		body = joinHorizontal(sidebar, mainPanel)
+	}
 	screen := body + "\n" + status
 
 	// Overlays
