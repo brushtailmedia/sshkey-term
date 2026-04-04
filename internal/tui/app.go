@@ -182,6 +182,34 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+	case MessageAction:
+		switch msg.Action {
+		case "reply":
+			preview := msg.Msg.Body
+			if len(preview) > 50 {
+				preview = preview[:47] + "..."
+			}
+			a.input.SetReply(msg.Msg.ID, msg.Msg.From+": "+preview)
+			a.focus = FocusInput
+		case "delete":
+			if a.client != nil && (msg.Msg.From == a.client.Username() || a.client.IsAdmin()) {
+				a.client.SendDelete(msg.Msg.ID)
+			}
+		case "pin":
+			if a.client != nil && a.messages.room != "" {
+				a.client.Enc().Encode(protocol.Pin{
+					Type: "pin",
+					Room: a.messages.room,
+					ID:   msg.Msg.ID,
+				})
+			}
+		case "copy":
+			// TODO: copy to clipboard via OSC 52 or atotto/clipboard
+		case "react":
+			// TODO: open emoji picker overlay
+		}
+		return a, nil
+
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
@@ -190,8 +218,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.client = msg.client
 		a.connected = true
 
-		// Populate sidebar
+		// Populate sidebar and messages
 		a.sidebar.SetRooms(a.client.Rooms())
+		a.messages.currentUser = a.client.Username()
 		if len(a.client.Rooms()) > 0 {
 			a.messages.SetContext(a.client.Rooms()[0], "")
 		}
@@ -228,11 +257,11 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 	case "message":
 		var m protocol.Message
 		json.Unmarshal(msg.Raw, &m)
-		a.messages.AddRoomMessage(m)
+		a.messages.AddRoomMessage(m, a.client)
 	case "dm":
 		var m protocol.DM
 		json.Unmarshal(msg.Raw, &m)
-		a.messages.AddDMMessage(m)
+		a.messages.AddDMMessage(m, a.client)
 	case "typing":
 		var m protocol.Typing
 		json.Unmarshal(msg.Raw, &m)
@@ -273,6 +302,20 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		var m protocol.ReactionRemoved
 		json.Unmarshal(msg.Raw, &m)
 		a.messages.RemoveReaction(m.ReactionID)
+	case "sync_batch":
+		var batch protocol.SyncBatch
+		json.Unmarshal(msg.Raw, &batch)
+		for _, raw := range batch.Messages {
+			batchType, _ := protocol.TypeOf(raw)
+			a.handleServerMessage(ServerMsg{Type: batchType, Raw: raw})
+		}
+	case "history_result":
+		var result protocol.HistoryResult
+		json.Unmarshal(msg.Raw, &result)
+		for _, raw := range result.Messages {
+			histType, _ := protocol.TypeOf(raw)
+			a.handleServerMessage(ServerMsg{Type: histType, Raw: raw})
+		}
 	case "error":
 		var m protocol.Error
 		json.Unmarshal(msg.Raw, &m)

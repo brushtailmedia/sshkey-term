@@ -270,13 +270,10 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		if err := json.Unmarshal(raw, &ek); err == nil {
 			c.storeEpochKey(ek.Room, ek.Epoch, ek.WrappedKey)
 		}
+	case "epoch_trigger":
+		c.handleEpochTrigger(raw)
 	case "epoch_confirmed":
-		var ec protocol.EpochConfirmed
-		if err := json.Unmarshal(raw, &ec); err == nil {
-			c.mu.Lock()
-			c.currentEpoch[ec.Room] = ec.Epoch
-			c.mu.Unlock()
-		}
+		c.handleEpochConfirmed(raw)
 	case "sync_complete":
 		var sc protocol.SyncComplete
 		if err := json.Unmarshal(raw, &sc); err == nil {
@@ -285,12 +282,10 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			c.mu.Unlock()
 		}
 	case "sync_batch":
-		var sb protocol.SyncBatch
-		if err := json.Unmarshal(raw, &sb); err == nil {
-			for _, ek := range sb.EpochKeys {
-				c.storeEpochKey(ek.Room, ek.Epoch, ek.WrappedKey)
-			}
-		}
+		c.handleSyncBatchKeys(raw)
+		return // sync_batch messages are forwarded from handleSyncBatchKeys
+	case "history_result":
+		c.handleHistoryKeys(raw)
 	}
 }
 
@@ -339,6 +334,11 @@ func (c *Client) Profile(user string) *protocol.Profile {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.profiles[user]
+}
+
+// Enc returns the protocol encoder for sending raw messages.
+func (c *Client) Enc() *protocol.Encoder {
+	return c.enc
 }
 
 // Done returns a channel that's closed when the client is disconnected.
