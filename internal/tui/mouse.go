@@ -25,7 +25,10 @@ type Layout struct {
 
 // HitTest returns which panel a coordinate falls in.
 func (l Layout) HitTest(x, y int) string {
-	if y >= l.StatusY {
+	if x < 0 || y < 0 || x >= l.MemberX1+l.MemberWidth || y > l.StatusY+1 {
+		return ""
+	}
+	if y >= l.StatusY && y <= l.StatusY+1 {
 		return "status"
 	}
 	if x >= l.SidebarX0 && x < l.SidebarX1 && y >= l.SidebarY0 && y < l.SidebarY1 {
