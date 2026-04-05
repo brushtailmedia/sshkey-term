@@ -551,8 +551,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MemberActionMsg:
 		a.infoPanel.Hide()
-		a.memberMenu.Hide()
+		// Don't hide the member menu when the action IS to open it
+		if msg.Action != "menu" {
+			a.memberMenu.Hide()
+		}
 		switch msg.Action {
+		case "menu":
+			// Open MemberMenu via keyboard (Enter on a member in the panel).
+			// Same options as right-click: message, create_group, verify,
+			// profile. Screen position (0, 0) is fine — menu renders as
+			// a centered dialog regardless.
+			a.memberMenu.Show(msg.User, 0, 0)
 		case "message":
 			if a.client != nil {
 				a.client.CreateDM([]string{msg.User}, "")
@@ -709,6 +718,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case EmojiSelectedMsg:
 		if a.client != nil {
+			// Skip if the current user already has a reaction with this
+			// emoji on the target message (client-enforced de-dup; see
+			// PROTOCOL.md Reactions section — "Picking the same emoji
+			// twice in the emoji picker should be a no-op").
+			if msg.Target.UserHasReacted(a.client.Username(), msg.Emoji) {
+				a.statusBar.SetError("You already reacted with " + msg.Emoji)
+				return a, nil
+			}
 			var err error
 			if msg.Target.Room != "" {
 				err = a.client.SendRoomReaction(msg.Target.Room, msg.Target.ID, msg.Emoji)
@@ -814,8 +831,45 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.statusBar.SetError("Saved: " + dst)
 				}()
 			}
+		case "open_menu":
+			// Keyboard-triggered context menu opener (Enter on selected message).
+			// Shows the same menu the mouse right-click produces, at screen origin.
+			isOwn := a.client != nil && msg.Msg.From == a.client.Username()
+			isAdmin := a.client != nil && a.client.IsAdmin()
+			isRoom := a.messages.room != ""
+			var myEmojis []string
+			if a.client != nil {
+				myEmojis = msg.Msg.UserEmojis(a.client.Username())
+			}
+			a.contextMenu.Show(msg.Msg, 0, 0, isOwn, isAdmin, isRoom, a.pinnedBar.PinIDs(), myEmojis)
 		case "react":
 			a.emojiPicker.Show(msg.Msg)
+		case "unreact":
+			// Remove one of the current user's reactions on this message.
+			//   Data == emoji  → remove that specific emoji (context menu path)
+			//   Data == ""     → remove first reaction user has (keyboard 'u' path;
+			//                    repeatable presses peel off more)
+			if a.client == nil {
+				return a, nil
+			}
+			user := a.client.Username()
+			emoji := msg.Data
+			if emoji == "" {
+				emojis := msg.Msg.UserEmojis(user)
+				if len(emojis) == 0 {
+					a.statusBar.SetError("No reactions to remove")
+					return a, nil
+				}
+				emoji = emojis[0]
+			}
+			ids := msg.Msg.UserReactionIDs(user, emoji)
+			if len(ids) == 0 {
+				a.statusBar.SetError("Reaction already removed")
+				return a, nil
+			}
+			if err := a.client.SendUnreact(ids[0]); err != nil {
+				a.statusBar.SetError("Unreact failed: " + err.Error())
+			}
 		}
 		return a, nil
 
@@ -1055,7 +1109,11 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				isOwn := a.client != nil && msg.From == a.client.Username()
 				isAdmin := a.client != nil && a.client.IsAdmin()
 				isRoom := a.messages.room != ""
-				a.contextMenu.Show(msg, x, y, isOwn, isAdmin, isRoom, a.pinnedBar.PinIDs())
+				var myEmojis []string
+				if a.client != nil {
+					myEmojis = msg.UserEmojis(a.client.Username())
+				}
+				a.contextMenu.Show(msg, x, y, isOwn, isAdmin, isRoom, a.pinnedBar.PinIDs(), myEmojis)
 			}
 		}
 
@@ -1215,19 +1273,26 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			a.statusBar.SetError(msg)
 			return
 		}
-		// Upload in background
+		// Upload + send as a message with attachment (room only for now —
+		// DM per-message key coordination is not yet wired).
 		go func() {
 			if a.client == nil {
 				return
 			}
+			if sc.Room == "" {
+				a.statusBar.SetError("File attachments to DMs not yet supported; use a room")
+				return
+			}
 			a.statusBar.SetError("Uploading " + filepath.Base(path) + "...")
-			fileID, err := a.client.UploadFile(path, sc.Room, sc.Conv)
-			if err != nil {
+			// Message body describes the attachment (receiving clients show
+			// body + file preview). Users can customise later via a richer
+			// /upload syntax.
+			body := filepath.Base(path)
+			if err := a.client.SendRoomMessageFile(sc.Room, body, path, "", nil); err != nil {
 				a.statusBar.SetError("Upload failed: " + err.Error())
 				return
 			}
-			a.statusBar.SetError("Uploaded: " + fileID)
-			// TODO: send message referencing the file_id with attachment metadata
+			a.statusBar.SetError("Uploaded: " + filepath.Base(path))
 		}()
 	}
 }

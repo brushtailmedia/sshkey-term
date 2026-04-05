@@ -134,9 +134,20 @@ func (m MemberPanelModel) Update(msg tea.KeyMsg) (MemberPanelModel, tea.Cmd) {
 			m.cursor++
 		}
 	case "enter":
+		// Open member menu (keyboard equivalent of right-click on the
+		// member). Consistent with Enter on a message opening the
+		// context menu.
 		if m.cursor < len(m.members) {
 			user := m.members[m.cursor].User
-			// Return member action — show context menu
+			return m, func() tea.Msg {
+				return MemberActionMsg{Action: "menu", User: user}
+			}
+		}
+	case "m":
+		// Direct message (bypass the menu). Kept as a shortcut for
+		// the most common action.
+		if m.cursor < len(m.members) {
+			user := m.members[m.cursor].User
 			return m, func() tea.Msg {
 				return MemberActionMsg{Action: "message", User: user}
 			}

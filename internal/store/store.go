@@ -79,6 +79,7 @@ func (s *Store) Close() error {
 func (s *Store) init() error {
 	// Create tables in separate execs to handle FTS5 gracefully
 	_, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS messages (
 			id              TEXT PRIMARY KEY,
 			sender          TEXT NOT NULL,
 			body            TEXT NOT NULL,

@@ -66,14 +66,25 @@ func (c *Client) handleEpochTrigger(raw json.RawMessage) {
 		return
 	}
 
-	// Store the key locally (pending — will be confirmed by epoch_confirmed)
-	// We store it now so we're ready to use it when confirmed
+	// Store the key locally (pending — will be confirmed by epoch_confirmed).
+	// We store it now so we're ready to use it when confirmed.
 	c.mu.Lock()
 	if c.epochKeys[trigger.Room] == nil {
 		c.epochKeys[trigger.Room] = make(map[int64][]byte)
 	}
 	c.epochKeys[trigger.Room][trigger.NewEpoch] = epochKey
+	store := c.store
 	c.mu.Unlock()
+
+	// Persist to local DB so the key survives restart. If the server
+	// rejects the rotation (epoch_conflict / stale_member_list), the
+	// persisted key is harmless — subsequent connects will receive the
+	// winning epoch key and overwrite this one.
+	if store != nil {
+		if err := store.StoreEpochKey(trigger.Room, trigger.NewEpoch, epochKey); err != nil {
+			c.logger.Warn("failed to persist generated epoch key", "room", trigger.Room, "epoch", trigger.NewEpoch, "error", err)
+		}
+	}
 
 	c.logger.Info("epoch rotation submitted",
 		"room", trigger.Room,

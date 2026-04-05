@@ -88,17 +88,9 @@ func (r RetireConfirmModel) Update(msg tea.KeyMsg) (RetireConfirmModel, tea.Cmd)
 		r.Hide()
 		return r, nil
 
-	case "tab":
-		r.focused = (r.focused + 1) % 2
-		if r.focused == 1 {
-			r.phraseInput.Focus()
-		} else {
-			r.phraseInput.Blur()
-		}
-		return r, nil
-
-	case "shift+tab":
-		r.focused = (r.focused + 1) % 2
+	case "tab", "shift+tab":
+		// Only 2 focusable fields, so tab and shift+tab both just toggle.
+		r.focused = 1 - r.focused
 		if r.focused == 1 {
 			r.phraseInput.Focus()
 		} else {

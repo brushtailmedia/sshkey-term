@@ -1,6 +1,10 @@
 package store
 
-import "time"
+import (
+	"database/sql"
+	"errors"
+	"time"
+)
 
 // StoreEpochKey saves an unwrapped epoch key locally.
 func (s *Store) StoreEpochKey(room string, epoch int64, key []byte) error {
@@ -11,14 +15,38 @@ func (s *Store) StoreEpochKey(room string, epoch int64, key []byte) error {
 	return err
 }
 
-// GetEpochKey retrieves a stored epoch key.
+// GetEpochKey retrieves a stored epoch key. Returns (nil, nil) if the key
+// doesn't exist — missing is not an error at the application level.
 func (s *Store) GetEpochKey(room string, epoch int64) ([]byte, error) {
 	var key []byte
 	err := s.db.QueryRow(`SELECT key FROM epoch_keys WHERE room = ? AND epoch = ?`, room, epoch).Scan(&key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
 	return key, err
 }
 
-// PinKey stores a user's public key fingerprint (TOFU).
+// PinKey stores a user's public key fingerprint (TOFU). If this is an update
+// and the fingerprint changed, the verified flag is reset to 0 — the user
+// must re-verify the new key via safety number comparison before trusting it.
+//
+// Fingerprint changes are expected in two scenarios:
+//
+//  1. Retirement + return. sshkey-chat has no in-band key rotation (see
+//     PROJECT.md "Account Lifecycle"). When a user's key changes, it's
+//     because the old account was retired and admin re-added the user under
+//     the same username with a new key. From the client's perspective this
+//     is a distinct identity reusing a name — the old verified state is not
+//     transferable, so we reset it.
+//
+//  2. A compromised server swapping a user's pubkey. Key pinning is the
+//     client-side TOFU check that catches this attack. Resetting verified
+//     ensures the user cannot continue to trust a verified badge when the
+//     underlying key has changed.
+//
+// In both cases, the correct UX is a hard warning + safety-number
+// re-verification. The verified=0 reset here is what makes that flow
+// possible.
 func (s *Store) PinKey(user, fingerprint, pubkey string) error {
 	now := time.Now().Unix()
 	_, err := s.db.Exec(`
@@ -27,16 +55,21 @@ func (s *Store) PinKey(user, fingerprint, pubkey string) error {
 		ON CONFLICT (user) DO UPDATE SET
 			fingerprint = excluded.fingerprint,
 			pubkey = excluded.pubkey,
-			updated_at = excluded.updated_at`,
+			updated_at = excluded.updated_at,
+			verified = CASE WHEN fingerprint != excluded.fingerprint THEN 0 ELSE verified END`,
 		user, fingerprint, pubkey, now, now,
 	)
 	return err
 }
 
-// GetPinnedKey returns the pinned fingerprint for a user.
+// GetPinnedKey returns the pinned fingerprint for a user. Returns ("", false,
+// nil) if the user hasn't been pinned yet — missing is not an error.
 func (s *Store) GetPinnedKey(user string) (fingerprint string, verified bool, err error) {
 	var v int
 	err = s.db.QueryRow(`SELECT fingerprint, verified FROM pinned_keys WHERE user = ?`, user).Scan(&fingerprint, &v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
 	return fingerprint, v == 1, err
 }
 
@@ -62,10 +95,14 @@ func (s *Store) StoreSeqMark(key string, seq int64) error {
 	return err
 }
 
-// GetSeqMark returns the high-water seq for a key.
+// GetSeqMark returns the high-water seq for a key. Returns (0, nil) if the
+// key hasn't been stored yet — missing is not an error.
 func (s *Store) GetSeqMark(key string) (int64, error) {
 	var seq int64
 	err := s.db.QueryRow(`SELECT seq FROM seq_marks WHERE key = ?`, key).Scan(&seq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
 	return seq, err
 }
 
@@ -80,10 +117,14 @@ func (s *Store) StoreReadPosition(target, lastRead string) error {
 	return err
 }
 
-// GetReadPosition returns the last read message ID for a target.
+// GetReadPosition returns the last read message ID for a target. Returns
+// ("", nil) if no read position has been stored — missing is not an error.
 func (s *Store) GetReadPosition(target string) (string, error) {
 	var lastRead string
 	err := s.db.QueryRow(`SELECT last_read FROM read_positions WHERE target = ?`, target).Scan(&lastRead)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
 	return lastRead, err
 }
 
@@ -107,9 +148,13 @@ func (s *Store) SetState(key, value string) error {
 	return err
 }
 
-// GetState retrieves a client state value.
+// GetState retrieves a client state value. Returns ("", nil) if the key
+// hasn't been set — missing is not an error.
 func (s *Store) GetState(key string) (string, error) {
 	var value string
 	err := s.db.QueryRow(`SELECT value FROM state WHERE key = ?`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
 	return value, err
 }

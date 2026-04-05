@@ -4,6 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"crypto/ed25519"
 
@@ -11,8 +14,18 @@ import (
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
-// SendRoomMessage encrypts and sends a message to a room.
+// SendRoomMessage encrypts and sends a message to a room. Zero-attachments
+// convenience wrapper around SendRoomMessageFull.
 func (c *Client) SendRoomMessage(room, body string, replyTo string, mentions []string) error {
+	return c.SendRoomMessageFull(room, body, replyTo, mentions, nil)
+}
+
+// SendRoomMessageFull is the full-featured room sender with attachments.
+// Attachments reference file_ids from prior UploadFile calls; their contents
+// are NOT encrypted here (the file bytes were already encrypted with the
+// current epoch key during upload). The attachment metadata travels inside
+// the encrypted message payload.
+func (c *Client) SendRoomMessageFull(room, body string, replyTo string, mentions []string, attachments []protocol.Attachment) error {
 	c.mu.Lock()
 	epoch := c.currentEpoch[room]
 	key := c.epochKeys[room][epoch]
@@ -25,13 +38,22 @@ func (c *Client) SendRoomMessage(room, body string, replyTo string, mentions []s
 		return fmt.Errorf("no epoch key for room %s", room)
 	}
 
+	// Stamp file_epoch on each attachment (which epoch's key decrypts the
+	// file bytes — same as the message epoch for freshly-uploaded files).
+	for i := range attachments {
+		if attachments[i].FileEpoch == 0 {
+			attachments[i].FileEpoch = epoch
+		}
+	}
+
 	// Build payload
 	payload := protocol.DecryptedPayload{
-		Body:     body,
-		Seq:      seq,
-		DeviceID: c.cfg.DeviceID,
-		Mentions: mentions,
-		ReplyTo:  replyTo,
+		Body:        body,
+		Seq:         seq,
+		DeviceID:    c.cfg.DeviceID,
+		Mentions:    mentions,
+		ReplyTo:     replyTo,
+		Attachments: attachments,
 	}
 	payloadJSON, _ := json.Marshal(payload)
 
@@ -47,13 +69,84 @@ func (c *Client) SendRoomMessage(room, body string, replyTo string, mentions []s
 	// Sign
 	sig := crypto.SignRoom(c.privKey, payloadBytes, room, epoch)
 
+	// Collect file_ids for the envelope (server needs these for retention
+	// bookkeeping even though it can't see the attachment metadata)
+	var fileIDs []string
+	for _, a := range attachments {
+		fileIDs = append(fileIDs, a.FileID)
+	}
+
 	return c.enc.Encode(protocol.Send{
 		Type:      "send",
 		Room:      room,
 		Epoch:     epoch,
 		Payload:   encrypted,
+		FileIDs:   fileIDs,
 		Signature: base64.StdEncoding.EncodeToString(sig),
 	})
+}
+
+// SendRoomMessageFile uploads a local file and sends a message that
+// references it as an attachment in a single call. Returns an error if any
+// step fails.
+func (c *Client) SendRoomMessageFile(room, body, filePath, replyTo string, mentions []string) error {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+	fileID, err := c.UploadFile(filePath, room, "")
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	attachment := protocol.Attachment{
+		FileID: fileID,
+		Name:   filepath.Base(filePath),
+		Size:   info.Size(),
+		Mime:   sniffMimeType(filePath),
+	}
+	return c.SendRoomMessageFull(room, body, replyTo, mentions, []protocol.Attachment{attachment})
+}
+
+// sniffMimeType returns a best-guess content type from the file extension.
+// Lightweight table covering the common cases; falls back to application/
+// octet-stream. The server never sees this value (it's inside the encrypted
+// payload) — it's purely for the receiving client's display.
+func sniffMimeType(path string) string {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".mp4":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".webm":
+		return "video/webm"
+	case ".pdf":
+		return "application/pdf"
+	case ".zip":
+		return "application/zip"
+	case ".txt", ".md":
+		return "text/plain"
+	case ".json":
+		return "application/json"
+	case ".html":
+		return "text/html"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".wav":
+		return "audio/wav"
+	case ".ogg":
+		return "audio/ogg"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 // SendDMMessage encrypts and sends a DM message.
@@ -295,6 +388,16 @@ func (c *Client) SendDMReaction(conversation, targetMsgID, emoji string) error {
 		WrappedKeys:  wrappedKeys,
 		Payload:      encrypted,
 		Signature:    base64.StdEncoding.EncodeToString(sig),
+	})
+}
+
+// SendUnreact removes a reaction by its server-assigned reaction_id. Used
+// by the explicit "Remove my reaction" UX — the client looks up the
+// reaction_id from its local (message_id, user, emoji) index and sends it.
+func (c *Client) SendUnreact(reactionID string) error {
+	return c.enc.Encode(protocol.Unreact{
+		Type:       "unreact",
+		ReactionID: reactionID,
 	})
 }
 

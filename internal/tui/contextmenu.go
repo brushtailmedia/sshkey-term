@@ -10,6 +10,7 @@ import (
 type ContextMenuItem struct {
 	Label  string
 	Action string
+	Data   string // optional payload (e.g., the emoji to remove)
 }
 
 // ContextMenuModel shows a popup menu for a selected message.
@@ -25,8 +26,11 @@ func NewContextMenu() ContextMenuModel {
 	return ContextMenuModel{}
 }
 
-// Show displays the context menu for the given message.
-func (c *ContextMenuModel) Show(msg DisplayMessage, x, y int, isOwnMessage, isAdmin, isRoom bool, pinnedIDs []string) {
+// Show displays the context menu for the given message. myReactionEmojis is
+// the set of emojis the current user has already reacted with on this
+// message — each one gets a "Remove reaction: <emoji>" menu item, which on
+// activation sends unreact for that specific emoji.
+func (c *ContextMenuModel) Show(msg DisplayMessage, x, y int, isOwnMessage, isAdmin, isRoom bool, pinnedIDs []string, myReactionEmojis []string) {
 	c.visible = true
 	c.msg = msg
 	c.cursor = 0
@@ -36,6 +40,17 @@ func (c *ContextMenuModel) Show(msg DisplayMessage, x, y int, isOwnMessage, isAd
 	c.items = nil
 	c.items = append(c.items, ContextMenuItem{Label: "Reply", Action: "reply"})
 	c.items = append(c.items, ContextMenuItem{Label: "React", Action: "react"})
+
+	// One "Remove reaction: <emoji>" item per emoji the current user has
+	// reacted with. Explicit per-emoji removal rather than toggle-via-
+	// re-picking (see PROTOCOL.md Reactions section).
+	for _, emoji := range myReactionEmojis {
+		c.items = append(c.items, ContextMenuItem{
+			Label:  "Remove reaction: " + emoji,
+			Action: "unreact",
+			Data:   emoji,
+		})
+	}
 
 	if isRoom {
 		isPinned := false
@@ -90,10 +105,11 @@ func (c ContextMenuModel) Update(msg tea.KeyMsg) (ContextMenuModel, tea.Cmd) {
 	case "enter":
 		if c.cursor < len(c.items) {
 			action := c.items[c.cursor].Action
+			data := c.items[c.cursor].Data
 			target := c.msg
 			c.Hide()
 			return c, func() tea.Msg {
-				return MessageAction{Action: action, Msg: target}
+				return MessageAction{Action: action, Msg: target, Data: data}
 			}
 		}
 	}

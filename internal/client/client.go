@@ -411,7 +411,9 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 	}
 }
 
-// storeEpochKey unwraps and stores an epoch key.
+// storeEpochKey unwraps and stores an epoch key in memory AND persists it
+// to the local encrypted DB so it survives across app restarts. Without
+// persistence, the client would lose the ability to decrypt past messages.
 func (c *Client) storeEpochKey(room string, epoch int64, wrappedKey string) {
 	key, err := c.UnwrapKey(wrappedKey)
 	if err != nil {
@@ -427,7 +429,16 @@ func (c *Client) storeEpochKey(room string, epoch int64, wrappedKey string) {
 	if epoch > c.currentEpoch[room] {
 		c.currentEpoch[room] = epoch
 	}
+	store := c.store
 	c.mu.Unlock()
+
+	// Persist to local DB (survives restart). Failure here is non-fatal —
+	// the in-memory copy is usable for this session.
+	if store != nil {
+		if err := store.StoreEpochKey(room, epoch, key); err != nil {
+			c.logger.Warn("failed to persist epoch key", "room", room, "epoch", epoch, "error", err)
+		}
+	}
 }
 
 // Username returns the authenticated username.

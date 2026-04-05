@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -60,10 +61,64 @@ type DisplayMessage struct {
 	Conversation string
 	ReplyTo      string
 	Mentions     []string
-	Reactions    map[string]int // emoji -> count
-	Attachments  []DisplayAttachment
-	IsSystem     bool
-	SystemText   string
+	// ReactionsByUser tracks all reaction_ids per (user, emoji) on this message.
+	// user -> emoji -> []reaction_id. Display count = distinct users per emoji.
+	// The current user's own entries are used for the "Remove my reaction" UX.
+	ReactionsByUser map[string]map[string][]string
+	Attachments     []DisplayAttachment
+	IsSystem        bool
+	SystemText      string
+}
+
+// DisplayReactions returns the emoji→count map for rendering, counting the
+// number of distinct users per emoji (not reaction events).
+func (d *DisplayMessage) DisplayReactions() map[string]int {
+	if d.ReactionsByUser == nil {
+		return nil
+	}
+	counts := make(map[string]int)
+	for _, byEmoji := range d.ReactionsByUser {
+		for emoji, ids := range byEmoji {
+			if len(ids) > 0 {
+				counts[emoji]++
+			}
+		}
+	}
+	return counts
+}
+
+// UserHasReacted reports whether the given user has at least one reaction
+// with the given emoji on this message.
+func (d *DisplayMessage) UserHasReacted(user, emoji string) bool {
+	if d.ReactionsByUser == nil {
+		return false
+	}
+	return len(d.ReactionsByUser[user][emoji]) > 0
+}
+
+// UserReactionIDs returns the reaction_ids for the given user and emoji
+// (used to send unreact). Returns nil if the user hasn't reacted with this
+// emoji.
+func (d *DisplayMessage) UserReactionIDs(user, emoji string) []string {
+	if d.ReactionsByUser == nil {
+		return nil
+	}
+	return d.ReactionsByUser[user][emoji]
+}
+
+// UserEmojis returns the set of distinct emojis the given user has reacted
+// with on this message.
+func (d *DisplayMessage) UserEmojis(user string) []string {
+	if d.ReactionsByUser == nil {
+		return nil
+	}
+	var emojis []string
+	for emoji, ids := range d.ReactionsByUser[user] {
+		if len(ids) > 0 {
+			emojis = append(emojis, emoji)
+		}
+	}
+	return emojis
 }
 
 type DisplayAttachment struct {
@@ -327,16 +382,9 @@ func (m *MessagesModel) RemoveMessage(id string) {
 }
 
 func (m *MessagesModel) AddReaction(r protocol.Reaction) {
-	// Legacy — use AddReactionDecrypted instead
-	for i, msg := range m.messages {
-		if msg.ID == r.ID {
-			if m.messages[i].Reactions == nil {
-				m.messages[i].Reactions = make(map[string]int)
-			}
-			m.messages[i].Reactions["?"]++
-			return
-		}
-	}
+	// Legacy — use AddReactionDecrypted instead. Records with "?" as the
+	// emoji since decryption info isn't available here.
+	m.addReactionRecord(r.ID, r.ReactionID, r.User, "?")
 }
 
 // AddReactionDecrypted decrypts the reaction and adds it to the target message.
@@ -373,27 +421,40 @@ func (m *MessagesModel) AddReactionDecrypted(r protocol.Reaction, c *client.Clie
 		emoji = "?"
 	}
 
+	m.addReactionRecord(r.ID, r.ReactionID, r.User, emoji)
+}
+
+// addReactionRecord is the shared path for storing an incoming reaction.
+// Updates both the per-message ReactionsByUser index and the package-level
+// tracker used by RemoveReaction.
+func (m *MessagesModel) addReactionRecord(msgID, reactionID, user, emoji string) {
+	reactionTracker[reactionID] = reactionMeta{msgID: msgID, user: user, emoji: emoji}
 	for i, msg := range m.messages {
-		if msg.ID == r.ID {
-			if m.messages[i].Reactions == nil {
-				m.messages[i].Reactions = make(map[string]int)
-			}
-			m.messages[i].Reactions[emoji]++
-			// Track for removal
-			reactionTracker[r.ReactionID] = struct {
-				msgID string
-				emoji string
-			}{r.ID, emoji}
-			return
+		if msg.ID != msgID {
+			continue
 		}
+		if m.messages[i].ReactionsByUser == nil {
+			m.messages[i].ReactionsByUser = make(map[string]map[string][]string)
+		}
+		byUser := m.messages[i].ReactionsByUser
+		if byUser[user] == nil {
+			byUser[user] = make(map[string][]string)
+		}
+		byUser[user][emoji] = append(byUser[user][emoji], reactionID)
+		return
 	}
 }
 
-// reactionTracker maps reaction_id -> (message_id, emoji) for removal.
-var reactionTracker = make(map[string]struct {
+// reactionMeta records everything needed to undo a reaction.
+type reactionMeta struct {
 	msgID string
+	user  string
 	emoji string
-})
+}
+
+// reactionTracker maps reaction_id -> metadata, package-level so lookups
+// work across message model instances. Cleared entries on reaction_removed.
+var reactionTracker = make(map[string]reactionMeta)
 
 func (m *MessagesModel) RemoveReaction(reactionID string) {
 	tracked, ok := reactionTracker[reactionID]
@@ -403,13 +464,30 @@ func (m *MessagesModel) RemoveReaction(reactionID string) {
 	delete(reactionTracker, reactionID)
 
 	for i, msg := range m.messages {
-		if msg.ID == tracked.msgID && m.messages[i].Reactions != nil {
-			m.messages[i].Reactions[tracked.emoji]--
-			if m.messages[i].Reactions[tracked.emoji] <= 0 {
-				delete(m.messages[i].Reactions, tracked.emoji)
-			}
+		if msg.ID != tracked.msgID || m.messages[i].ReactionsByUser == nil {
+			continue
+		}
+		byEmoji := m.messages[i].ReactionsByUser[tracked.user]
+		if byEmoji == nil {
 			return
 		}
+		ids := byEmoji[tracked.emoji]
+		// Remove the specific reactionID from the slice
+		for j, id := range ids {
+			if id == reactionID {
+				ids = append(ids[:j], ids[j+1:]...)
+				break
+			}
+		}
+		if len(ids) == 0 {
+			delete(byEmoji, tracked.emoji)
+			if len(byEmoji) == 0 {
+				delete(m.messages[i].ReactionsByUser, tracked.user)
+			}
+		} else {
+			byEmoji[tracked.emoji] = ids
+		}
+		return
 	}
 }
 
@@ -428,8 +506,9 @@ func (m *MessagesModel) SelectedMessage() *DisplayMessage {
 
 // MessageAction is returned when the user performs an action on a selected message.
 type MessageAction struct {
-	Action string // "reply", "delete", "pin", "copy"
+	Action string // "reply", "delete", "pin", "copy", "react", "unreact", ...
 	Msg    DisplayMessage
+	Data   string // optional payload (e.g., emoji for unreact)
 }
 
 // HistoryRequestMsg is sent when the user scrolls to the top and needs older messages.
@@ -505,6 +584,20 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 		if sel := m.SelectedMessage(); sel != nil {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "react", Msg: *sel}
+			}
+		}
+	case "u": // unreact — remove one of current user's reactions
+		if sel := m.SelectedMessage(); sel != nil {
+			return m, func() tea.Msg {
+				// Empty Data means "pick first emoji user has reacted with";
+				// app handler resolves to the specific reaction_id.
+				return MessageAction{Action: "unreact", Msg: *sel}
+			}
+		}
+	case "enter": // open context menu on selected message (keyboard path)
+		if sel := m.SelectedMessage(); sel != nil {
+			return m, func() tea.Msg {
+				return MessageAction{Action: "open_menu", Msg: *sel}
 			}
 		}
 	}
@@ -590,10 +683,17 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 				line += "\n " + replyRefStyle.Render("  ↳ re: "+msg.ReplyTo)
 			}
 
-			if len(msg.Reactions) > 0 {
+			if counts := msg.DisplayReactions(); len(counts) > 0 {
+				// Sort emojis deterministically so reactions don't jitter
+				// between renders.
+				emojis := make([]string, 0, len(counts))
+				for e := range counts {
+					emojis = append(emojis, e)
+				}
+				sort.Strings(emojis)
 				var reactions []string
-				for emoji, count := range msg.Reactions {
-					reactions = append(reactions, reactionStyle.Render(fmt.Sprintf("%s %d", emoji, count)))
+				for _, emoji := range emojis {
+					reactions = append(reactions, reactionStyle.Render(fmt.Sprintf("%s %d", emoji, counts[emoji])))
 				}
 				line += "\n   " + strings.Join(reactions, "  ")
 			}
