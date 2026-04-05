@@ -392,6 +392,21 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		if err := json.Unmarshal(raw, &uc); err == nil {
 			HandleUploadComplete(uc.UploadID, uc.FileID)
 		}
+	case "upload_error":
+		var ue protocol.UploadError
+		if err := json.Unmarshal(raw, &ue); err == nil {
+			HandleUploadError(ue.UploadID, fmt.Errorf("%s: %s", ue.Code, ue.Message))
+		}
+	case "download_start":
+		var ds protocol.DownloadStart
+		if err := json.Unmarshal(raw, &ds); err == nil {
+			HandleDownloadStart(ds.FileID)
+		}
+	case "download_error":
+		var de protocol.DownloadError
+		if err := json.Unmarshal(raw, &de); err == nil {
+			HandleDownloadError(de.FileID, fmt.Errorf("%s: %s", de.Code, de.Message))
+		}
 	case "deleted":
 		var d protocol.Deleted
 		if err := json.Unmarshal(raw, &d); err == nil && c.store != nil {

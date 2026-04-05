@@ -402,6 +402,25 @@ type UploadComplete struct {
 	FileID   string `json:"file_id"`
 }
 
+// UploadError is sent by the server when an upload_start is rejected
+// (rate limit, size limit, etc.). Clients fail the matching pending upload.
+type UploadError struct {
+	Type     string `json:"type"`
+	UploadID string `json:"upload_id"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+}
+
+// DownloadError is sent by the server when a download is rejected (file
+// not found, open failure, missing download channel). Clients fail the
+// matching pending download.
+type DownloadError struct {
+	Type    string `json:"type"`
+	FileID  string `json:"file_id"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 type Download struct {
 	Type   string `json:"type"`
 	FileID string `json:"file_id"`

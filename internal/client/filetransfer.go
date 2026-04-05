@@ -26,6 +26,17 @@ var (
 	uploads   = make(map[string]*pendingUpload)
 )
 
+// pendingDownload tracks an in-progress download (file_id-keyed).
+type pendingDownload struct {
+	started chan struct{} // signalled when download_start arrives
+	err     chan error    // signalled when download_error arrives
+}
+
+var (
+	downloadsMu sync.Mutex
+	downloads   = make(map[string]*pendingDownload)
+)
+
 // UploadFile encrypts and uploads a file using the room's current epoch key.
 // For DM uploads, use UploadDMFile instead — it takes a per-file key from
 // the caller which is stored in the Attachment struct inside the encrypted
@@ -175,6 +186,51 @@ func HandleUploadComplete(uploadID, fileID string) {
 	}
 }
 
+// HandleUploadError is called from handleInternal when upload_error arrives.
+// Signals the matching pending upload's err channel so the caller fails fast
+// instead of waiting forever for upload_ready or upload_complete.
+func HandleUploadError(uploadID string, err error) {
+	uploadsMu.Lock()
+	p, ok := uploads[uploadID]
+	uploadsMu.Unlock()
+	if ok {
+		select {
+		case p.err <- err:
+		default:
+		}
+	}
+}
+
+// HandleDownloadStart is called from handleInternal when download_start
+// arrives. Signals the matching DownloadFile call that bytes are inbound
+// on Channel 2 and it's safe to start reading.
+func HandleDownloadStart(fileID string) {
+	downloadsMu.Lock()
+	p, ok := downloads[fileID]
+	downloadsMu.Unlock()
+	if ok {
+		select {
+		case p.started <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// HandleDownloadError is called from handleInternal when download_error
+// arrives. Signals the matching DownloadFile call to fail fast instead of
+// waiting forever for a binary frame that will never arrive.
+func HandleDownloadError(fileID string, err error) {
+	downloadsMu.Lock()
+	p, ok := downloads[fileID]
+	downloadsMu.Unlock()
+	if ok {
+		select {
+		case p.err <- err:
+		default:
+		}
+	}
+}
+
 // DownloadFile downloads and decrypts a file. Returns the local path.
 func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) {
 	c.mu.RLock()
@@ -193,6 +249,21 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 	filesDir := filepath.Join(dataDir, "files")
 	os.MkdirAll(filesDir, 0700)
 
+	// Register a pending download so Channel 1 can signal download_start
+	// or download_error for this specific file_id.
+	pending := &pendingDownload{
+		started: make(chan struct{}, 1),
+		err:     make(chan error, 1),
+	}
+	downloadsMu.Lock()
+	downloads[fileID] = pending
+	downloadsMu.Unlock()
+	defer func() {
+		downloadsMu.Lock()
+		delete(downloads, fileID)
+		downloadsMu.Unlock()
+	}()
+
 	// Serialize downloads: we must send the request AND read the reply
 	// under the same lock, otherwise two concurrent callers could read
 	// each other's frames (server sends frames in request order, but the
@@ -207,6 +278,17 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 	})
 	if err != nil {
 		return "", err
+	}
+
+	// Wait for download_start (server is sending bytes) or download_error
+	// (server rejected the request — fail fast instead of blocking on a
+	// binary frame that will never arrive).
+	select {
+	case <-pending.started:
+	case err := <-pending.err:
+		return "", err
+	case <-c.done:
+		return "", fmt.Errorf("disconnected")
 	}
 
 	// Read binary frame from Channel 2

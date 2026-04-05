@@ -136,11 +136,11 @@ Device revocation is operational cleanup — it doesn't stop an attacker who ext
 
 **Back up your key.** If you lose both the key and your passphrase with no backup, your account ends — the server cannot help you recover it. The first-run wizard enforces an explicit acknowledgement of this before letting you connect.
 
-See [PROTOCOL.md](PROTOCOL.md) section "Account Retirement" for the wire protocol and [the server's PROJECT.md "Account Lifecycle"](https://github.com/brushtailmedia/sshkey/blob/main/PROJECT.md) for the full design rationale.
+See the server's [PROTOCOL.md](https://github.com/brushtailmedia/sshkey/blob/main/PROTOCOL.md) section "Account Retirement" for the wire protocol and [PROJECT.md "Account Lifecycle"](https://github.com/brushtailmedia/sshkey/blob/main/PROJECT.md) for the full design rationale.
 
 ## Protocol
 
-See [PROTOCOL.md](PROTOCOL.md) for the complete wire format, message types, and crypto specifications. The terminal client implements the full sshkey protocol.
+See the server's [PROTOCOL.md](https://github.com/brushtailmedia/sshkey/blob/main/PROTOCOL.md) for the complete wire format, message types, and crypto specifications. The terminal client implements the full sshkey protocol.
 
 ## Related repositories
 
