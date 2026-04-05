@@ -408,3 +408,20 @@ func (c *Client) SendRetireMe(reason string) error {
 		Reason: reason,
 	})
 }
+
+// SendListDevices requests the list of devices registered for this user.
+// The response arrives as a device_list message and should be handled by the
+// OnMessage callback.
+func (c *Client) SendListDevices() error {
+	return c.enc.Encode(protocol.ListDevices{Type: "list_devices"})
+}
+
+// SendRevokeDevice asks the server to revoke one of the user's own devices.
+// The response arrives as a device_revoke_result. The server validates
+// ownership and rejects attempts to revoke devices belonging to other users.
+func (c *Client) SendRevokeDevice(deviceID string) error {
+	return c.enc.Encode(protocol.RevokeDevice{
+		Type:     "revoke_device",
+		DeviceID: deviceID,
+	})
+}

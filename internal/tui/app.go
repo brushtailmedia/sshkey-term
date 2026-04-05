@@ -63,6 +63,7 @@ type App struct {
 	quitConfirm QuitConfirmModel
 	retireConfirm RetireConfirmModel
 	deviceRevoked DeviceRevokedModel
+	deviceMgr     DeviceMgrModel
 	pinnedBar   PinnedBarModel
 
 	// Config state
@@ -111,6 +112,7 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		addServer:    NewAddServer(),
 		retireConfirm: NewRetireConfirm(),
 		deviceRevoked: NewDeviceRevoked(),
+		deviceMgr:     NewDeviceMgr(),
 		passphrase:      NewPassphrase(),
 		passphraseCh:    make(chan []byte, 1),
 		passphraseCache: make(map[string][]byte),
@@ -262,6 +264,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.deviceRevoked.IsVisible() {
 			var cmd tea.Cmd
 			a.deviceRevoked, cmd = a.deviceRevoked.Update(msg)
+			return a, cmd
+		}
+
+		// Device manager dialog intercepts all keys
+		if a.deviceMgr.IsVisible() {
+			var cmd tea.Cmd
+			a.deviceMgr, cmd = a.deviceMgr.Update(msg)
 			return a, cmd
 		}
 
@@ -622,6 +631,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "retire_account":
 			a.settings.Hide()
 			a.retireConfirm.Show()
+		case "manage_devices":
+			a.settings.Hide()
+			a.deviceMgr.Show()
+			if a.client != nil {
+				a.client.SendListDevices()
+			}
 		}
 		return a, nil
 
@@ -637,6 +652,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.client.Close()
 		}
 		return a, tea.Quit
+
+	case DeviceMgrRevokeMsg:
+		if a.client != nil {
+			if err := a.client.SendRevokeDevice(msg.DeviceID); err != nil {
+				a.deviceMgr.SetStatus("Send failed: " + err.Error())
+			}
+		}
+		return a, nil
+
+	case DeviceMgrRefreshMsg:
+		if a.client != nil {
+			a.client.SendListDevices()
+		}
+		return a, nil
 
 	case DeviceRevokedQuitMsg:
 		// User dismissed the device-revoked dialog — close client (to stop
@@ -896,7 +925,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.settings.IsVisible() ||
 		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
 		a.quitConfirm.IsVisible() || a.retireConfirm.IsVisible() ||
-		a.deviceRevoked.IsVisible() ||
+		a.deviceRevoked.IsVisible() || a.deviceMgr.IsVisible() ||
 		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
 		return a, nil
 	}
@@ -1316,6 +1345,24 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			a.deviceRevoked.Show(m.DeviceID, m.Reason)
 		}
+	case "device_list":
+		var m protocol.DeviceList
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.deviceMgr.SetDevices(m.Devices)
+		}
+	case "device_revoke_result":
+		var m protocol.DeviceRevokeResult
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			if m.Success {
+				a.deviceMgr.SetStatus("✓ revoked " + m.DeviceID + " — refreshing...")
+				// Re-fetch the list so UI reflects the new state
+				if a.client != nil {
+					a.client.SendListDevices()
+				}
+			} else {
+				a.deviceMgr.SetStatus("Error: " + m.Error)
+			}
+		}
 	case "conversation_event":
 		var m protocol.ConversationEvent
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
@@ -1528,6 +1575,9 @@ func (a App) View() string {
 	}
 	if a.deviceRevoked.IsVisible() {
 		return a.deviceRevoked.View(a.width)
+	}
+	if a.deviceMgr.IsVisible() {
+		return a.deviceMgr.View(a.width)
 	}
 	if a.contextMenu.IsVisible() {
 		return screen + "\n" + a.contextMenu.View()

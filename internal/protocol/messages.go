@@ -469,6 +469,37 @@ type DeviceRevoked struct {
 	Reason   string `json:"reason"`
 }
 
+// Device management (user-scoped)
+
+type ListDevices struct {
+	Type string `json:"type"`
+}
+
+type DeviceList struct {
+	Type    string       `json:"type"`
+	Devices []DeviceInfo `json:"devices"`
+}
+
+type DeviceInfo struct {
+	DeviceID     string `json:"device_id"`
+	LastSyncedAt string `json:"last_synced_at,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	Current      bool   `json:"current,omitempty"`
+	Revoked      bool   `json:"revoked,omitempty"`
+}
+
+type RevokeDevice struct {
+	Type     string `json:"type"`
+	DeviceID string `json:"device_id"`
+}
+
+type DeviceRevokeResult struct {
+	Type     string `json:"type"`
+	DeviceID string `json:"device_id"`
+	Success  bool   `json:"success"`
+	Error    string `json:"error,omitempty"`
+}
+
 type AdminNotify struct {
 	Type        string `json:"type"`
 	Event       string `json:"event"`
