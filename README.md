@@ -1,5 +1,7 @@
 # sshkey-term
 
+Work in Progress - This project is not yet feature complete or stable. Expect breaking changes until v1.0.
+
 Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat) -- a private messaging server over SSH with E2E encryption.
 
 ## Features
