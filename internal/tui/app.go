@@ -806,8 +806,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				att := msg.Msg.Attachments[0]
 				go func() {
 					a.statusBar.SetError("Downloading " + att.Name + "...")
-					// TODO: get decryption key based on room epoch or DM per-message key
-					path, err := a.client.DownloadFile(att.FileID, nil)
+					path, err := a.client.DownloadFile(att.FileID, att.DecryptKey)
 					if err != nil {
 						a.statusBar.SetError("Download failed: " + err.Error())
 						return
@@ -820,7 +819,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				att := msg.Msg.Attachments[0]
 				go func() {
 					a.statusBar.SetError("Downloading " + att.Name + "...")
-					path, err := a.client.DownloadFile(att.FileID, nil)
+					path, err := a.client.DownloadFile(att.FileID, att.DecryptKey)
 					if err != nil {
 						a.statusBar.SetError("Download failed: " + err.Error())
 						return
@@ -1273,22 +1272,24 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			a.statusBar.SetError(msg)
 			return
 		}
-		// Upload + send as a message with attachment (room only for now —
-		// DM per-message key coordination is not yet wired).
+		// Upload + send as a message with attachment. Routes to room or DM
+		// sender based on the current conversation context.
 		go func() {
 			if a.client == nil {
 				return
 			}
-			if sc.Room == "" {
-				a.statusBar.SetError("File attachments to DMs not yet supported; use a room")
+			a.statusBar.SetError("Uploading " + filepath.Base(path) + "...")
+			body := filepath.Base(path)
+			var err error
+			if sc.Room != "" {
+				err = a.client.SendRoomMessageFile(sc.Room, body, path, "", nil)
+			} else if sc.Conv != "" {
+				err = a.client.SendDMMessageFile(sc.Conv, body, path, "", nil)
+			} else {
+				a.statusBar.SetError("No active room or conversation")
 				return
 			}
-			a.statusBar.SetError("Uploading " + filepath.Base(path) + "...")
-			// Message body describes the attachment (receiving clients show
-			// body + file preview). Users can customise later via a richer
-			// /upload syntax.
-			body := filepath.Base(path)
-			if err := a.client.SendRoomMessageFile(sc.Room, body, path, "", nil); err != nil {
+			if err != nil {
 				a.statusBar.SetError("Upload failed: " + err.Error())
 				return
 			}

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/base64"
 	"fmt"
 	"sort"
 	"strings"
@@ -122,12 +123,13 @@ func (d *DisplayMessage) UserEmojis(user string) []string {
 }
 
 type DisplayAttachment struct {
-	FileID    string
-	Name      string
-	Size      int64
-	Mime      string
-	IsImage   bool
-	LocalPath string // set after download
+	FileID     string
+	Name       string
+	Size       int64
+	Mime       string
+	IsImage    bool
+	LocalPath  string // set after download
+	DecryptKey []byte // key to decrypt the downloaded file (epoch key for rooms, per-file K_file for DMs)
 }
 
 // MessagesModel manages the message stream.
@@ -292,12 +294,19 @@ func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
 			replyTo = payload.ReplyTo
 			mentions = payload.Mentions
 			for _, a := range payload.Attachments {
+				// file_epoch may differ from msg.Epoch if the file was
+				// uploaded during a different epoch (rare, but handle it).
+				fileEpoch := a.FileEpoch
+				if fileEpoch == 0 {
+					fileEpoch = msg.Epoch
+				}
 				attachments = append(attachments, DisplayAttachment{
-					FileID:  a.FileID,
-					Name:    a.Name,
-					Size:    a.Size,
-					Mime:    a.Mime,
-					IsImage: isImageMime(a.Mime),
+					FileID:     a.FileID,
+					Name:       a.Name,
+					Size:       a.Size,
+					Mime:       a.Mime,
+					IsImage:    isImageMime(a.Mime),
+					DecryptKey: c.RoomEpochKey(msg.Room, fileEpoch),
 				})
 			}
 		}
@@ -332,12 +341,15 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 			replyTo = payload.ReplyTo
 			mentions = payload.Mentions
 			for _, a := range payload.Attachments {
+				// Design A: each attachment carries its own base64 K_file.
+				decKey, _ := base64.StdEncoding.DecodeString(a.FileKey)
 				attachments = append(attachments, DisplayAttachment{
-					FileID:  a.FileID,
-					Name:    a.Name,
-					Size:    a.Size,
-					Mime:    a.Mime,
-					IsImage: isImageMime(a.Mime),
+					FileID:     a.FileID,
+					Name:       a.Name,
+					Size:       a.Size,
+					Mime:       a.Mime,
+					IsImage:    isImageMime(a.Mime),
+					DecryptKey: decKey,
 				})
 			}
 		}

@@ -16,7 +16,8 @@ import (
 // pendingUpload tracks an in-progress upload.
 type pendingUpload struct {
 	uploadID string
-	fileID   chan string // receives file_id on completion
+	ready    chan struct{} // signalled when server sends upload_ready
+	fileID   chan string   // receives file_id on completion
 	err      chan error
 }
 
@@ -25,32 +26,56 @@ var (
 	uploads   = make(map[string]*pendingUpload)
 )
 
-// UploadFile encrypts and uploads a file. Returns the server-assigned file_id.
+// UploadFile encrypts and uploads a file using the room's current epoch key.
+// For DM uploads, use UploadDMFile instead — it takes a per-file key from
+// the caller which is stored in the Attachment struct inside the encrypted
+// message payload.
+//
+// Returns the server-assigned file_id.
 func (c *Client) UploadFile(localPath, room, conversation string) (string, error) {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
 	}
 
-	// Generate encryption key
-	var encKey []byte
-	if room != "" {
-		c.mu.RLock()
-		epoch := c.currentEpoch[room]
-		encKey = c.epochKeys[room][epoch]
-		c.mu.RUnlock()
-		if encKey == nil {
-			return "", fmt.Errorf("no epoch key for room %s", room)
-		}
-	} else {
-		// DM: generate per-file key (caller wraps it in the message)
-		encKey, err = crypto.GenerateKey()
-		if err != nil {
-			return "", err
-		}
+	if room == "" {
+		return "", fmt.Errorf("UploadFile requires a room; for DM attachments use UploadDMFile")
 	}
 
-	// Encrypt file
+	c.mu.RLock()
+	epoch := c.currentEpoch[room]
+	encKey := c.epochKeys[room][epoch]
+	c.mu.RUnlock()
+	if encKey == nil {
+		return "", fmt.Errorf("no epoch key for room %s", room)
+	}
+
+	return c.uploadEncrypted(data, encKey, room, conversation)
+}
+
+// UploadDMFile encrypts a file with the given per-file key (K_file) and
+// uploads it. The caller stores K_file inside the Attachment's FileKey
+// field when sending the DM message that references this file_id, so
+// recipients can decrypt the file after decrypting the message payload.
+//
+// This is Design A: each attachment carries its own key in the encrypted
+// payload, decoupling upload from message send. See PROTOCOL.md "DM
+// attachments".
+func (c *Client) UploadDMFile(localPath, conversation string, fileKey []byte) (string, error) {
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+	if len(fileKey) == 0 {
+		return "", fmt.Errorf("UploadDMFile: fileKey is required")
+	}
+	return c.uploadEncrypted(data, fileKey, "", conversation)
+}
+
+// uploadEncrypted is the shared transport: encrypts bytes with encKey, runs
+// the upload_start → binary frame → upload_complete round-trip, and returns
+// the server-assigned file_id.
+func (c *Client) uploadEncrypted(data, encKey []byte, room, conversation string) (string, error) {
 	encrypted, err := crypto.Encrypt(encKey, data)
 	if err != nil {
 		return "", fmt.Errorf("encrypt: %w", err)
@@ -59,9 +84,9 @@ func (c *Client) UploadFile(localPath, room, conversation string) (string, error
 
 	uploadID := generateNanoID("up_")
 
-	// Register pending upload
 	pending := &pendingUpload{
 		uploadID: uploadID,
+		ready:    make(chan struct{}, 1),
 		fileID:   make(chan string, 1),
 		err:      make(chan error, 1),
 	}
@@ -75,7 +100,6 @@ func (c *Client) UploadFile(localPath, room, conversation string) (string, error
 		uploadsMu.Unlock()
 	}()
 
-	// Send upload_start
 	err = c.enc.Encode(protocol.UploadStart{
 		Type:         "upload_start",
 		UploadID:     uploadID,
@@ -87,10 +111,16 @@ func (c *Client) UploadFile(localPath, room, conversation string) (string, error
 		return "", fmt.Errorf("send upload_start: %w", err)
 	}
 
-	// The server responds with upload_ready, then we send binary data.
-	// upload_ready and upload_complete are handled by handleInternal.
-	// For simplicity, send the binary data immediately after upload_start —
-	// the server queues it until ready.
+	// Wait for upload_ready before writing binary data — avoids a race where
+	// the binary frame arrives before the server has registered the pending
+	// upload, causing the server to discard the bytes (see handleBinaryChannel).
+	select {
+	case <-pending.ready:
+	case err := <-pending.err:
+		return "", err
+	case <-c.done:
+		return "", fmt.Errorf("disconnected")
+	}
 
 	c.mu.RLock()
 	binChan := c.binChan
@@ -100,11 +130,15 @@ func (c *Client) UploadFile(localPath, room, conversation string) (string, error
 		return "", fmt.Errorf("no binary channel (Channel 2 not open)")
 	}
 
-	if err := writeBinaryFrame(binChan, uploadID, encBytes); err != nil {
+	// Hold binChanMu across the whole frame write so concurrent uploads
+	// don't interleave bytes within a frame (id_len|id|data_len|data).
+	c.binChanMu.Lock()
+	err = writeBinaryFrame(binChan, uploadID, encBytes)
+	c.binChanMu.Unlock()
+	if err != nil {
 		return "", fmt.Errorf("write binary: %w", err)
 	}
 
-	// Wait for upload_complete with file_id
 	select {
 	case fileID := <-pending.fileID:
 		return fileID, nil
@@ -115,13 +149,29 @@ func (c *Client) UploadFile(localPath, room, conversation string) (string, error
 	}
 }
 
+// HandleUploadReady is called from handleInternal when upload_ready arrives.
+func HandleUploadReady(uploadID string) {
+	uploadsMu.Lock()
+	p, ok := uploads[uploadID]
+	uploadsMu.Unlock()
+	if ok {
+		select {
+		case p.ready <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // HandleUploadComplete is called from handleInternal when upload_complete arrives.
 func HandleUploadComplete(uploadID, fileID string) {
 	uploadsMu.Lock()
 	p, ok := uploads[uploadID]
 	uploadsMu.Unlock()
 	if ok {
-		p.fileID <- fileID
+		select {
+		case p.fileID <- fileID:
+		default:
+		}
 	}
 }
 
@@ -142,6 +192,13 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 	}
 	filesDir := filepath.Join(dataDir, "files")
 	os.MkdirAll(filesDir, 0700)
+
+	// Serialize downloads: we must send the request AND read the reply
+	// under the same lock, otherwise two concurrent callers could read
+	// each other's frames (server sends frames in request order, but the
+	// client has no per-request demux here).
+	c.binChanMu.Lock()
+	defer c.binChanMu.Unlock()
 
 	// Send download request
 	err := c.enc.Encode(protocol.Download{

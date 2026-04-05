@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -443,6 +444,84 @@ func TestFullE2E(t *testing.T) {
 
 		waitForType(t, aliceMessages, "dm", 5*time.Second)
 		t.Log("dm messaging: PASSED")
+	})
+
+	// =========================================================================
+	// 11b. DM attachments (Design A: per-file K_file stored in encrypted payload)
+	// =========================================================================
+	t.Run("dm_attachments", func(t *testing.T) {
+		// Create a temp file to upload
+		tmpFile, err := os.CreateTemp("", "sshkey-dm-attach-*.txt")
+		if err != nil {
+			t.Skipf("can't create temp file: %v", err)
+		}
+		defer os.Remove(tmpFile.Name())
+		fileContent := []byte("DM attachment test — encrypted with per-file key")
+		if _, err := tmpFile.Write(fileContent); err != nil {
+			t.Fatalf("write temp: %v", err)
+		}
+		tmpFile.Close()
+
+		// alice sends a DM with the file attached
+		err = alice.SendDMMessageFile(dmConvID, "here's a file", tmpFile.Name(), "", nil)
+		if err != nil {
+			t.Fatalf("alice SendDMMessageFile: %v", err)
+		}
+
+		// bob receives the dm
+		raw := waitForType(t, bobMessages, "dm", 5*time.Second)
+		var dm protocol.DM
+		json.Unmarshal(raw, &dm)
+
+		// Envelope should reference the file_id
+		if len(dm.FileIDs) != 1 {
+			t.Errorf("expected 1 file_id in envelope, got %d", len(dm.FileIDs))
+		}
+
+		// bob decrypts the payload — attachment should carry its own FileKey
+		payload, err := bob.DecryptDMMessage(dm.WrappedKeys, dm.Payload)
+		if err != nil {
+			t.Fatalf("bob decrypt: %v", err)
+		}
+		if len(payload.Attachments) != 1 {
+			t.Fatalf("expected 1 attachment, got %d", len(payload.Attachments))
+		}
+		att := payload.Attachments[0]
+		if att.Name == "" {
+			t.Error("attachment name empty")
+		}
+		if att.Size != int64(len(fileContent)) {
+			t.Errorf("size = %d, want %d", att.Size, len(fileContent))
+		}
+		// Design A: FileKey must be present (base64 K_file) and FileEpoch unset
+		if att.FileKey == "" {
+			t.Fatal("expected file_key on attachment (Design A)")
+		}
+		if att.FileEpoch != 0 {
+			t.Errorf("file_epoch should be 0 for DM attachments, got %d", att.FileEpoch)
+		}
+
+		// bob downloads the file using K_file decoded from the attachment
+		fileKey, err := base64.StdEncoding.DecodeString(att.FileKey)
+		if err != nil {
+			t.Fatalf("decode file_key: %v", err)
+		}
+		downloaded, err := bob.DownloadFile(att.FileID, fileKey)
+		if err != nil {
+			t.Fatalf("download: %v", err)
+		}
+		got, err := os.ReadFile(downloaded)
+		if err != nil {
+			t.Fatalf("read downloaded: %v", err)
+		}
+		if string(got) != string(fileContent) {
+			t.Errorf("decrypted file content mismatch\n got:  %q\n want: %q", got, fileContent)
+		}
+
+		// alice also receives her own dm echo
+		waitForType(t, aliceMessages, "dm", 5*time.Second)
+
+		t.Log("dm attachments: PASSED — file decrypted with per-file key")
 	})
 
 	// =========================================================================

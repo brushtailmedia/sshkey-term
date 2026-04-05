@@ -535,7 +535,8 @@ type Attachment struct {
 	Size        int64  `json:"size"`
 	Mime        string `json:"mime"`
 	ThumbnailID string `json:"thumbnail_id,omitempty"`
-	FileEpoch   int64  `json:"file_epoch,omitempty"` // rooms only
+	FileEpoch   int64  `json:"file_epoch,omitempty"` // rooms: which epoch key decrypts this file
+	FileKey     string `json:"file_key,omitempty"`   // DMs: base64 per-file symmetric key K_file
 }
 
 type Preview struct {

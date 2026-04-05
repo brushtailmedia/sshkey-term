@@ -41,14 +41,15 @@ type Config struct {
 
 // Client manages the SSH connection and protocol session.
 type Client struct {
-	cfg     Config
-	conn    *ssh.Client
-	channel ssh.Channel
-	binChan ssh.Channel  // Channel 2 for file transfer
-	enc     *protocol.Encoder
-	dec     *protocol.Decoder
-	logger  *slog.Logger
-	store   *store.Store
+	cfg       Config
+	conn      *ssh.Client
+	channel   ssh.Channel
+	binChan   ssh.Channel // Channel 2 for file transfer
+	binChanMu sync.Mutex  // serializes all binChan reads/writes (frames must not interleave)
+	enc       *protocol.Encoder
+	dec       *protocol.Decoder
+	logger    *slog.Logger
+	store     *store.Store
 
 	mu          sync.RWMutex
 	username    string
@@ -369,6 +370,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 				c.convMembers[ce.Conversation] = filtered
 			}
 			c.mu.Unlock()
+		}
+	case "upload_ready":
+		var ur protocol.UploadReady
+		if err := json.Unmarshal(raw, &ur); err == nil {
+			HandleUploadReady(ur.UploadID)
 		}
 	case "upload_complete":
 		var uc protocol.UploadComplete

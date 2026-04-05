@@ -149,18 +149,18 @@ func sniffMimeType(path string) string {
 	}
 }
 
-// SendDMMessage encrypts and sends a DM message.
+// SendDMMessage encrypts and sends a DM message. Zero-attachments convenience
+// wrapper around SendDMMessageFull.
 func (c *Client) SendDMMessage(conversation, body string, replyTo string, mentions []string) error {
-	c.mu.RLock()
-	// TODO: get member list for this conversation from local state
-	c.mu.RUnlock()
+	return c.SendDMMessageFull(conversation, body, replyTo, mentions, nil)
+}
 
-	// Generate per-message key
-	msgKey, err := crypto.GenerateKey()
-	if err != nil {
-		return err
-	}
-
+// SendDMMessageFull sends a DM message with attachments. Generates a fresh
+// per-message key K_msg to encrypt the payload and wraps it for each member.
+// Attachments must already have been uploaded and must carry their own
+// base64 FileKey (K_file) so recipients can decrypt each file independently
+// after decrypting the message payload. See PROTOCOL.md "DM attachments".
+func (c *Client) SendDMMessageFull(conversation, body, replyTo string, mentions []string, attachments []protocol.Attachment) error {
 	// Build payload
 	c.mu.Lock()
 	seqKey := "conv:" + conversation
@@ -169,27 +169,35 @@ func (c *Client) SendDMMessage(conversation, body string, replyTo string, mentio
 	c.mu.Unlock()
 
 	payload := protocol.DecryptedPayload{
-		Body:     body,
-		Seq:      seq,
-		DeviceID: c.cfg.DeviceID,
-		Mentions: mentions,
-		ReplyTo:  replyTo,
+		Body:        body,
+		Seq:         seq,
+		DeviceID:    c.cfg.DeviceID,
+		Mentions:    mentions,
+		ReplyTo:     replyTo,
+		Attachments: attachments,
 	}
 	payloadJSON, _ := json.Marshal(payload)
 
-	// Encrypt
+	msgKey, err := crypto.GenerateKey()
+	if err != nil {
+		return err
+	}
+
 	encrypted, err := crypto.Encrypt(msgKey, payloadJSON)
 	if err != nil {
 		return err
 	}
 
-	// Wrap key for each member
 	wrappedKeys, err := c.wrapKeyForConversation(conversation, msgKey)
 	if err != nil {
 		return err
 	}
 
-	// Sign
+	fileIDs := make([]string, 0, len(attachments))
+	for _, a := range attachments {
+		fileIDs = append(fileIDs, a.FileID)
+	}
+
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
 	sig := crypto.SignDM(c.privKey, payloadBytes, conversation, wrappedKeys)
 
@@ -198,8 +206,41 @@ func (c *Client) SendDMMessage(conversation, body string, replyTo string, mentio
 		Conversation: conversation,
 		WrappedKeys:  wrappedKeys,
 		Payload:      encrypted,
+		FileIDs:      fileIDs,
 		Signature:    base64.StdEncoding.EncodeToString(sig),
 	})
+}
+
+// SendDMMessageFile uploads a local file into a DM conversation and sends a
+// message that references it as an attachment. Uses Design A: each file is
+// encrypted with its own per-file key K_file, which is stored inside the
+// encrypted message payload's attachment entry. Recipients decrypt the
+// message payload (using their wrapped K_msg) to recover K_file, then
+// download and decrypt the file bytes.
+//
+// See PROTOCOL.md "DM attachments" for details.
+func (c *Client) SendDMMessageFile(conversation, body, filePath, replyTo string, mentions []string) error {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+	// Generate a fresh per-file key K_file for this attachment.
+	fileKey, err := crypto.GenerateKey()
+	if err != nil {
+		return err
+	}
+	fileID, err := c.UploadDMFile(filePath, conversation, fileKey)
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	att := protocol.Attachment{
+		FileID:  fileID,
+		Name:    filepath.Base(filePath),
+		Size:    info.Size(),
+		Mime:    sniffMimeType(filePath),
+		FileKey: base64.StdEncoding.EncodeToString(fileKey),
+	}
+	return c.SendDMMessageFull(conversation, body, replyTo, mentions, []protocol.Attachment{att})
 }
 
 // wrapKeyForConversation wraps a symmetric key for all members of a conversation.
@@ -250,6 +291,14 @@ func (c *Client) wrapKeyForConversation(conversation string, key []byte) (map[st
 // UnwrapKey unwraps a wrapped key using the client's private key.
 func (c *Client) UnwrapKey(wrappedBase64 string) ([]byte, error) {
 	return crypto.UnwrapKey(wrappedBase64, c.privKey)
+}
+
+// RoomEpochKey returns the raw epoch key for a (room, epoch) pair, or nil
+// if not known. Used by the TUI to decrypt room attachments.
+func (c *Client) RoomEpochKey(room string, epoch int64) []byte {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.epochKeys[room][epoch]
 }
 
 // DecryptRoomMessage decrypts a room message payload.

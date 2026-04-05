@@ -155,17 +155,22 @@ func (s *Store) init() error {
 		return err
 	}
 
-	// FTS5 search index — optional, may not be available in all SQLite builds
-	s.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+	// FTS5 search index — optional, may not be available in all SQLite builds.
+	// Only create the triggers if the VIRTUAL TABLE was created successfully —
+	// otherwise INSERT/DELETE on messages would fail trying to update a
+	// non-existent FTS table.
+	_, ftsErr := s.db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 		body, sender, id UNINDEXED,
 		content='messages', content_rowid='rowid'
 	)`)
-	s.db.Exec(`CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-		INSERT INTO messages_fts(rowid, body, sender, id) VALUES (new.rowid, new.body, new.sender, new.id);
-	END`)
-	s.db.Exec(`CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-		INSERT INTO messages_fts(messages_fts, rowid, body, sender, id) VALUES ('delete', old.rowid, old.body, old.sender, old.id);
-	END`)
+	if ftsErr == nil {
+		s.db.Exec(`CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+			INSERT INTO messages_fts(rowid, body, sender, id) VALUES (new.rowid, new.body, new.sender, new.id);
+		END`)
+		s.db.Exec(`CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+			INSERT INTO messages_fts(messages_fts, rowid, body, sender, id) VALUES ('delete', old.rowid, old.body, old.sender, old.id);
+		END`)
+	}
 	// If FTS5 isn't available, search falls back to LIKE queries
 
 	return nil
