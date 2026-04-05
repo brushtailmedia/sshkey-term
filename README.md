@@ -120,7 +120,9 @@ Each server is independent -- different keys, different rooms, different users. 
 
 ## Security model
 
-**Your Ed25519 key is your permanent identity.** There is no password, no server-side recovery, and no key rotation.
+**Your Ed25519 key is your permanent identity.** 
+
+The server never sees your private key or passphrase, only the public key. The client handles all encryption, decryption, signing, and verification locally. The server is a blind relay that routes messages and enforces access control based on public keys.
 
 Three layers of protection, used in combination:
 
@@ -130,9 +132,9 @@ Three layers of protection, used in combination:
 | **Device revocation** | Stolen device where you're confident the key/passphrase held | **Settings → Manage devices on this server** (self-service) or ask your admin to `sshkey-ctl revoke-device --user you --device dev_...` |
 | **Account retirement** | Key compromise (copied, leaked, passphrase cracked) | **Settings → Retire account** (requires typing `RETIRE MY ACCOUNT` to confirm) |
 
-Device revocation is operational cleanup — it doesn't stop an attacker who extracted your raw key. If you suspect the key itself is gone, retire the account.
+Device revocation is operational cleanup — it doesn't stop an attacker who has your private key and knows your key passphrase, this is why it is important to protect your key with a passphrase. If you suspect the key itself is compromised, retire the account.
 
-**Retirement is monotonic and irreversible.** A retired account cannot be reactivated. To use the server again, the admin adds you as a new account (same or different username) with your new key. You lose access to pre-retirement room history, and existing 1:1 DMs with you become read-only for the other party.
+**Retirement is monotonic and irreversible.** A retired account cannot be reactivated. To use the server again, the admin adds you as a new account (same or different username) with your new key. You lose access to your previous chat history, any existing DMs with you become read-only for the other party.
 
 **Back up your key.** If you lose both the key and your passphrase with no backup, your account ends — the server cannot help you recover it. The first-run wizard enforces an explicit acknowledgement of this before letting you connect.
 
