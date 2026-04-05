@@ -123,18 +123,18 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, conversation string)
 	}
 
 	c.mu.RLock()
-	binChan := c.binChan
+	ulChan := c.uploadChan
 	c.mu.RUnlock()
 
-	if binChan == nil {
-		return "", fmt.Errorf("no binary channel (Channel 2 not open)")
+	if ulChan == nil {
+		return "", fmt.Errorf("no upload channel (Channel 3 not open)")
 	}
 
-	// Hold binChanMu across the whole frame write so concurrent uploads
+	// Hold uploadChanMu across the whole frame write so concurrent uploads
 	// don't interleave bytes within a frame (id_len|id|data_len|data).
-	c.binChanMu.Lock()
-	err = writeBinaryFrame(binChan, uploadID, encBytes)
-	c.binChanMu.Unlock()
+	c.uploadChanMu.Lock()
+	err = writeBinaryFrame(ulChan, uploadID, encBytes)
+	c.uploadChanMu.Unlock()
 	if err != nil {
 		return "", fmt.Errorf("write binary: %w", err)
 	}
@@ -178,11 +178,11 @@ func HandleUploadComplete(uploadID, fileID string) {
 // DownloadFile downloads and decrypts a file. Returns the local path.
 func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) {
 	c.mu.RLock()
-	binChan := c.binChan
+	dlChan := c.downloadChan
 	c.mu.RUnlock()
 
-	if binChan == nil {
-		return "", fmt.Errorf("no binary channel")
+	if dlChan == nil {
+		return "", fmt.Errorf("no download channel")
 	}
 
 	// Determine save directory
@@ -197,8 +197,8 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 	// under the same lock, otherwise two concurrent callers could read
 	// each other's frames (server sends frames in request order, but the
 	// client has no per-request demux here).
-	c.binChanMu.Lock()
-	defer c.binChanMu.Unlock()
+	c.downloadChanMu.Lock()
+	defer c.downloadChanMu.Unlock()
 
 	// Send download request
 	err := c.enc.Encode(protocol.Download{
@@ -210,7 +210,7 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 	}
 
 	// Read binary frame from Channel 2
-	_, data, err := readBinaryFrame(binChan)
+	_, data, err := readBinaryFrame(dlChan)
 	if err != nil {
 		return "", fmt.Errorf("read binary: %w", err)
 	}

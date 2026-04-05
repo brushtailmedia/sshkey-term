@@ -41,15 +41,17 @@ type Config struct {
 
 // Client manages the SSH connection and protocol session.
 type Client struct {
-	cfg       Config
-	conn      *ssh.Client
-	channel   ssh.Channel
-	binChan   ssh.Channel // Channel 2 for file transfer
-	binChanMu sync.Mutex  // serializes all binChan reads/writes (frames must not interleave)
-	enc       *protocol.Encoder
-	dec       *protocol.Decoder
-	logger    *slog.Logger
-	store     *store.Store
+	cfg            Config
+	conn           *ssh.Client
+	channel        ssh.Channel
+	downloadChan   ssh.Channel // Channel 2: client reads file bytes from here
+	downloadChanMu sync.Mutex  // serializes concurrent downloads (request+read atomic)
+	uploadChan     ssh.Channel // Channel 3: client writes file bytes here
+	uploadChanMu   sync.Mutex  // serializes concurrent uploads (frame writes must not interleave)
+	enc            *protocol.Encoder
+	dec            *protocol.Decoder
+	logger         *slog.Logger
+	store          *store.Store
 
 	mu          sync.RWMutex
 	username    string
@@ -131,13 +133,22 @@ func (c *Client) Connect() error {
 	c.enc = protocol.NewEncoder(ch)
 	c.dec = protocol.NewDecoder(ch)
 
-	// Open Channel 2 (binary file transfer) — non-fatal if it fails
-	binCh, binReqs, err := conn.OpenChannel("session", nil)
+	// Open Channel 2 (downloads: server writes, client reads) — non-fatal if it fails
+	dlCh, dlReqs, err := conn.OpenChannel("session", nil)
 	if err != nil {
-		c.logger.Warn("failed to open binary channel", "error", err)
+		c.logger.Warn("failed to open download channel", "error", err)
 	} else {
-		go ssh.DiscardRequests(binReqs)
-		c.binChan = binCh
+		go ssh.DiscardRequests(dlReqs)
+		c.downloadChan = dlCh
+	}
+
+	// Open Channel 3 (uploads: client writes, server reads) — non-fatal if it fails
+	ulCh, ulReqs, err := conn.OpenChannel("session", nil)
+	if err != nil {
+		c.logger.Warn("failed to open upload channel", "error", err)
+	} else {
+		go ssh.DiscardRequests(ulReqs)
+		c.uploadChan = ulCh
 	}
 
 	// Perform handshake
