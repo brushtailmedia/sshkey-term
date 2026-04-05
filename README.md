@@ -4,14 +4,16 @@ Terminal client for [sshkey](https://github.com/brushtailmedia/sshkey) -- a priv
 
 ## Features
 
-- End-to-end encrypted rooms and DMs (AES-256-GCM, X25519 key wrapping) 
-- SSH key is your identity -- no accounts, no passwords
+- End-to-end encrypted rooms and DMs (AES-256-GCM, X25519 key wrapping)
+- SSH key is your permanent identity -- no accounts, no passwords, no key rotation
 - Rooms with epoch-based key rotation, DMs with per-message keys
 - File sharing, reactions, typing indicators, read receipts, presence
 - Inline images via sixel/kitty/iterm2 protocols
 - Local encrypted database (SQLCipher) with full-text search
 - Multi-server support
 - Offline message history (lazy scroll-back)
+- Self-service account retirement (settings → Retire account) with typed confirmation
+- First-run wizard with key generation + passphrase + mandatory backup acknowledgement
 
 ## Architecture
 
@@ -114,6 +116,26 @@ key = "~/.ssh/work_key"
 ```
 
 Each server is independent -- different keys, different rooms, different users. Local DB is per-server.
+
+## Security model
+
+**Your Ed25519 key is your permanent identity.** There is no password, no server-side recovery, and no key rotation.
+
+Three layers of protection, used in combination:
+
+| Layer | Protects against | How to use |
+|---|---|---|
+| **Passphrase** | Stolen device — key at rest | Set a passphrase when generating your key (wizard prompts by default) |
+| **Device revocation** | Stolen device where you're confident the key/passphrase held | Ask your admin to `sshkey-ctl revoke-device --user you --device dev_...` |
+| **Account retirement** | Key compromise (copied, leaked, passphrase cracked) | **Settings → Retire account** (requires typing `RETIRE MY ACCOUNT` to confirm) |
+
+Device revocation is operational cleanup — it doesn't stop an attacker who extracted your raw key. If you suspect the key itself is gone, retire the account.
+
+**Retirement is monotonic and irreversible.** A retired account cannot be reactivated. To use the server again, the admin adds you as a new account (same or different username) with your new key. You lose access to pre-retirement room history, and existing 1:1 DMs with you become read-only for the other party.
+
+**Back up your key.** If you lose both the key and your passphrase with no backup, your account ends — the server cannot help you recover it. The first-run wizard enforces an explicit acknowledgement of this before letting you connect.
+
+See [PROTOCOL.md](PROTOCOL.md) section "Account Retirement" for the wire protocol and [the server's PROJECT.md "Account Lifecycle"](https://github.com/brushtailmedia/sshkey/blob/main/PROJECT.md) for the full design rationale.
 
 ## Protocol
 

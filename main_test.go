@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,18 +12,69 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
+// Test fixtures: generate fresh Ed25519 keys at known /tmp paths on first
+// test invocation. Build a users.toml whose public keys match those private
+// keys. Reuse across tests in the same process (sync.Once).
+var (
+	fixturesOnce sync.Once
+	fixturesErr  error
+	testUsersToml string // generated users.toml content with matching pubkeys
+)
+
+func ensureTestFixtures() error {
+	fixturesOnce.Do(func() {
+		users := []struct {
+			name    string
+			keyPath string
+			rooms   string
+		}{
+			{"alice", "/tmp/sshkey-test-key", `["general", "engineering"]`},
+			{"bob", "/tmp/sshkey-test-key-bob", `["general"]`},
+			{"carol", "/tmp/sshkey-test-key-carol", `["general"]`},
+		}
+		for _, u := range users {
+			pub, priv, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				fixturesErr = err
+				return
+			}
+			block, err := ssh.MarshalPrivateKey(priv, "")
+			if err != nil {
+				fixturesErr = err
+				return
+			}
+			if err := os.WriteFile(u.keyPath, pem.EncodeToMemory(block), 0600); err != nil {
+				fixturesErr = err
+				return
+			}
+			sshPub, _ := ssh.NewPublicKey(pub)
+			pubLine := strings.TrimRight(string(ssh.MarshalAuthorizedKey(sshPub)), "\n")
+			testUsersToml += fmt.Sprintf("[%s]\nkey = %q\ndisplay_name = %q\nrooms = %s\n\n",
+				u.name, pubLine+" "+u.name+"@test", u.name, u.rooms)
+		}
+	})
+	return fixturesErr
+}
+
 // startTestServer builds and starts the sshkey-server with test config.
 func startTestServer(t *testing.T) (port int, cleanup func()) {
 	t.Helper()
 
-	serverDir := filepath.Join("..", "sshkey")
+	if err := ensureTestFixtures(); err != nil {
+		t.Fatalf("generate test fixtures: %v", err)
+	}
+
+	serverDir := filepath.Join("..", "sshkey-chat")
 	configDir := filepath.Join(serverDir, "testdata", "config")
 	dataDir := t.TempDir()
 
@@ -36,11 +90,12 @@ func startTestServer(t *testing.T) (port int, cleanup func()) {
 	overrideConfig := filepath.Join(dataDir, "config")
 	os.MkdirAll(overrideConfig, 0755)
 
-	// Copy config files and override port
-	for _, f := range []string{"users.toml", "rooms.toml"} {
-		data, _ := os.ReadFile(filepath.Join(configDir, f))
-		os.WriteFile(filepath.Join(overrideConfig, f), data, 0644)
-	}
+	// Write users.toml with our generated public keys (matches /tmp private keys)
+	os.WriteFile(filepath.Join(overrideConfig, "users.toml"), []byte(testUsersToml), 0644)
+
+	// Copy rooms.toml (static)
+	roomsData, _ := os.ReadFile(filepath.Join(configDir, "rooms.toml"))
+	os.WriteFile(filepath.Join(overrideConfig, "rooms.toml"), roomsData, 0644)
 
 	serverToml, _ := os.ReadFile(filepath.Join(configDir, "server.toml"))
 	overridden := strings.Replace(string(serverToml), "port = 2222", fmt.Sprintf("port = %d", port), 1)

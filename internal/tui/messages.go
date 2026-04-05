@@ -85,8 +85,9 @@ type MessagesModel struct {
 	typingUsers    map[string]time.Time // user -> last typing time
 	currentUser    string               // for @mention highlighting
 	loadingHistory bool
-	hasMore        bool   // server indicated more history available
-	unreadFromID   string // first unread message ID (for divider)
+	hasMore        bool              // server indicated more history available
+	unreadFromID   string            // first unread message ID (for divider)
+	retired        map[string]bool   // username -> account retired
 }
 
 func NewMessages() MessagesModel {
@@ -94,7 +95,26 @@ func NewMessages() MessagesModel {
 		cursor:      -1,
 		typingUsers: make(map[string]time.Time),
 		hasMore:     true,
+		retired:     make(map[string]bool),
 	}
+}
+
+// SetRetired updates the set of known-retired users. Called by the app when
+// user_retired / retired_users events arrive. Used by View() to append a
+// [retired] marker next to historical sender names.
+func (m *MessagesModel) SetRetired(users map[string]string) {
+	m.retired = make(map[string]bool, len(users))
+	for user := range users {
+		m.retired[user] = true
+	}
+}
+
+// MarkRetired adds a single user to the retired set (on user_retired event).
+func (m *MessagesModel) MarkRetired(user string) {
+	if m.retired == nil {
+		m.retired = make(map[string]bool)
+	}
+	m.retired[user] = true
 }
 
 func (m *MessagesModel) SetContext(room, conversation string) {
@@ -552,7 +572,11 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 			var line string
 			if showHeader {
 				ts := time.Unix(msg.TS, 0).Format("3:04 PM")
-				header := usernameStyle.Render(msg.From) + "  " + timestampStyle.Render(ts)
+				header := usernameStyle.Render(msg.From)
+				if m.retired[msg.From] {
+					header += " " + helpDescStyle.Render("[retired]")
+				}
+				header += "  " + timestampStyle.Render(ts)
 				line = " " + header + "\n" + body
 			} else {
 				line = body

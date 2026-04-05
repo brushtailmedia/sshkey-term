@@ -394,3 +394,17 @@ func (c *Client) RequestHistory(room, conversation, before string, limit int) er
 		Limit:        limit,
 	})
 }
+
+// SendRetireMe permanently retires the current user's account. After the
+// server processes this, the session is closed and the key will no longer
+// authenticate. This is irreversible — a new account must be created via
+// admin action to regain access to this server.
+//
+// Valid reasons: "self_compromise" (key suspected compromised), "switching_key"
+// (user upgrading to a new key), "other".
+func (c *Client) SendRetireMe(reason string) error {
+	return c.enc.Encode(protocol.RetireMe{
+		Type:   "retire_me",
+		Reason: reason,
+	})
+}

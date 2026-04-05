@@ -116,6 +116,11 @@ func (s *SettingsModel) buildItems(username string, currentServer int) {
 	s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
 	s.items = append(s.items, settingsItem{label: "── Device ──", value: "", action: ""})
 	s.items = append(s.items, settingsItem{label: "  Device ID", value: s.cfg.Device.ID, action: ""})
+
+	// Account section (danger zone)
+	s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
+	s.items = append(s.items, settingsItem{label: "── Account ──", value: "", action: ""})
+	s.items = append(s.items, settingsItem{label: "  [Retire account on this server]", value: "", action: "retire_account"})
 }
 
 func (s *SettingsModel) Hide() {
@@ -226,6 +231,10 @@ func (s SettingsModel) Update(msg tea.KeyMsg) (SettingsModel, tea.Cmd) {
 			case item.action == "add_server":
 				return s, func() tea.Msg {
 					return SettingsActionMsg{Action: "add_server"}
+				}
+			case item.action == "retire_account":
+				return s, func() tea.Msg {
+					return SettingsActionMsg{Action: "retire_account"}
 				}
 			}
 		}

@@ -59,6 +59,7 @@ type Client struct {
 	capabilities []string
 	profiles     map[string]*protocol.Profile
 	convMembers  map[string][]string         // conversation ID -> member usernames
+	retired      map[string]string           // retired username -> retired_at timestamp
 	epochKeys    map[string]map[int64][]byte // room -> epoch -> unwrapped key
 	currentEpoch map[string]int64            // room -> current epoch number
 	seqCounters  map[string]int64            // "room:x" or "conv:x" -> next seq
@@ -79,6 +80,7 @@ func New(cfg Config) *Client {
 		logger:       cfg.Logger,
 		profiles:     make(map[string]*protocol.Profile),
 		convMembers:  make(map[string][]string),
+		retired:      make(map[string]string),
 		epochKeys:    make(map[string]map[int64][]byte),
 		currentEpoch: make(map[string]int64),
 		seqCounters:  make(map[string]int64),
@@ -306,6 +308,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		if err := json.Unmarshal(raw, &p); err == nil {
 			c.mu.Lock()
 			c.profiles[p.User] = &p
+			if p.Retired {
+				c.retired[p.User] = p.RetiredAt
+			} else {
+				delete(c.retired, p.User)
+			}
 			c.mu.Unlock()
 			c.StoreProfile(&p)
 		}
@@ -378,6 +385,29 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		return // sync_batch messages are forwarded from handleSyncBatchKeys
 	case "history_result":
 		c.handleHistoryKeys(raw)
+	case "user_retired":
+		var ur protocol.UserRetired
+		if err := json.Unmarshal(raw, &ur); err == nil {
+			c.mu.Lock()
+			// Record retirement; keep historical profile intact so signature
+			// verification still works against messages from before retirement.
+			c.retired[ur.User] = time.Unix(ur.Ts, 0).UTC().Format(time.RFC3339)
+			c.mu.Unlock()
+		}
+	case "retired_users":
+		var ru protocol.RetiredUsers
+		if err := json.Unmarshal(raw, &ru); err == nil {
+			c.mu.Lock()
+			for _, u := range ru.Users {
+				c.retired[u.User] = u.RetiredAt
+			}
+			c.mu.Unlock()
+		}
+	case "device_revoked":
+		// The server will close the SSH channel next. The UI layer receives
+		// this event via OnMessage and should call Close() to stop the
+		// reconnect loop (otherwise the client will keep trying to auth
+		// with the revoked device_id). See tui/app.go device_revoked handler.
 	}
 }
 
@@ -426,6 +456,29 @@ func (c *Client) Profile(user string) *protocol.Profile {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.profiles[user]
+}
+
+// IsRetired returns true if the user's account has been retired, along with
+// the retirement timestamp. TUI layers use this to render [retired] markers
+// on historical messages, disable sends to retired users in 1:1 DMs, and
+// exclude them from mention completion / new DM candidates.
+func (c *Client) IsRetired(user string) (bool, string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ts, ok := c.retired[user]
+	return ok, ts
+}
+
+// RetiredUsers returns a snapshot of all known retired users mapped to their
+// retirement timestamps. Used by the TUI to iterate retirement state.
+func (c *Client) RetiredUsers() map[string]string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make(map[string]string, len(c.retired))
+	for k, v := range c.retired {
+		out[k] = v
+	}
+	return out
 }
 
 // ConvMembers returns the member list for a conversation.

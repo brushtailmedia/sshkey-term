@@ -33,6 +33,7 @@ type memberPanelEntry struct {
 	DisplayName string
 	Online      bool
 	Verified    bool
+	Retired     bool
 }
 
 func NewMemberPanel() MemberPanelModel {
@@ -69,19 +70,23 @@ func (m *MemberPanelModel) Refresh(room, conversation string, c *client.Client, 
 			if p != nil {
 				displayName = p.DisplayName
 			}
+			retired, _ := c.IsRetired(user)
 			m.members = append(m.members, memberPanelEntry{
 				User:        user,
 				DisplayName: displayName,
 				Online:      online[user],
+				Retired:     retired,
 			})
 		}
 	} else if room != "" {
 		// Room members — show all profiles (we don't track per-room membership client-side)
 		c.ForEachProfile(func(p *protocol.Profile) {
+			retired, _ := c.IsRetired(p.User)
 			m.members = append(m.members, memberPanelEntry{
 				User:        p.User,
 				DisplayName: p.DisplayName,
 				Online:      online[p.User],
+				Retired:     retired,
 			})
 		})
 	}
@@ -159,6 +164,9 @@ func (m MemberPanelModel) View(width, height int) string {
 		name := mem.DisplayName
 		if mem.Verified {
 			name = checkStyle.Render("✓") + " " + name
+		}
+		if mem.Retired {
+			name += " " + helpDescStyle.Render("[retired]")
 		}
 
 		line := " " + dot + " " + name

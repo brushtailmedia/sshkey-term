@@ -2,7 +2,6 @@
 package config
 
 import (
-	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
 	"os"
@@ -199,18 +198,4 @@ func SaveMutedMap(dir string, cfg *Config, muted map[string]bool) error {
 func MarkHelpShown(dir string, cfg *Config) error {
 	cfg.Notifications.HelpShown = true
 	return Save(dir, cfg)
-}
-
-// GenerateSSHKey generates a new Ed25519 SSH key pair and saves to disk.
-func GenerateSSHKey(path string) error {
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return err
-	}
-
-	// Write private key in OpenSSH format
-	// Use ssh.MarshalPrivateKey for proper format
-	// For now, write raw PEM — TODO: use proper OpenSSH format
-	_ = priv
-	return fmt.Errorf("key generation not yet implemented — use ssh-keygen -t ed25519")
 }

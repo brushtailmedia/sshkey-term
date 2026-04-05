@@ -43,6 +43,7 @@ type SidebarModel struct {
 	conversations []protocol.ConversationInfo
 	unread        map[string]int    // room/conv -> count
 	online        map[string]bool   // user -> online
+	retired       map[string]bool   // user -> retired
 	cursor        int               // position in the combined list
 	selectedRoom  string
 	selectedConv  string
@@ -54,9 +55,19 @@ type SidebarModel struct {
 
 func NewSidebar() SidebarModel {
 	return SidebarModel{
-		unread: make(map[string]int),
-		online: make(map[string]bool),
+		unread:  make(map[string]int),
+		online:  make(map[string]bool),
+		retired: make(map[string]bool),
 	}
+}
+
+// MarkRetired flags a user as retired. Used to render [retired] on any 1:1
+// DM the user is the other party in.
+func (s *SidebarModel) MarkRetired(user string) {
+	if s.retired == nil {
+		s.retired = make(map[string]bool)
+	}
+	s.retired[user] = true
 }
 
 func (s *SidebarModel) SetRooms(rooms []string) {
@@ -167,16 +178,22 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 
 		dot := offlineDot
 		// For 1:1 DMs, show online status of the other user
+		otherRetired := false
 		if len(conv.Members) == 2 {
 			for _, m := range conv.Members {
 				if s.online[m] {
 					dot = onlineDot
-					break
+				}
+				if s.retired[m] {
+					otherRetired = true
 				}
 			}
 		}
 
 		line := " " + dot + " " + name
+		if otherRetired {
+			line += " " + helpDescStyle.Render("[retired]")
+		}
 		if count, ok := s.unread[conv.ID]; ok && count > 0 {
 			line += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
 		}

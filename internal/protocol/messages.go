@@ -138,6 +138,7 @@ type ConversationEvent struct {
 	Conversation string `json:"conversation"`
 	Event        string `json:"event"`
 	User         string `json:"user"`
+	Reason       string `json:"reason,omitempty"` // "retirement" when leave was caused by account retirement
 }
 
 // Deletion
@@ -274,6 +275,8 @@ type Profile struct {
 	AvatarID       string `json:"avatar_id,omitempty"`
 	PubKey         string `json:"pubkey"`
 	KeyFingerprint string `json:"key_fingerprint"`
+	Retired        bool   `json:"retired,omitempty"`
+	RetiredAt      string `json:"retired_at,omitempty"`
 }
 
 type SetStatus struct {
@@ -429,36 +432,35 @@ type PushRegistered struct {
 	Platform string `json:"platform"`
 }
 
-// Key rotation
-
-type KeyRotate struct {
-	Type      string `json:"type"`
-	NewPubKey string `json:"new_pubkey"`
-}
-
-type KeyRotateKeys struct {
-	Type string          `json:"type"`
-	Keys []KeyRotateItem `json:"keys"`
-}
-
-type KeyRotateItem struct {
-	Room       string `json:"room"`
-	Epoch      int64  `json:"epoch"`
-	WrappedKey string `json:"wrapped_key"`
-}
-
-type KeyRotateComplete struct {
-	Type      string          `json:"type"`
-	Keys      []KeyRotateItem `json:"keys"`
-	NewPubKey string          `json:"new_pubkey"`
-}
-
 // Server events
 
 type ServerShutdown struct {
 	Type        string `json:"type"`
 	Message     string `json:"message"`
 	ReconnectIn int    `json:"reconnect_in"`
+}
+
+// Account retirement
+
+type RetireMe struct {
+	Type   string `json:"type"`
+	Reason string `json:"reason"`
+}
+
+type UserRetired struct {
+	Type string `json:"type"`
+	User string `json:"user"`
+	Ts   int64  `json:"ts"`
+}
+
+type RetiredUsers struct {
+	Type  string        `json:"type"`
+	Users []RetiredUser `json:"users"`
+}
+
+type RetiredUser struct {
+	User      string `json:"user"`
+	RetiredAt string `json:"retired_at"`
 }
 
 type DeviceRevoked struct {

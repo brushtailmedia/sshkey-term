@@ -1,9 +1,6 @@
 package tui
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -296,49 +293,21 @@ func (w WizardModel) doGenerateKey() (tea.Model, tea.Cmd) {
 		return w, nil
 	}
 
-	// Expand ~
-	if strings.HasPrefix(path, "~/") {
+	// Expand ~ for storing in result (generateEd25519KeyFile does its own expansion)
+	expandedPath := path
+	if strings.HasPrefix(expandedPath, "~/") {
 		home, _ := os.UserHomeDir()
-		path = filepath.Join(home, path[2:])
+		expandedPath = filepath.Join(home, expandedPath[2:])
 	}
 
-	// Generate Ed25519 key
-	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
+	fingerprint, err := generateEd25519KeyFile(path, pass)
 	if err != nil {
 		w.err = "Key generation failed: " + err.Error()
 		return w, nil
 	}
 
-	// Marshal to OpenSSH format
-	var pemBlock *pem.Block
-	if pass != "" {
-		pemBlock, err = ssh.MarshalPrivateKeyWithPassphrase(privKey, "", []byte(pass))
-	} else {
-		pemBlock, err = ssh.MarshalPrivateKey(privKey, "")
-	}
-	if err != nil {
-		w.err = "Marshal failed: " + err.Error()
-		return w, nil
-	}
-
-	privPEM := pem.EncodeToMemory(pemBlock)
-
-	// Write private key
-	os.MkdirAll(filepath.Dir(path), 0700)
-	if err := os.WriteFile(path, privPEM, 0600); err != nil {
-		w.err = "Write failed: " + err.Error()
-		return w, nil
-	}
-
-	// Write public key
-	sshPub, err := ssh.NewPublicKey(pubKey)
-	if err == nil {
-		pubLine := string(ssh.MarshalAuthorizedKey(sshPub))
-		os.WriteFile(path+".pub", []byte(pubLine), 0644)
-	}
-
-	w.result.KeyPath = path
-	w.keyFingerprint = ssh.FingerprintSHA256(sshPub)
+	w.result.KeyPath = expandedPath
+	w.keyFingerprint = fingerprint
 	w.err = ""
 	w.step = WizardBackup
 	return w, nil
@@ -349,11 +318,15 @@ func (w WizardModel) updateBackup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e", "enter":
 		w.step = WizardExport
 		w.exportInput.Focus()
-	case "l", "s", "esc":
-		// "I'll do it later" / skip
+	case "a":
+		// Explicit acknowledgement: "I'll back it up myself — no recovery exists"
 		w.step = WizardServer
 		w.serverInputs[0].Focus()
 		w.serverFocused = 0
+	case "esc":
+		// Go back to key selection rather than silently skipping
+		w.step = WizardKeySelect
+		w.err = ""
 	}
 	return w, nil
 }
@@ -572,11 +545,13 @@ func (w WizardModel) viewBackup() string {
 	b.WriteString("\n\n")
 	b.WriteString("  This key is your identity. If you lose it,\n")
 	b.WriteString("  you lose access to your account and all\n")
-	b.WriteString("  encrypted message history.\n\n")
+	b.WriteString("  encrypted message history. The server\n")
+	b.WriteString("  cannot recover your account.\n\n")
 	b.WriteString("  Your key:\n")
 	b.WriteString("  " + w.result.KeyPath + "\n\n")
-	b.WriteString("  " + searchHeaderStyle.Render("[e] Export copy to file") + "  " + helpDescStyle.Render("[l] I'll do it later") + "\n\n")
-	b.WriteString(helpDescStyle.Render("  You can always export later from Settings."))
+	b.WriteString("  " + searchHeaderStyle.Render("[e] Export copy to file") + "\n")
+	b.WriteString("  " + helpDescStyle.Render("[a] I'll back it up myself — I understand there is no recovery") + "\n\n")
+	b.WriteString(helpDescStyle.Render("  Esc=go back"))
 	return dialogStyle.Render(b.String())
 }
 

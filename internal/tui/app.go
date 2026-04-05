@@ -61,6 +61,8 @@ type App struct {
 	verify      VerifyModel
 	keyWarning  KeyWarningModel
 	quitConfirm QuitConfirmModel
+	retireConfirm RetireConfirmModel
+	deviceRevoked DeviceRevokedModel
 	pinnedBar   PinnedBarModel
 
 	// Config state
@@ -107,6 +109,8 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		memberPanel: NewMemberPanel(),
 		settings:     NewSettings(),
 		addServer:    NewAddServer(),
+		retireConfirm: NewRetireConfirm(),
+		deviceRevoked: NewDeviceRevoked(),
 		passphrase:      NewPassphrase(),
 		passphraseCh:    make(chan []byte, 1),
 		passphraseCache: make(map[string][]byte),
@@ -247,6 +251,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
+		// Retire confirmation intercepts all keys
+		if a.retireConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.retireConfirm, cmd = a.retireConfirm.Update(msg)
+			return a, cmd
+		}
+
+		// Device revoked dialog intercepts all keys
+		if a.deviceRevoked.IsVisible() {
+			var cmd tea.Cmd
+			a.deviceRevoked, cmd = a.deviceRevoked.Update(msg)
+			return a, cmd
+		}
+
 		// Key warning intercepts all keys
 		if a.keyWarning.IsVisible() {
 			var cmd tea.Cmd
@@ -371,7 +389,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.memberPanel.IsVisible() {
 				a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
 				// Also update input members for @completion
-				a.input.SetMembers(a.memberPanel.MemberNames())
+				a.input.SetMembers(a.activeMemberNames())
 			}
 			return a, nil
 
@@ -408,11 +426,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for _, room := range a.client.Rooms() {
 					_ = room // profiles are global, not per-room
 				}
-				// Collect all known users except self
+				// Collect all known users except self, skipping retired accounts
 				a.client.ForEachProfile(func(p *protocol.Profile) {
-					if p.User != a.client.Username() {
-						allMembers = append(allMembers, p.User)
+					if p.User == a.client.Username() {
+						return
 					}
+					if retired, _ := a.client.IsRetired(p.User); retired {
+						return
+					}
+					allMembers = append(allMembers, p.User)
 				})
 				a.newConv.Show(allMembers)
 			}
@@ -456,7 +478,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
-					a.input.SetMembers(a.memberPanel.MemberNames())
+					a.input.SetMembers(a.activeMemberNames())
 				}
 				// Send read receipt for the new context
 				a.sendReadReceipt()
@@ -474,6 +496,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		case FocusInput:
+			// Drop sends to 1:1 DMs with a retired partner (banner replaces input)
+			if retired, _ := a.currentDMRetiredPartner(); retired {
+				// Allow navigation keys to move focus away, block everything else
+				switch msg.String() {
+				case "tab", "shift+tab", "up", "down", "left", "right":
+					// fall through to normal handling below
+				default:
+					return a, nil
+				}
+			}
 			var cmd tea.Cmd
 			a.input, cmd = a.input.Update(msg, a.client, a.messages.room, a.messages.conversation)
 			if cmd != nil {
@@ -520,9 +552,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.client != nil {
 				var allMembers []string
 				a.client.ForEachProfile(func(p *protocol.Profile) {
-					if p.User != a.client.Username() {
-						allMembers = append(allMembers, p.User)
+					if p.User == a.client.Username() {
+						return
 					}
+					if retired, _ := a.client.IsRetired(p.User); retired {
+						return
+					}
+					allMembers = append(allMembers, p.User)
 				})
 				a.newConv.Show(allMembers, msg.User)
 			}
@@ -583,8 +619,33 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "add_server":
 			a.settings.Hide()
 			a.addServer.Show()
+		case "retire_account":
+			a.settings.Hide()
+			a.retireConfirm.Show()
 		}
 		return a, nil
+
+	case RetireConfirmMsg:
+		// User confirmed retirement — send retire_me, close session, quit.
+		if a.client != nil {
+			if err := a.client.SendRetireMe(msg.Reason); err != nil {
+				a.statusBar.SetError("Retirement failed: " + err.Error())
+				return a, nil
+			}
+			// Don't auto-reconnect — the server will close this session, and
+			// the retired key won't authenticate on any subsequent attempt.
+			a.client.Close()
+		}
+		return a, tea.Quit
+
+	case DeviceRevokedQuitMsg:
+		// User dismissed the device-revoked dialog — close client (to stop
+		// the reconnect loop, which would otherwise keep hitting the same
+		// revoked device_id) and quit.
+		if a.client != nil {
+			a.client.Close()
+		}
+		return a, tea.Quit
 
 	case VerifyActionMsg:
 		if a.client != nil && a.client.Store() != nil {
@@ -749,7 +810,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.messages.LoadFromDB(a.client)
 			// Set up member list for @completion
 			a.memberPanel.Refresh(a.client.Rooms()[0], "", a.client, a.sidebar.online)
-			a.input.SetMembers(a.memberPanel.MemberNames())
+			a.input.SetMembers(a.activeMemberNames())
 		}
 
 		a.statusBar.SetUser(a.client.Username(), a.client.IsAdmin())
@@ -823,11 +884,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleMouse processes mouse events — clicks and scroll wheel.
 func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	// Ignore mouse when overlays are visible
+	// AddServer supports mouse clicks (key list + field focus)
+	if a.addServer.IsVisible() {
+		var cmd tea.Cmd
+		a.addServer, cmd = a.addServer.HandleMouse(msg)
+		return a, cmd
+	}
+
+	// Other overlays are keyboard-only
 	if a.help.IsVisible() || a.search.IsVisible() || a.newConv.IsVisible() ||
 		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.settings.IsVisible() ||
-		a.addServer.IsVisible() || a.verify.IsVisible() || a.keyWarning.IsVisible() ||
-		a.quitConfirm.IsVisible() || a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
+		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
+		a.quitConfirm.IsVisible() || a.retireConfirm.IsVisible() ||
+		a.deviceRevoked.IsVisible() ||
+		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
 		return a, nil
 	}
 
@@ -895,7 +965,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
-					a.input.SetMembers(a.memberPanel.MemberNames())
+					a.input.SetMembers(a.activeMemberNames())
 				}
 				a.sendReadReceipt()
 			}
@@ -1016,6 +1086,52 @@ func (a *App) sendReadReceipt() {
 	a.client.SendRead(a.messages.room, a.messages.conversation, lastID)
 	// Clear unread divider — user has now seen everything
 	a.messages.SetUnreadFrom("")
+}
+
+// activeMemberNames returns the member list for @completion, excluding
+// retired users. Retired users can't receive mentions (their session is
+// gone and future messages can't be wrapped for them), so showing them in
+// completion is misleading.
+func (a *App) activeMemberNames() []string {
+	names := a.memberPanel.MemberNames()
+	if a.client == nil {
+		return names
+	}
+	out := names[:0]
+	for _, n := range names {
+		if retired, _ := a.client.IsRetired(n); retired {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// currentDMRetiredPartner reports whether the active conversation is a 1:1
+// DM whose other member has been retired. When true, sending should be
+// disabled (the server rejects sends to retired members with user_retired
+// error) and a notice banner should replace the input.
+//
+// Returns (false, "") when the conversation is a room, a group DM with 3+
+// members, or a 1:1 DM with an active partner.
+func (a *App) currentDMRetiredPartner() (bool, string) {
+	if a.client == nil || a.messages.conversation == "" {
+		return false, ""
+	}
+	members := a.client.ConvMembers(a.messages.conversation)
+	if len(members) != 2 {
+		return false, ""
+	}
+	me := a.client.Username()
+	for _, m := range members {
+		if m == me {
+			continue
+		}
+		if retired, _ := a.client.IsRetired(m); retired {
+			return true, m
+		}
+	}
+	return false, ""
 }
 
 // handleSlashCommand processes slash commands that need app-level handling.
@@ -1164,6 +1280,54 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		var m protocol.Deleted
 		json.Unmarshal(msg.Raw, &m)
 		a.messages.RemoveMessage(m.ID)
+	case "user_retired":
+		var m protocol.UserRetired
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.messages.MarkRetired(m.User)
+			a.sidebar.MarkRetired(m.User)
+			// If the retired user is in the active conversation, show a notice
+			if a.client != nil && a.messages.conversation != "" {
+				for _, member := range a.client.ConvMembers(a.messages.conversation) {
+					if member == m.User {
+						a.messages.AddSystemMessage(m.User + "'s account was retired")
+						break
+					}
+				}
+			}
+		}
+	case "retired_users":
+		var m protocol.RetiredUsers
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			for _, u := range m.Users {
+				a.messages.MarkRetired(u.User)
+				a.sidebar.MarkRetired(u.User)
+			}
+		}
+	case "profile":
+		// Profiles for retired users include Retired=true — mirror that into
+		// the message renderer so historical sender names get [retired] marker.
+		var p protocol.Profile
+		if err := json.Unmarshal(msg.Raw, &p); err == nil && p.Retired {
+			a.messages.MarkRetired(p.User)
+			a.sidebar.MarkRetired(p.User)
+		}
+	case "device_revoked":
+		var m protocol.DeviceRevoked
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.deviceRevoked.Show(m.DeviceID, m.Reason)
+		}
+	case "conversation_event":
+		var m protocol.ConversationEvent
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			// Show a system message in the stream when it's the active conversation
+			if m.Conversation == a.messages.conversation && m.Event == "leave" {
+				if m.Reason == "retirement" {
+					a.messages.AddSystemMessage(m.User + "'s account was retired")
+				} else {
+					a.messages.AddSystemMessage(m.User + " left the conversation")
+				}
+			}
+		}
 	case "reaction":
 		var m protocol.Reaction
 		json.Unmarshal(msg.Raw, &m)
@@ -1311,7 +1475,12 @@ func (a App) View() string {
 		if a.showHelpHint {
 			hint = helpDescStyle.Render("  Press ? for help or / for commands") + "\n"
 		}
-		input := a.input.View(mainWidth, a.focus == FocusInput)
+		var input string
+		if retired, other := a.currentDMRetiredPartner(); retired {
+			input = helpDescStyle.Render("  " + other + "'s account has been retired — this conversation is read-only. Verify their new account (if any) out of band before starting a new DM.")
+		} else {
+			input = a.input.View(mainWidth, a.focus == FocusInput)
+		}
 		mainPanel = messages + "\n" + hint + input
 	}
 
@@ -1353,6 +1522,12 @@ func (a App) View() string {
 	}
 	if a.quitConfirm.IsVisible() {
 		return a.quitConfirm.View(a.width)
+	}
+	if a.retireConfirm.IsVisible() {
+		return a.retireConfirm.View(a.width)
+	}
+	if a.deviceRevoked.IsVisible() {
+		return a.deviceRevoked.View(a.width)
 	}
 	if a.contextMenu.IsVisible() {
 		return screen + "\n" + a.contextMenu.View()
