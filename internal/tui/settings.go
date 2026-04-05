@@ -259,6 +259,34 @@ func (s SettingsModel) Update(msg tea.KeyMsg) (SettingsModel, tea.Cmd) {
 	return s, nil
 }
 
+// HandleMouse maps a click to the matching settings item and updates the
+// cursor. Click-selects-only (same convention as DeviceMgr) — user presses
+// Enter to actually activate the selected item.
+//
+// Layout: border(1) + padding(1) + header(1) + blank(1) = content starts at
+// Y=4. Each items[i] takes exactly one line (including blank spacers which
+// render as "\n").
+func (s SettingsModel) HandleMouse(msg tea.MouseMsg) (SettingsModel, tea.Cmd) {
+	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionRelease {
+		return s, nil
+	}
+	// Don't handle clicks while editing or confirming — keyboard drives those
+	if s.editing || s.confirm != nil {
+		return s, nil
+	}
+
+	const firstItemY = 4
+	idx := msg.Y - firstItemY
+	if idx < 0 || idx >= len(s.items) {
+		return s, nil
+	}
+	// Only move cursor to actionable items
+	if s.items[idx].action != "" {
+		s.cursor = idx
+	}
+	return s, nil
+}
+
 func (s SettingsModel) View(width, height int) string {
 	if !s.visible {
 		return ""

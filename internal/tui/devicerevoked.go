@@ -47,6 +47,17 @@ func (d DeviceRevokedModel) Update(msg tea.KeyMsg) (DeviceRevokedModel, tea.Cmd)
 	return d, nil
 }
 
+// HandleMouse lets the user click anywhere on the modal to dismiss it.
+// Since the dialog has only one action (exit), click-to-dismiss matches
+// keyboard Enter/q/Esc semantics.
+func (d DeviceRevokedModel) HandleMouse(msg tea.MouseMsg) (DeviceRevokedModel, tea.Cmd) {
+	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionRelease {
+		return d, nil
+	}
+	d.Hide()
+	return d, func() tea.Msg { return DeviceRevokedQuitMsg{} }
+}
+
 func (d DeviceRevokedModel) View(width int) string {
 	if !d.visible {
 		return ""

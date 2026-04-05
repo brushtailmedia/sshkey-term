@@ -913,19 +913,38 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleMouse processes mouse events — clicks and scroll wheel.
 func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	// AddServer supports mouse clicks (key list + field focus)
+	// Dialogs with mouse support — route clicks to the dialog.
 	if a.addServer.IsVisible() {
 		var cmd tea.Cmd
 		a.addServer, cmd = a.addServer.HandleMouse(msg)
 		return a, cmd
 	}
+	if a.deviceMgr.IsVisible() {
+		var cmd tea.Cmd
+		a.deviceMgr, cmd = a.deviceMgr.HandleMouse(msg)
+		return a, cmd
+	}
+	if a.retireConfirm.IsVisible() {
+		var cmd tea.Cmd
+		a.retireConfirm, cmd = a.retireConfirm.HandleMouse(msg)
+		return a, cmd
+	}
+	if a.deviceRevoked.IsVisible() {
+		var cmd tea.Cmd
+		a.deviceRevoked, cmd = a.deviceRevoked.HandleMouse(msg)
+		return a, cmd
+	}
+	if a.settings.IsVisible() {
+		var cmd tea.Cmd
+		a.settings, cmd = a.settings.HandleMouse(msg)
+		return a, cmd
+	}
 
 	// Other overlays are keyboard-only
 	if a.help.IsVisible() || a.search.IsVisible() || a.newConv.IsVisible() ||
-		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.settings.IsVisible() ||
+		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() ||
 		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
-		a.quitConfirm.IsVisible() || a.retireConfirm.IsVisible() ||
-		a.deviceRevoked.IsVisible() || a.deviceMgr.IsVisible() ||
+		a.quitConfirm.IsVisible() ||
 		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
 		return a, nil
 	}

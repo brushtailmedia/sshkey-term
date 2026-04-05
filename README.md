@@ -13,6 +13,7 @@ Terminal client for [sshkey](https://github.com/brushtailmedia/sshkey) -- a priv
 - Multi-server support
 - Offline message history (lazy scroll-back)
 - Self-service account retirement (settings → Retire account) with typed confirmation
+- Self-service device management (settings → Manage devices) — list and revoke your own devices
 - First-run wizard with key generation + passphrase + mandatory backup acknowledgement
 
 ## Architecture
@@ -126,7 +127,7 @@ Three layers of protection, used in combination:
 | Layer | Protects against | How to use |
 |---|---|---|
 | **Passphrase** | Stolen device — key at rest | Set a passphrase when generating your key (wizard prompts by default) |
-| **Device revocation** | Stolen device where you're confident the key/passphrase held | Ask your admin to `sshkey-ctl revoke-device --user you --device dev_...` |
+| **Device revocation** | Stolen device where you're confident the key/passphrase held | **Settings → Manage devices on this server** (self-service) or ask your admin to `sshkey-ctl revoke-device --user you --device dev_...` |
 | **Account retirement** | Key compromise (copied, leaked, passphrase cracked) | **Settings → Retire account** (requires typing `RETIRE MY ACCOUNT` to confirm) |
 
 Device revocation is operational cleanup — it doesn't stop an attacker who extracted your raw key. If you suspect the key itself is gone, retire the account.

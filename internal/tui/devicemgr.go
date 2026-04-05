@@ -120,6 +120,36 @@ func (d DeviceMgrModel) Update(msg tea.KeyMsg) (DeviceMgrModel, tea.Cmd) {
 	return d, nil
 }
 
+// HandleMouse maps click coordinates onto rows in the device list and
+// updates the cursor. A click doesn't trigger the revoke action (requires
+// keyboard Enter/x + y/n confirm) — this matches the "mouse selects,
+// keyboard acts" convention used elsewhere in the TUI.
+//
+// Layout (see View): border(1) + padding(1) + header(1) + blank(1)
+// + 3 desc lines + blank = content starts at Y=8, each device uses 2 rows.
+func (d DeviceMgrModel) HandleMouse(msg tea.MouseMsg) (DeviceMgrModel, tea.Cmd) {
+	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionRelease {
+		return d, nil
+	}
+	// Loading / empty / confirm states have no device rows to hit
+	if d.loading || d.confirm || len(d.devices) == 0 {
+		return d, nil
+	}
+
+	// First device starts at Y=8 (after border, padding, header, blank,
+	// 3 desc lines, blank). Each device takes 2 rows (name + meta).
+	const firstDeviceY = 8
+	relY := msg.Y - firstDeviceY
+	if relY < 0 {
+		return d, nil
+	}
+	idx := relY / 2
+	if idx >= 0 && idx < len(d.devices) {
+		d.cursor = idx
+	}
+	return d, nil
+}
+
 func (d DeviceMgrModel) View(width int) string {
 	if !d.visible {
 		return ""

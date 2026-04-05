@@ -152,6 +152,50 @@ func (r RetireConfirmModel) Update(msg tea.KeyMsg) (RetireConfirmModel, tea.Cmd)
 	return r, nil
 }
 
+// HandleMouse lets the user click to select a retirement reason or focus
+// the phrase input. Consistent with other dialogs: mouse selects, keyboard
+// (typing the phrase + Enter) actually submits.
+//
+// Layout:
+//   Y=0: border top
+//   Y=1: padding top
+//   Y=2: header " ⚠ Retire Account"
+//   Y=3: blank
+//   Y=4..9: consequence bullets (6 lines) + blank (Y=10)
+//   Y=11: "Reason:" label
+//   Y=12..17: 3 reasons × 2 lines (radio + hint) = 6 lines
+//   Y=18: blank
+//   Y=19: phrase label
+//   Y=20: phrase input
+func (r RetireConfirmModel) HandleMouse(msg tea.MouseMsg) (RetireConfirmModel, tea.Cmd) {
+	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionRelease {
+		return r, nil
+	}
+
+	// Reason rows: each reason takes 2 lines (radio + hint).
+	// First reason radio line is at Y=12.
+	const firstReasonY = 12
+	if msg.Y >= firstReasonY && msg.Y < firstReasonY+len(retireReasons)*2 {
+		idx := (msg.Y - firstReasonY) / 2
+		if idx >= 0 && idx < len(retireReasons) {
+			r.reasonIdx = idx
+			r.focused = 0
+			r.phraseInput.Blur()
+		}
+		return r, nil
+	}
+
+	// Clicking on the phrase input area (Y=20) focuses the input.
+	const phraseInputY = 20
+	if msg.Y == phraseInputY || msg.Y == phraseInputY-1 {
+		r.focused = 1
+		r.phraseInput.Focus()
+		return r, nil
+	}
+
+	return r, nil
+}
+
 func (r RetireConfirmModel) View(width int) string {
 	if !r.visible {
 		return ""
