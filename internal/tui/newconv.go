@@ -25,12 +25,13 @@ type NewConvModel struct {
 	visible      bool
 	memberInput  textinput.Model
 	nameInput    textinput.Model
-	allMembers   []string          // all known users
-	selected     map[string]bool   // selected members
-	suggestions  []string          // filtered member list
+	allMembers   []string          // all known users (nanoids)
+	selected     map[string]bool   // selected members (nanoids)
+	suggestions  []string          // filtered member list (nanoids)
 	suggCursor   int
 	focusName    bool              // true when focus is on the name field
-	preselected  []string          // members pre-selected (e.g., from member panel)
+	preselected  []string          // members pre-selected (nanoids)
+	resolveName  func(string) string // nanoid → display name (set by App)
 }
 
 // CreateConvMsg is sent when the user confirms the dialog.
@@ -90,7 +91,12 @@ func (n *NewConvModel) updateSuggestions() {
 		if n.selected[m] {
 			continue // already selected
 		}
-		if query == "" || strings.Contains(strings.ToLower(m), query) {
+		// Match against display name (what user types) not nanoid
+		displayName := m
+		if n.resolveName != nil {
+			displayName = n.resolveName(m)
+		}
+		if query == "" || strings.Contains(strings.ToLower(displayName), query) {
 			n.suggestions = append(n.suggestions, m)
 		}
 	}
@@ -212,7 +218,11 @@ func (n NewConvModel) View(width int) string {
 	if len(n.selected) > 0 {
 		var tags []string
 		for m := range n.selected {
-			tags = append(tags, checkStyle.Render("✓")+" "+m)
+			displayName := m
+			if n.resolveName != nil {
+				displayName = n.resolveName(m)
+			}
+			tags = append(tags, checkStyle.Render("✓")+" "+displayName)
 		}
 		b.WriteString(" " + strings.Join(tags, ", "))
 		b.WriteString("\n")
@@ -228,11 +238,15 @@ func (n NewConvModel) View(width int) string {
 		if i >= 8 {
 			break
 		}
+		displayName := m
+		if n.resolveName != nil {
+			displayName = n.resolveName(m)
+		}
 		prefix := "   "
 		if n.selected[m] {
 			prefix = " " + checkStyle.Render("✓") + " "
 		}
-		line := prefix + m
+		line := prefix + displayName
 		if i == n.suggCursor && !n.focusName {
 			line = completionSelectedStyle.Render(line)
 		}

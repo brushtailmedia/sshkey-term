@@ -38,10 +38,11 @@ func TestMessages_ViewRendersRetiredMarker(t *testing.T) {
 
 	// Add a message from alice
 	m.messages = append(m.messages, DisplayMessage{
-		ID:    "msg_1",
-		From:  "alice",
-		Body:  "hello from alice",
-		TS:    1712345678,
+		ID:     "msg_1",
+		FromID: "alice",
+		From:   "alice",
+		Body:   "hello from alice",
+		TS:     1712345678,
 	})
 
 	view := m.View(80, 20, false)
@@ -59,10 +60,11 @@ func TestMessages_ViewNoMarkerForActiveUser(t *testing.T) {
 	// Don't mark alice retired
 
 	m.messages = append(m.messages, DisplayMessage{
-		ID:   "msg_1",
-		From: "alice",
-		Body: "hello",
-		TS:   1712345678,
+		ID:     "msg_1",
+		FromID: "alice",
+		From:   "alice",
+		Body:   "hello",
+		TS:     1712345678,
 	})
 
 	view := m.View(80, 20, false)
@@ -80,8 +82,8 @@ func TestMessages_RetiredMarkerOnlyOnHeader(t *testing.T) {
 
 	// Two consecutive messages from alice within 5 minutes
 	m.messages = append(m.messages,
-		DisplayMessage{ID: "msg_1", From: "alice", Body: "first", TS: 1712345678},
-		DisplayMessage{ID: "msg_2", From: "alice", Body: "second", TS: 1712345679},
+		DisplayMessage{ID: "msg_1", FromID: "alice", From: "alice", Body: "first", TS: 1712345678},
+		DisplayMessage{ID: "msg_2", FromID: "alice", From: "alice", Body: "second", TS: 1712345679},
 	)
 
 	view := m.View(80, 20, false)

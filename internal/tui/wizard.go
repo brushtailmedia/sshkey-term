@@ -16,6 +16,7 @@ type WizardStep int
 
 const (
 	WizardWelcome WizardStep = iota
+	WizardChooseName
 	WizardKeySelect
 	WizardKeyImport
 	WizardKeyGenerate
@@ -28,22 +29,27 @@ const (
 
 // WizardResult is returned when the wizard completes.
 type WizardResult struct {
-	KeyPath    string
-	ServerName string
-	ServerHost string
-	ServerPort int
+	KeyPath       string
+	PreferredName string // chosen display name, embedded in key comment
+	ServerName    string
+	ServerHost    string
+	ServerPort    int
 }
 
 // WizardModel manages the first-launch setup wizard.
 type WizardModel struct {
-	step     WizardStep
-	result   WizardResult
-	err      string
-	width    int
-	height   int
+	step       WizardStep
+	result     WizardResult
+	err        string
+	width      int
+	height     int
+	chosenName string // preferred display name, embedded in key comment
+
+	// Name input
+	nameInput textinput.Model
 
 	// Key selection
-	keys     []keyEntry
+	keys      []keyEntry
 	keyCursor int
 
 	// Key generation
@@ -69,6 +75,12 @@ type WizardModel struct {
 
 // NewWizard creates the setup wizard.
 func NewWizard() WizardModel {
+	// Name input
+	nameIn := textinput.New()
+	nameIn.Placeholder = "your display name"
+	nameIn.Prompt = ""
+	nameIn.CharLimit = 32
+
 	// Key generation inputs
 	genPath := textinput.New()
 	home, _ := os.UserHomeDir()
@@ -108,6 +120,7 @@ func NewWizard() WizardModel {
 
 	return WizardModel{
 		step:         WizardWelcome,
+		nameInput:    nameIn,
 		genPathInput: genPath,
 		genPassInput: genPass,
 		genConfirm:   genConfirm,
@@ -144,6 +157,8 @@ func (w WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch w.step {
 		case WizardWelcome:
 			return w.updateWelcome(msg)
+		case WizardChooseName:
+			return w.updateChooseName(msg)
 		case WizardKeySelect:
 			return w.updateKeySelect(msg)
 		case WizardKeyImport:
@@ -167,9 +182,35 @@ func (w WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (w WizardModel) updateWelcome(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "enter" {
+		w.step = WizardChooseName
+		w.nameInput.Focus()
+		return w, nil
+	}
+	return w, nil
+}
+
+func (w WizardModel) updateChooseName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		name := strings.TrimSpace(w.nameInput.Value())
+		if name == "" {
+			w.err = "Name cannot be empty"
+			return w, nil
+		}
+		if len(name) < 2 {
+			w.err = "Name must be at least 2 characters"
+			return w, nil
+		}
+		w.chosenName = name
+		w.err = ""
 		w.step = WizardKeySelect
 		w.keys = scanSSHKeys()
-		return w, nil
+	case "esc":
+		return w, tea.Quit
+	default:
+		var cmd tea.Cmd
+		w.nameInput, cmd = w.nameInput.Update(msg)
+		return w, cmd
 	}
 	return w, nil
 }
@@ -196,6 +237,7 @@ func (w WizardModel) updateKeySelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			w.result.KeyPath = key.Path
 			w.keyFingerprint = w.computeFingerprint(key.Path)
+			w.embedNameInPubKey(key.Path)
 			w.err = ""
 			w.step = WizardBackup
 		} else if w.keyCursor == len(w.keys) {
@@ -239,6 +281,7 @@ func (w WizardModel) updateKeyImport(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		w.result.KeyPath = path
 		w.keyFingerprint = w.computeFingerprint(path)
+		w.embedNameInPubKey(path)
 		w.err = ""
 		w.step = WizardBackup
 	case "esc":
@@ -309,7 +352,7 @@ func (w WizardModel) doGenerateKey() (tea.Model, tea.Cmd) {
 		expandedPath = filepath.Join(home, expandedPath[2:])
 	}
 
-	fingerprint, err := generateEd25519KeyFile(path, pass)
+	fingerprint, err := generateEd25519KeyFile(path, pass, w.chosenName)
 	if err != nil {
 		w.err = "Key generation failed: " + err.Error()
 		return w, nil
@@ -438,6 +481,7 @@ func (w WizardModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w.result.ServerName = name
 		w.result.ServerHost = host
 		w.result.ServerPort = port
+		w.result.PreferredName = w.chosenName
 		w.step = WizardDone
 		return w, tea.Quit
 	case "esc":
@@ -499,6 +543,26 @@ func (w WizardModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return w, nil
 }
 
+// embedNameInPubKey updates the .pub file comment to include the chosen name.
+func (w WizardModel) embedNameInPubKey(keyPath string) {
+	if w.chosenName == "" {
+		return
+	}
+	pubPath := keyPath + ".pub"
+	data, err := os.ReadFile(pubPath)
+	if err != nil {
+		return
+	}
+	// SSH pub key format: "type base64 [comment]\n"
+	// Strip existing comment and replace with chosen name
+	line := strings.TrimSpace(string(data))
+	parts := strings.SplitN(line, " ", 3) // type, base64, [optional comment]
+	if len(parts) >= 2 {
+		newLine := parts[0] + " " + parts[1] + " " + w.chosenName + "\n"
+		os.WriteFile(pubPath, []byte(newLine), 0644)
+	}
+}
+
 func (w WizardModel) computeFingerprint(keyPath string) string {
 	data, err := os.ReadFile(keyPath)
 	if err != nil {
@@ -518,6 +582,8 @@ func (w WizardModel) View() string {
 	switch w.step {
 	case WizardWelcome:
 		return w.viewWelcome()
+	case WizardChooseName:
+		return w.viewChooseName()
 	case WizardKeySelect:
 		return w.viewKeySelect()
 	case WizardKeyImport:
@@ -546,6 +612,21 @@ func (w WizardModel) viewWelcome() string {
 	b.WriteString("  end-to-end encryption.\n\n")
 	b.WriteString("  Let's get you set up.\n\n")
 	b.WriteString("  " + searchHeaderStyle.Render("[Continue]"))
+	return dialogStyle.Render(b.String())
+}
+
+func (w WizardModel) viewChooseName() string {
+	var b strings.Builder
+	b.WriteString(searchHeaderStyle.Render(" Choose Your Name"))
+	b.WriteString("\n\n")
+	b.WriteString("  This will be your display name on the server.\n")
+	b.WriteString("  Your admin can change it if needed.\n\n")
+	b.WriteString("  Display name:\n")
+	b.WriteString("  " + w.nameInput.View() + "\n\n")
+	b.WriteString(helpDescStyle.Render("  Enter=continue  Esc=quit"))
+	if w.err != "" {
+		b.WriteString("\n\n  " + errorStyle.Render(w.err))
+	}
 	return dialogStyle.Render(b.String())
 }
 
@@ -661,8 +742,10 @@ func (w WizardModel) viewShare() string {
 	b.WriteString("  Your server admin needs your public key\n")
 	b.WriteString("  to add you to the server.\n\n")
 
-	b.WriteString("  Fingerprint:\n")
-	b.WriteString("  " + searchHeaderStyle.Render(w.keyFingerprint) + "\n\n")
+	if w.chosenName != "" {
+		b.WriteString("  Name: " + searchHeaderStyle.Render(w.chosenName) + "\n")
+	}
+	b.WriteString("  Fingerprint: " + searchHeaderStyle.Render(w.keyFingerprint) + "\n\n")
 
 	pubKey := w.readPublicKey()
 	if pubKey != "" {
@@ -670,7 +753,7 @@ func (w WizardModel) viewShare() string {
 		if len(display) > 50 {
 			display = display[:50] + "..."
 		}
-		b.WriteString("  Public key:\n")
+		b.WriteString("  Public key (includes your name):\n")
 		b.WriteString("  " + helpDescStyle.Render(display) + "\n\n")
 	}
 

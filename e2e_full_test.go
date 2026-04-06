@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/crypto"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
@@ -94,7 +95,7 @@ func TestFullE2E(t *testing.T) {
 		alice = client.New(client.Config{
 			Host:     "127.0.0.1",
 			Port:     port,
-			KeyPath:  "/tmp/sshkey-test-key",
+			KeyPath:  testutil.Alice.KeyPath,
 			DeviceID: "dev_alice_full",
 			DataDir:  aliceDir,
 			Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -123,7 +124,7 @@ func TestFullE2E(t *testing.T) {
 			t.Fatal("alice sync timeout")
 		}
 
-		if alice.Username() != "alice" {
+		if alice.Username() != testutil.Alice.Username {
 			t.Errorf("alice username = %q", alice.Username())
 		}
 		if !alice.IsAdmin() {
@@ -139,7 +140,7 @@ func TestFullE2E(t *testing.T) {
 		bob = client.New(client.Config{
 			Host:     "127.0.0.1",
 			Port:     port,
-			KeyPath:  "/tmp/sshkey-test-key-bob",
+			KeyPath:  testutil.Bob.KeyPath,
 			DeviceID: "dev_bob_full",
 			DataDir:  bobDir,
 			Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -168,14 +169,14 @@ func TestFullE2E(t *testing.T) {
 			t.Fatal("bob sync timeout")
 		}
 
-		if bob.Username() != "bob" {
+		if bob.Username() != testutil.Bob.Username {
 			t.Errorf("bob username = %q", bob.Username())
 		}
 
 		carol = client.New(client.Config{
 			Host:     "127.0.0.1",
 			Port:     port,
-			KeyPath:  "/tmp/sshkey-test-key-carol",
+			KeyPath:  testutil.Carol.KeyPath,
 			DeviceID: "dev_carol_full",
 			DataDir:  t.TempDir(),
 			Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -214,8 +215,8 @@ func TestFullE2E(t *testing.T) {
 	// 4. Profile delivery and key pinning
 	// =========================================================================
 	t.Run("profiles_and_pinning", func(t *testing.T) {
-		aliceProfile := alice.Profile("alice")
-		bobProfile := alice.Profile("bob")
+		aliceProfile := alice.Profile(testutil.Alice.Username)
+		bobProfile := alice.Profile(testutil.Bob.Username)
 
 		if aliceProfile == nil || bobProfile == nil {
 			t.Fatal("profiles not received")
@@ -229,7 +230,7 @@ func TestFullE2E(t *testing.T) {
 
 		// Check key pinning in local DB
 		if alice.Store() != nil {
-			fp, verified, err := alice.Store().GetPinnedKey("bob")
+			fp, verified, err := alice.Store().GetPinnedKey(testutil.Bob.Username)
 			if err != nil {
 				t.Fatalf("get pinned key: %v", err)
 			}
@@ -247,8 +248,8 @@ func TestFullE2E(t *testing.T) {
 	// 5. Safety numbers
 	// =========================================================================
 	t.Run("safety_numbers", func(t *testing.T) {
-		aliceProfile := alice.Profile("alice")
-		bobProfile := alice.Profile("bob")
+		aliceProfile := alice.Profile(testutil.Alice.Username)
+		bobProfile := alice.Profile(testutil.Bob.Username)
 
 		alicePub, err := crypto.ParseSSHPubKey(aliceProfile.PubKey)
 		if err != nil {
@@ -318,7 +319,7 @@ func TestFullE2E(t *testing.T) {
 			t.Skip("no epoch key")
 		}
 
-		err := alice.SendRoomMessage("general", "Hey @bob check this", "", []string{"bob"})
+		err := alice.SendRoomMessage("general", "Hey @bob check this", "", []string{testutil.Bob.Username})
 		if err != nil {
 			t.Fatalf("send: %v", err)
 		}
@@ -331,7 +332,7 @@ func TestFullE2E(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decrypt: %v", err)
 		}
-		if len(payload.Mentions) == 0 || payload.Mentions[0] != "bob" {
+		if len(payload.Mentions) == 0 || payload.Mentions[0] != testutil.Bob.Username {
 			t.Errorf("mentions = %v, want [bob]", payload.Mentions)
 		}
 
@@ -373,7 +374,7 @@ func TestFullE2E(t *testing.T) {
 	// =========================================================================
 	var dmConvID string
 	t.Run("dm_create", func(t *testing.T) {
-		alice.CreateDM([]string{"bob"}, "")
+		alice.CreateDM([]string{testutil.Bob.Username}, "")
 
 		raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 		var created protocol.DMCreated
@@ -403,7 +404,7 @@ func TestFullE2E(t *testing.T) {
 	// 10. DM deduplication
 	// =========================================================================
 	t.Run("dm_dedup", func(t *testing.T) {
-		alice.CreateDM([]string{"bob"}, "")
+		alice.CreateDM([]string{testutil.Bob.Username}, "")
 
 		raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 		var created protocol.DMCreated
@@ -530,7 +531,7 @@ func TestFullE2E(t *testing.T) {
 	var groupConvID string
 	t.Run("group_dm_create", func(t *testing.T) {
 		// Group DM with alice, bob, carol — named "Test Group"
-		alice.CreateDM([]string{"bob", "carol"}, "Test Group")
+		alice.CreateDM([]string{testutil.Bob.Username, testutil.Carol.Username}, "Test Group")
 
 		raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 		var created protocol.DMCreated
@@ -624,7 +625,7 @@ func TestFullE2E(t *testing.T) {
 		var event protocol.ConversationEvent
 		json.Unmarshal(raw, &event)
 
-		if event.Event != "leave" || event.User != "carol" {
+		if event.Event != "leave" || event.User != testutil.Carol.Username {
 			t.Errorf("event = %+v, want leave by carol", event)
 		}
 
@@ -745,7 +746,7 @@ func TestFullE2E(t *testing.T) {
 		if del.ID != msg.ID {
 			t.Errorf("deleted ID = %q, want %q", del.ID, msg.ID)
 		}
-		if del.DeletedBy != "alice" {
+		if del.DeletedBy != testutil.Alice.Username {
 			t.Errorf("deleted_by = %q", del.DeletedBy)
 		}
 
@@ -763,7 +764,7 @@ func TestFullE2E(t *testing.T) {
 		var typ protocol.Typing
 		json.Unmarshal(raw, &typ)
 
-		if typ.User != "alice" {
+		if typ.User != testutil.Alice.Username {
 			t.Errorf("typing user = %q", typ.User)
 		}
 		if typ.Room != "general" {
@@ -782,7 +783,7 @@ func TestFullE2E(t *testing.T) {
 		var read protocol.Read
 		json.Unmarshal(raw, &read)
 
-		if read.User != "alice" {
+		if read.User != testutil.Alice.Username {
 			t.Errorf("read user = %q", read.User)
 		}
 		if read.LastRead != "msg_test_123" {
@@ -874,8 +875,8 @@ func TestFullE2E(t *testing.T) {
 	// 19. Member hash computation
 	// =========================================================================
 	t.Run("member_hash", func(t *testing.T) {
-		h1 := crypto.MemberHash([]string{"alice", "bob"})
-		h2 := crypto.MemberHash([]string{"bob", "alice"})
+		h1 := crypto.MemberHash([]string{testutil.Alice.Username, testutil.Bob.Username})
+		h2 := crypto.MemberHash([]string{testutil.Bob.Username, testutil.Alice.Username})
 		if h1 != h2 {
 			t.Error("member hash not order-independent")
 		}
@@ -946,7 +947,7 @@ func TestFullE2E(t *testing.T) {
 	// 23. Key wrap/unwrap cross-user
 	// =========================================================================
 	t.Run("key_wrap_crossuser", func(t *testing.T) {
-		bobProfile := alice.Profile("bob")
+		bobProfile := alice.Profile(testutil.Bob.Username)
 		if bobProfile == nil {
 			t.Skip("no bob profile")
 		}
@@ -963,7 +964,7 @@ func TestFullE2E(t *testing.T) {
 		}
 
 		// Bob unwraps (need bob's private key)
-		bobPriv, err := client.ParseRawEd25519Key("/tmp/sshkey-test-key-bob")
+		bobPriv, err := client.ParseRawEd25519Key(testutil.Bob.KeyPath)
 		if err != nil {
 			t.Fatalf("parse bob priv: %v", err)
 		}
@@ -1026,7 +1027,7 @@ func TestFullE2E(t *testing.T) {
 		bobMu.Lock()
 		found := false
 		for _, p := range bobProfiles {
-			if p.User == "alice" && p.DisplayName == "Alice Updated" {
+			if p.User == testutil.Alice.Username && p.DisplayName == "Alice Updated" {
 				found = true
 				break
 			}
@@ -1305,20 +1306,4 @@ func TestFullE2E(t *testing.T) {
 }
 
 // waitForType reads from a channel until it finds a message of the given type.
-func waitForType(t *testing.T, ch chan json.RawMessage, msgType string, timeout time.Duration) json.RawMessage {
-	t.Helper()
-	timer := time.After(timeout)
-	for {
-		select {
-		case raw := <-ch:
-			typ, _ := protocol.TypeOf(raw)
-			if typ == msgType {
-				return raw
-			}
-			// Skip other message types
-		case <-timer:
-			t.Fatalf("timeout waiting for %s", msgType)
-			return nil
-		}
-	}
-}
+// waitForType is defined in main_test.go (delegates to testutil.WaitForType).

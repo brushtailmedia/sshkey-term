@@ -165,15 +165,14 @@ func (c *Client) Connect() error {
 	if c.cfg.DataDir != "" {
 		dbPath := filepath.Join(c.cfg.DataDir, "messages.db")
 
-		// Derive DB encryption key from the SSH private key seed
+		// Derive DB encryption key from the SSH private key seed.
+		// Both derivation and open must succeed — we never store
+		// messages unencrypted.
 		dbKey, err := store.DeriveDBKey(c.privKey.Seed())
 		if err != nil {
-			c.logger.Warn("failed to derive DB key", "error", err)
-		}
-
-		st, err := store.Open(dbPath, dbKey)
-		if err != nil {
-			c.logger.Warn("failed to open local DB", "path", dbPath, "error", err)
+			c.logger.Error("failed to derive DB key — local storage disabled", "error", err)
+		} else if st, err := store.Open(dbPath, dbKey); err != nil {
+			c.logger.Error("failed to open local DB — local storage disabled", "path", dbPath, "error", err)
 		} else {
 			c.store = st
 
@@ -602,6 +601,19 @@ func (c *Client) KeyFingerprint() string {
 		return ""
 	}
 	return ssh.FingerprintSHA256(c.signer.PublicKey())
+}
+
+// DisplayName returns the display name for a username (nanoid). Falls back to
+// the raw username if no profile is cached — this happens briefly on first
+// connect before profiles arrive.
+func (c *Client) DisplayName(username string) string {
+	c.mu.RLock()
+	p := c.profiles[username]
+	c.mu.RUnlock()
+	if p != nil && p.DisplayName != "" {
+		return p.DisplayName
+	}
+	return username // fallback: show raw ID until profile arrives
 }
 
 // ConvMembers returns the member list for a conversation.

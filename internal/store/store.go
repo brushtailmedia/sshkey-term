@@ -24,6 +24,47 @@ type Store struct {
 // The dbKey is derived from the user's SSH private key seed bytes.
 // If dbKey is nil, the DB is opened unencrypted (for testing).
 func Open(path string, dbKey []byte) (*Store, error) {
+	if len(dbKey) == 0 {
+		return nil, fmt.Errorf("encryption key required (refusing to create unencrypted database)")
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, fmt.Errorf("create dir: %w", err)
+	}
+
+	// Pass the key via _pragma_key in the DSN so that every connection the
+	// pool creates is keyed automatically. Using a DSN parameter avoids the
+	// classic race where PRAGMA key is set on one connection but the pool
+	// hands out a fresh unkeyed connection later.
+	hexKey := hex.EncodeToString(dbKey)
+	dsn := fmt.Sprintf("file:%s?_pragma_key=x'%s'", path, hexKey)
+
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set WAL mode: %w (is the key correct?)", err)
+	}
+	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	s := &Store{db: db}
+	if err := s.init(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// OpenUnencrypted opens an unencrypted database. Only for use in tests.
+func OpenUnencrypted(path string) (*Store, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create dir: %w", err)
@@ -33,19 +74,11 @@ func Open(path string, dbKey []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// Set encryption key if provided
-	if len(dbKey) > 0 {
-		hexKey := hex.EncodeToString(dbKey)
-		if _, err := db.Exec(fmt.Sprintf("PRAGMA key = \"x'%s'\"", hexKey)); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("set encryption key: %w", err)
-		}
-	}
+	db.SetMaxOpenConns(1)
 
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("set WAL mode: %w (is the key correct?)", err)
+		return nil, fmt.Errorf("set WAL mode: %w", err)
 	}
 	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
 		db.Close()

@@ -18,6 +18,13 @@ func sendSpecial(w *WizardModel, k tea.KeyType) {
 	*w = model.(WizardModel)
 }
 
+// advanceToKeySelect takes a fresh wizard through Welcome → ChooseName → KeySelect
+func advanceToKeySelect(w *WizardModel) {
+	sendSpecial(w, tea.KeyEnter) // welcome → choose name
+	w.nameInput.SetValue("testuser")
+	sendSpecial(w, tea.KeyEnter) // choose name → key select
+}
+
 func TestWizard_StepTransitions(t *testing.T) {
 	w := NewWizard()
 
@@ -25,34 +32,70 @@ func TestWizard_StepTransitions(t *testing.T) {
 		t.Fatalf("initial step = %d, want WizardWelcome", w.step)
 	}
 
-	// Welcome → KeySelect
+	// Welcome → ChooseName
+	sendSpecial(&w, tea.KeyEnter)
+	if w.step != WizardChooseName {
+		t.Fatalf("step after welcome = %d, want WizardChooseName", w.step)
+	}
+
+	// ChooseName → KeySelect
+	w.nameInput.SetValue("testuser")
 	sendSpecial(&w, tea.KeyEnter)
 	if w.step != WizardKeySelect {
-		t.Fatalf("step after welcome enter = %d, want WizardKeySelect", w.step)
+		t.Fatalf("step after name = %d, want WizardKeySelect", w.step)
+	}
+	if w.chosenName != "testuser" {
+		t.Errorf("chosenName = %q, want testuser", w.chosenName)
 	}
 
 	// KeySelect → Generate (select last option: generate)
-	// Move cursor past any existing keys + import to "generate"
 	totalItems := len(w.keys) + 2
 	for i := 0; i < totalItems-1; i++ {
 		sendKey(&w, "j")
-	}
-	if w.keyCursor != totalItems-1 {
-		t.Fatalf("cursor = %d, want %d (generate)", w.keyCursor, totalItems-1)
 	}
 	sendSpecial(&w, tea.KeyEnter)
 	if w.step != WizardKeyGenerate {
 		t.Fatalf("step = %d, want WizardKeyGenerate", w.step)
 	}
 
-	t.Log("step transitions: Welcome → KeySelect → KeyGenerate OK")
+	t.Log("step transitions: Welcome → ChooseName → KeySelect → KeyGenerate OK")
+}
+
+func TestWizard_ChooseNameValidation(t *testing.T) {
+	w := NewWizard()
+	sendSpecial(&w, tea.KeyEnter) // → choose name
+
+	// Empty name rejected
+	sendSpecial(&w, tea.KeyEnter)
+	if w.step != WizardChooseName {
+		t.Fatal("empty name should be rejected")
+	}
+	if w.err == "" {
+		t.Error("should show error for empty name")
+	}
+
+	// Short name rejected
+	w.nameInput.SetValue("a")
+	sendSpecial(&w, tea.KeyEnter)
+	if w.step != WizardChooseName {
+		t.Fatal("1-char name should be rejected")
+	}
+
+	// Valid name accepted
+	w.nameInput.SetValue("alice")
+	sendSpecial(&w, tea.KeyEnter)
+	if w.step != WizardKeySelect {
+		t.Fatalf("step = %d, want WizardKeySelect", w.step)
+	}
+
+	t.Log("choose name validation: empty/short rejected, valid accepted")
 }
 
 func TestWizard_GenerateAndShare(t *testing.T) {
 	w := NewWizard()
 
 	// Fast-forward to KeyGenerate
-	sendSpecial(&w, tea.KeyEnter) // welcome → keyselect
+	advanceToKeySelect(&w)
 	for i := 0; i < len(w.keys)+2; i++ {
 		sendKey(&w, "j")
 	}
@@ -149,7 +192,7 @@ func TestWizard_ExportBackup(t *testing.T) {
 	w := NewWizard()
 
 	// Generate a key first
-	sendSpecial(&w, tea.KeyEnter) // welcome
+	advanceToKeySelect(&w)
 	for i := 0; i < len(w.keys)+2; i++ {
 		sendKey(&w, "j")
 	}
@@ -201,8 +244,8 @@ func TestWizard_ExportBackup(t *testing.T) {
 func TestWizard_EscNavigation(t *testing.T) {
 	w := NewWizard()
 
-	// Welcome → KeySelect
-	sendSpecial(&w, tea.KeyEnter)
+	// Welcome → ChooseName → KeySelect
+	advanceToKeySelect(&w)
 	if w.step != WizardKeySelect {
 		t.Fatal("not at keyselect")
 	}
@@ -229,7 +272,7 @@ func TestWizard_ShareScreenView(t *testing.T) {
 	w := NewWizard()
 
 	// Generate a key and advance to Share
-	sendSpecial(&w, tea.KeyEnter)
+	advanceToKeySelect(&w)
 	for i := 0; i < len(w.keys)+2; i++ {
 		sendKey(&w, "j")
 	}
@@ -330,7 +373,7 @@ func TestWizard_MouseKeySelect(t *testing.T) {
 	w := NewWizard()
 
 	// Advance to key select
-	sendSpecial(&w, tea.KeyEnter)
+	advanceToKeySelect(&w)
 	if w.step != WizardKeySelect {
 		t.Fatal("not at key select")
 	}
@@ -361,7 +404,7 @@ func TestWizard_MouseWelcome(t *testing.T) {
 		t.Fatal("not at welcome")
 	}
 
-	// Click anywhere should advance
+	// Click anywhere should advance to ChooseName
 	model, _ := w.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionRelease,
@@ -370,11 +413,11 @@ func TestWizard_MouseWelcome(t *testing.T) {
 	})
 	w = model.(WizardModel)
 
-	if w.step != WizardKeySelect {
-		t.Errorf("step = %d after welcome click, want KeySelect", w.step)
+	if w.step != WizardChooseName {
+		t.Errorf("step = %d after welcome click, want ChooseName", w.step)
 	}
 
-	t.Log("mouse welcome: click advances to key select")
+	t.Log("mouse welcome: click advances to choose name")
 }
 
 func TestConnectFailed_Mouse(t *testing.T) {

@@ -14,7 +14,8 @@ import (
 // VerifyModel manages the safety numbers verification dialog.
 type VerifyModel struct {
 	visible      bool
-	user         string
+	user         string // nanoid username (for VerifyActionMsg)
+	displayName  string // human-visible name (for rendering)
 	safetyNumber string
 	verified     bool
 	err          string
@@ -28,6 +29,7 @@ type VerifyActionMsg struct {
 func (v *VerifyModel) Show(targetUser string, c *client.Client) {
 	v.visible = true
 	v.user = targetUser
+	v.displayName = targetUser // fallback
 	v.verified = false
 	v.safetyNumber = ""
 	v.err = ""
@@ -35,6 +37,8 @@ func (v *VerifyModel) Show(targetUser string, c *client.Client) {
 	if c == nil {
 		return
 	}
+
+	v.displayName = c.DisplayName(targetUser)
 
 	// Can't verify yourself
 	if targetUser == c.Username() {
@@ -119,7 +123,7 @@ func (v VerifyModel) View(width int) string {
 
 	var b strings.Builder
 
-	b.WriteString(searchHeaderStyle.Render(" Verify: " + v.user))
+	b.WriteString(searchHeaderStyle.Render(" Verify: " + v.displayName))
 	b.WriteString("\n\n")
 
 	if v.err != "" {
@@ -141,7 +145,7 @@ func (v VerifyModel) View(width int) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString("  Compare this number with " + v.user + "\n")
+	b.WriteString("  Compare this number with " + v.displayName + "\n")
 	b.WriteString("  via phone or in person.\n\n")
 
 	if v.verified {

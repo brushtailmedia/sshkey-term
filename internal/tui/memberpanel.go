@@ -119,6 +119,15 @@ func (m *MemberPanelModel) MemberNames() []string {
 	return names
 }
 
+// MemberEntries returns username + display name pairs for @completion.
+func (m *MemberPanelModel) MemberEntries() []MemberEntry {
+	entries := make([]MemberEntry, len(m.members))
+	for i, mem := range m.members {
+		entries[i] = MemberEntry{Username: mem.User, DisplayName: mem.DisplayName}
+	}
+	return entries
+}
+
 func (m MemberPanelModel) Update(msg tea.KeyMsg) (MemberPanelModel, tea.Cmd) {
 	if !m.focused {
 		return m, nil

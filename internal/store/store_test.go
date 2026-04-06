@@ -7,16 +7,82 @@ import (
 )
 
 // openTestStore creates a temp-dir Store for a test. Uses an unencrypted DB
-// (nil key) to keep tests fast and portable.
+// to keep tests fast and portable.
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "messages.db")
-	s, err := Open(path, nil)
+	s, err := OpenUnencrypted(path)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+// -- Encrypted round-trip --
+
+func TestOpen_EncryptedRoundTrip(t *testing.T) {
+	// Verify that an encrypted DB can be created, written, closed, and reopened.
+	// This is the exact flow that was failing before the SetMaxOpenConns(1) fix.
+	seed := []byte("test-seed-32-bytes-for-ed25519key")
+	dbKey, err := DeriveDBKey(seed)
+	if err != nil {
+		t.Fatalf("derive key: %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "encrypted.db")
+
+	// First open: create + insert
+	s1, err := Open(path, dbKey)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if err := s1.InsertMessage(StoredMessage{
+		ID: "enc_m1", Sender: "alice", Body: "secret message", TS: 1, Room: "general",
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	s1.Close()
+
+	// Second open: reopen with same key and read back
+	s2, err := Open(path, dbKey)
+	if err != nil {
+		t.Fatalf("reopen with correct key: %v", err)
+	}
+	defer s2.Close()
+
+	msgs, err := s2.GetRoomMessages("general", 10)
+	if err != nil {
+		t.Fatalf("get after reopen: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "enc_m1" || msgs[0].Body != "secret message" {
+		t.Errorf("encrypted round-trip failed: %+v", msgs)
+	}
+}
+
+func TestOpen_EncryptedWrongKey(t *testing.T) {
+	seed1 := []byte("seed-one-for-ed25519-private-key")
+	seed2 := []byte("seed-two-for-ed25519-private-key")
+	key1, _ := DeriveDBKey(seed1)
+	key2, _ := DeriveDBKey(seed2)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "encrypted.db")
+
+	// Create with key1
+	s1, err := Open(path, key1)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	s1.InsertMessage(StoredMessage{ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "general"})
+	s1.Close()
+
+	// Reopen with key2 — should fail
+	_, err = Open(path, key2)
+	if err == nil {
+		t.Fatal("opening with wrong key should fail")
+	}
 }
 
 // -- DeriveDBKey --
@@ -82,7 +148,7 @@ func TestOpen_SchemaCreated(t *testing.T) {
 
 func TestOpen_IdempotentReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "messages.db")
-	s1, err := Open(path, nil)
+	s1, err := OpenUnencrypted(path)
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
@@ -91,7 +157,7 @@ func TestOpen_IdempotentReopen(t *testing.T) {
 	}
 	s1.Close()
 
-	s2, err := Open(path, nil)
+	s2, err := OpenUnencrypted(path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -102,6 +168,14 @@ func TestOpen_IdempotentReopen(t *testing.T) {
 	}
 	if len(msgs) != 1 || msgs[0].ID != "m1" {
 		t.Errorf("persistence broken: %v", msgs)
+	}
+}
+
+func TestOpen_RejectsNilKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "messages.db")
+	_, err := Open(path, nil)
+	if err == nil {
+		t.Fatal("Open should reject nil key")
 	}
 }
 

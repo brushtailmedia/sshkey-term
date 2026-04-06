@@ -75,7 +75,8 @@ func (c ConnectFailedModel) View(width int) string {
 	b.WriteString(searchHeaderStyle.Render(" Connection Failed"))
 	b.WriteString("\n\n")
 	b.WriteString("  The server rejected your key.\n")
-	b.WriteString("  Your admin may not have added you yet.\n\n")
+	b.WriteString("  Your admin may not have added you yet,\n")
+	b.WriteString("  or the account may have been retired.\n\n")
 
 	b.WriteString("  Fingerprint:\n")
 	b.WriteString("  " + searchHeaderStyle.Render(c.fingerprint) + "\n\n")

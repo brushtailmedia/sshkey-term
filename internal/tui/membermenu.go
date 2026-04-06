@@ -18,14 +18,14 @@ func NewMemberMenu() MemberMenuModel {
 	return MemberMenuModel{}
 }
 
-func (m *MemberMenuModel) Show(user string, x, y int) {
+func (m *MemberMenuModel) Show(user, displayName string, x, y int) {
 	m.visible = true
 	m.user = user
 	m.cursor = 0
 	m.items = []ContextMenuItem{
-		{Label: "Message " + user, Action: "message"},
+		{Label: "Message " + displayName, Action: "message"},
 		{Label: "Create group with...", Action: "create_group"},
-		{Label: "Verify " + user, Action: "verify"},
+		{Label: "Verify " + displayName, Action: "verify"},
 		{Label: "View profile", Action: "profile"},
 	}
 }

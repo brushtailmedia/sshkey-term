@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
@@ -30,7 +31,7 @@ func TestE2ERoomChat(t *testing.T) {
 	alice := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key",
+		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_alice_e2e",
 		DataDir:  aliceDataDir,
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
@@ -90,7 +91,7 @@ func TestE2ERoomChat(t *testing.T) {
 	bob := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key-bob",
+		KeyPath:  testutil.Bob.KeyPath,
 		DeviceID: "dev_bob_e2e",
 		DataDir:  bobDataDir,
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -206,7 +207,7 @@ func TestE2EDMChat(t *testing.T) {
 	alice := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key",
+		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_alice_dm_e2e",
 		DataDir:  aliceDataDir,
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -240,7 +241,7 @@ func TestE2EDMChat(t *testing.T) {
 	bob := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key-bob",
+		KeyPath:  testutil.Bob.KeyPath,
 		DeviceID: "dev_bob_dm_e2e",
 		DataDir:  bobDataDir,
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -265,7 +266,7 @@ func TestE2EDMChat(t *testing.T) {
 	time.Sleep(500 * time.Millisecond) // let profiles settle
 
 	// Alice creates a DM with bob
-	err := alice.CreateDM([]string{"bob"}, "")
+	err := alice.CreateDM([]string{testutil.Bob.Username}, "")
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
@@ -350,7 +351,7 @@ func TestE2EReplayDetection(t *testing.T) {
 	c := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key",
+		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_replay_test",
 		DataDir:  dataDir,
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})),
@@ -409,7 +410,7 @@ func TestE2EKeyPinning(t *testing.T) {
 	c := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key",
+		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_pin_test",
 		DataDir:  dataDir,
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -436,8 +437,8 @@ func TestE2EKeyPinning(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Check that profiles were received and keys pinned
-	aliceProfile := c.Profile("alice")
-	bobProfile := c.Profile("bob")
+	aliceProfile := c.Profile(testutil.Alice.Username)
+	bobProfile := c.Profile(testutil.Bob.Username)
 
 	if aliceProfile == nil {
 		t.Fatal("alice profile not received")
@@ -451,7 +452,7 @@ func TestE2EKeyPinning(t *testing.T) {
 
 	// Verify keys are pinned in the local store
 	if c.Store() != nil {
-		fp, verified, err := c.Store().GetPinnedKey("bob")
+		fp, verified, err := c.Store().GetPinnedKey(testutil.Bob.Username)
 		if err != nil {
 			t.Fatalf("get pinned key: %v", err)
 		}
@@ -477,7 +478,7 @@ func TestE2EHostKeyTOFU(t *testing.T) {
 	c := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key",
+		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_tofu_test",
 		DataDir:  dataDir,
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -509,7 +510,7 @@ func TestE2EHostKeyTOFU(t *testing.T) {
 	c2 := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key",
+		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_tofu_test2",
 		DataDir:  dataDir,
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),

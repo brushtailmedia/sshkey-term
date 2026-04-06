@@ -27,11 +27,12 @@ var (
 
 // SearchModel manages the search page.
 type SearchModel struct {
-	visible   bool
-	input     textinput.Model
-	results   []store.StoredMessage
-	cursor    int
-	lastQuery string
+	visible     bool
+	input       textinput.Model
+	results     []store.StoredMessage
+	cursor      int
+	lastQuery   string
+	resolveName func(string) string // nanoid → display name
 }
 
 func NewSearch() SearchModel {
@@ -148,7 +149,11 @@ func (s SearchModel) View(width, height int) string {
 			}
 			ts := time.Unix(r.TS, 0).Format("Jan 2")
 
-			header := fmt.Sprintf(" %s in %s · %s", searchMatchStyle.Render(r.Sender), location, ts)
+			sender := r.Sender
+			if s.resolveName != nil {
+				sender = s.resolveName(r.Sender)
+			}
+			header := fmt.Sprintf(" %s in %s · %s", searchMatchStyle.Render(sender), location, ts)
 			body := " " + truncate(r.Body, width-4)
 
 			line := header + "\n" + body + "\n"

@@ -29,8 +29,8 @@ type InputModel struct {
 	replyTo        string           // message ID being replied to
 	replyText      string           // preview of the message being replied to
 	lastTypingSent time.Time        // throttle typing indicators
-	completion     *CompletionModel // active completion popup
-	members        []string         // current room/conv members for @completion
+	completion     *CompletionModel  // active completion popup
+	members        []MemberEntry    // current room/conv members for @completion
 	pendingCmd     *SlashCommandMsg // slash command needing app-level handling
 }
 
@@ -102,12 +102,13 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, conversation 
 			return i, nil
 		}
 
-		// Send message
+		// Send message — extract @mentions from body
 		if c != nil {
+			mentions := i.ExtractMentions(text)
 			if room != "" {
-				c.SendRoomMessage(room, text, i.replyTo, nil)
+				c.SendRoomMessage(room, text, i.replyTo, mentions)
 			} else if conversation != "" {
-				c.SendDMMessage(conversation, text, i.replyTo, nil)
+				c.SendDMMessage(conversation, text, i.replyTo, mentions)
 			}
 		}
 
@@ -193,9 +194,30 @@ func (i *InputModel) PendingCommand() *SlashCommandMsg {
 	return cmd
 }
 
+// MemberEntry holds a username (nanoid) and display name for @completion.
+type MemberEntry struct {
+	Username    string // nanoid — sent in protocol mentions array
+	DisplayName string // human-visible — shown in completion popup + body
+}
+
 // SetMembers updates the member list for @completion.
-func (i *InputModel) SetMembers(members []string) {
+func (i *InputModel) SetMembers(members []MemberEntry) {
 	i.members = members
+}
+
+// ExtractMentions scans the message body for @displayName patterns and
+// returns the corresponding nanoid usernames for the protocol mentions array.
+func (i *InputModel) ExtractMentions(body string) []string {
+	var mentions []string
+	seen := make(map[string]bool)
+	for _, m := range i.members {
+		target := "@" + m.DisplayName
+		if strings.Contains(body, target) && !seen[m.Username] {
+			mentions = append(mentions, m.Username)
+			seen[m.Username] = true
+		}
+	}
+	return mentions
 }
 
 func (i InputModel) View(width int, focused bool) string {

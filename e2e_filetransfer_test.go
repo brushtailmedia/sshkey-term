@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 	"github.com/brushtailmedia/sshkey-term/internal/crypto"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
@@ -31,30 +31,9 @@ func TestFileTransferComprehensive(t *testing.T) {
 	bobSynced := make(chan bool, 1)
 	carolSynced := make(chan bool, 1)
 
-	mkClient := func(name, keyPath, deviceID string, synced chan bool, msgs chan json.RawMessage) *client.Client {
-		return client.New(client.Config{
-			Host:     "127.0.0.1",
-			Port:     port,
-			KeyPath:  keyPath,
-			DeviceID: deviceID,
-			DataDir:  t.TempDir(),
-			Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
-			OnMessage: func(msgType string, raw json.RawMessage) {
-				switch msgType {
-				case "sync_complete":
-					synced <- true
-				case "profile":
-					// drop — not needed for these tests
-				default:
-					msgs <- raw
-				}
-			},
-		})
-	}
-
-	alice := mkClient("alice", "/tmp/sshkey-test-key", "dev_alice_ft", aliceSynced, aliceMessages)
-	bob := mkClient("bob", "/tmp/sshkey-test-key-bob", "dev_bob_ft", bobSynced, bobMessages)
-	carol := mkClient("carol", "/tmp/sshkey-test-key-carol", "dev_carol_ft", carolSynced, carolMessages)
+	alice := testutil.MkClient(port, testutil.Alice.KeyPath, "dev_alice_ft", t.TempDir(), aliceSynced, aliceMessages)
+	bob := testutil.MkClient(port, testutil.Bob.KeyPath, "dev_bob_ft", t.TempDir(), bobSynced, bobMessages)
+	carol := testutil.MkClient(port, testutil.Carol.KeyPath, "dev_carol_ft", t.TempDir(), carolSynced, carolMessages)
 
 	for _, c := range []*client.Client{alice, bob, carol} {
 		if err := c.Connect(); err != nil {
@@ -75,14 +54,14 @@ func TestFileTransferComprehensive(t *testing.T) {
 	time.Sleep(time.Second)
 
 	// Create a 1:1 DM (alice <-> bob) and a group DM (alice, bob, carol)
-	alice.CreateDM([]string{"bob"}, "")
+	alice.CreateDM([]string{testutil.Bob.Username}, "")
 	raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 	var oneToOne protocol.DMCreated
 	json.Unmarshal(raw, &oneToOne)
 	dmConvID := oneToOne.Conversation
 	waitForType(t, bobMessages, "dm_created", 5*time.Second)
 
-	alice.CreateDM([]string{"bob", "carol"}, "Group")
+	alice.CreateDM([]string{testutil.Bob.Username, testutil.Carol.Username}, "Group")
 	raw = waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 	var group protocol.DMCreated
 	json.Unmarshal(raw, &group)

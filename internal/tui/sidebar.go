@@ -47,6 +47,7 @@ type SidebarModel struct {
 	cursor        int               // position in the combined list
 	selectedRoom  string
 	selectedConv  string
+	resolveName   func(string) string // nanoid → display name (set by App)
 
 	// For message forwarding (set by App)
 	msgCh chan ServerMsg
@@ -198,10 +199,14 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 	for i, conv := range s.conversations {
 		name := conv.Name
 		if name == "" {
-			// Show member names for unnamed conversations
+			// Show member display names for unnamed conversations
 			var names []string
 			for _, m := range conv.Members {
-				names = append(names, m)
+				displayName := m
+				if s.resolveName != nil {
+					displayName = s.resolveName(m)
+				}
+				names = append(names, displayName)
 			}
 			name = strings.Join(names, ", ")
 			if len(name) > width-6 {

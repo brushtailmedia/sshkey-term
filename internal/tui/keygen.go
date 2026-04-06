@@ -23,7 +23,7 @@ import (
 // Shared by the first-launch wizard and the AddServer dialog. Does not touch
 // any server state — callers are responsible for backup prompts and for
 // wiring the returned key into config.toml.
-func generateEd25519KeyFile(path, passphrase string) (fingerprint string, err error) {
+func generateEd25519KeyFile(path, passphrase string, comment ...string) (fingerprint string, err error) {
 	if strings.HasPrefix(path, "~/") {
 		home, _ := os.UserHomeDir()
 		path = filepath.Join(home, path[2:])
@@ -56,7 +56,12 @@ func generateEd25519KeyFile(path, passphrase string) (fingerprint string, err er
 	if err != nil {
 		return "", fmt.Errorf("marshal public key: %w", err)
 	}
-	pubLine := string(ssh.MarshalAuthorizedKey(sshPub))
+	pubLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(sshPub)))
+	// Append comment (preferred display name) if provided
+	if len(comment) > 0 && comment[0] != "" {
+		pubLine += " " + comment[0]
+	}
+	pubLine += "\n"
 	if err := os.WriteFile(path+".pub", []byte(pubLine), 0644); err != nil {
 		return "", fmt.Errorf("write public key: %w", err)
 	}

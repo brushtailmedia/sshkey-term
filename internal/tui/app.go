@@ -414,7 +414,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.memberPanel.IsVisible() {
 				a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
 				// Also update input members for @completion
-				a.input.SetMembers(a.activeMemberNames())
+				a.input.SetMembers(a.activeMemberEntries())
 			}
 			return a, nil
 
@@ -503,7 +503,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
-					a.input.SetMembers(a.activeMemberNames())
+					a.input.SetMembers(a.activeMemberEntries())
 				}
 				// Send read receipt for the new context
 				a.sendReadReceipt()
@@ -577,7 +577,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Same options as right-click: message, create_group, verify,
 			// profile. Screen position (0, 0) is fine — menu renders as
 			// a centered dialog regardless.
-			a.memberMenu.Show(msg.User, 0, 0)
+			a.memberMenu.Show(msg.User, a.resolveDisplayName(msg.User), 0, 0)
 		case "message":
 			if a.client != nil {
 				a.client.CreateDM([]string{msg.User}, "")
@@ -617,7 +617,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Type:        "set_profile",
 				DisplayName: msg.DisplayName,
 			})
-			a.statusBar.SetError("Display name updated")
+			// Don't show success here — wait for the server's profile
+			// broadcast (success) or error response (username_taken).
+			// Errors display automatically via the "error" handler.
 		}
 		return a, nil
 
@@ -720,13 +722,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case VerifyActionMsg:
 		if a.client != nil && a.client.Store() != nil {
 			a.client.Store().MarkVerified(msg.User)
-			a.statusBar.SetError(msg.User + " marked as verified")
+			a.statusBar.SetError(a.resolveDisplayName(msg.User) + " marked as verified")
 		}
 		return a, nil
 
 	case KeyWarningAcceptMsg:
 		// Key was accepted — re-pin happened during StoreProfile
-		a.statusBar.SetError("New key accepted for " + msg.User)
+		a.statusBar.SetError("New key accepted for " + a.resolveDisplayName(msg.User))
 		return a, nil
 
 	case KeyWarningDisconnectMsg:
@@ -814,9 +816,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Convert to display messages and prepend
 				var display []DisplayMessage
 				for _, m := range localMsgs {
+					from := m.Sender
+					if a.client != nil {
+						from = a.client.DisplayName(m.Sender)
+					}
 					display = append(display, DisplayMessage{
 						ID:           m.ID,
-						From:         m.Sender,
+						FromID:       m.Sender,
+						From:         from,
 						Body:         m.Body,
 						TS:           m.TS,
 						Room:         m.Room,
@@ -866,7 +873,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.input.SetReply(msg.Msg.ID, msg.Msg.From+": "+preview)
 			a.focus = FocusInput
 		case "delete":
-			if a.client != nil && (msg.Msg.From == a.client.Username() || a.client.IsAdmin()) {
+			if a.client != nil && (msg.Msg.FromID == a.client.Username() || a.client.IsAdmin()) {
 				a.client.SendDelete(msg.Msg.ID)
 			}
 		case "pin":
@@ -928,7 +935,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "open_menu":
 			// Keyboard-triggered context menu opener (Enter on selected message).
 			// Shows the same menu the mouse right-click produces, at screen origin.
-			isOwn := a.client != nil && msg.Msg.From == a.client.Username()
+			isOwn := a.client != nil && msg.Msg.FromID == a.client.Username()
 			isAdmin := a.client != nil && a.client.IsAdmin()
 			isRoom := a.messages.room != ""
 			var myEmojis []string
@@ -981,16 +988,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Populate sidebar and messages
 		a.sidebar.SetRooms(a.client.Rooms())
-		a.messages.currentUser = a.client.Username()
+		a.messages.currentUser = a.client.DisplayName(a.client.Username())
+		a.messages.currentUserID = a.client.Username()
+		a.messages.resolveName = a.client.DisplayName
+		a.search.resolveName = a.client.DisplayName
+		a.sidebar.resolveName = a.client.DisplayName
+		a.newConv.resolveName = a.client.DisplayName
 		if len(a.client.Rooms()) > 0 {
 			a.messages.SetContext(a.client.Rooms()[0], "")
 			a.messages.LoadFromDB(a.client)
 			// Set up member list for @completion
 			a.memberPanel.Refresh(a.client.Rooms()[0], "", a.client, a.sidebar.online)
-			a.input.SetMembers(a.activeMemberNames())
+			a.input.SetMembers(a.activeMemberEntries())
 		}
 
-		a.statusBar.SetUser(a.client.Username(), a.client.IsAdmin())
+		a.statusBar.SetUser(a.client.DisplayName(a.client.Username()), a.client.IsAdmin())
 		a.statusBar.SetConnected(true)
 		a.updateTitle()
 
@@ -1184,7 +1196,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
-					a.input.SetMembers(a.activeMemberNames())
+					a.input.SetMembers(a.activeMemberEntries())
 				}
 				a.sendReadReceipt()
 			}
@@ -1223,7 +1235,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			a.messages.cursor = idx
 			msg := a.messages.messages[idx]
 			if !msg.IsSystem {
-				isOwn := a.client != nil && msg.From == a.client.Username()
+				isOwn := a.client != nil && msg.FromID == a.client.Username()
 				isAdmin := a.client != nil && a.client.IsAdmin()
 				isRoom := a.messages.room != ""
 				var myEmojis []string
@@ -1243,7 +1255,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				a.memberPanel.cursor = idx
 				// Show member context menu
 				user := a.memberPanel.members[idx].User
-				a.memberMenu.Show(user, x, y)
+				a.memberMenu.Show(user, a.resolveDisplayName(user), x, y)
 			}
 		}
 
@@ -1298,6 +1310,15 @@ func (a *App) updateTitle() {
 }
 
 // sendReadReceipt sends a read receipt for the latest message in the active room/conversation.
+// resolveDisplayName maps a username (nanoid) to its display name for system
+// messages. Falls back to the raw username if no profile is available.
+func (a *App) resolveDisplayName(username string) string {
+	if a.client != nil {
+		return a.client.DisplayName(username)
+	}
+	return username
+}
+
 func (a *App) sendReadReceipt() {
 	if a.client == nil {
 		return
@@ -1325,17 +1346,17 @@ func (a *App) sendReadReceipt() {
 // retired users. Retired users can't receive mentions (their session is
 // gone and future messages can't be wrapped for them), so showing them in
 // completion is misleading.
-func (a *App) activeMemberNames() []string {
-	names := a.memberPanel.MemberNames()
+func (a *App) activeMemberEntries() []MemberEntry {
+	members := a.memberPanel.MemberEntries()
 	if a.client == nil {
-		return names
+		return members
 	}
-	out := names[:0]
-	for _, n := range names {
-		if retired, _ := a.client.IsRetired(n); retired {
+	out := members[:0]
+	for _, m := range members {
+		if retired, _ := a.client.IsRetired(m.Username); retired {
 			continue
 		}
-		out = append(out, n)
+		out = append(out, m)
 	}
 	return out
 }
@@ -1482,7 +1503,7 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 			}
 			if !a.muted[m.Room] {
 				SendDesktopNotification(
-					fmt.Sprintf("%s in #%s", m.From, m.Room),
+					fmt.Sprintf("%s in #%s", a.resolveDisplayName(m.From), m.Room),
 					body,
 				)
 			}
@@ -1505,7 +1526,7 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 				body = payload.Body
 			}
 			if !a.muted[m.Conversation] {
-				SendDesktopNotification(m.From, body)
+				SendDesktopNotification(a.resolveDisplayName(m.From), body)
 			}
 			if a.bell.ShouldBell("", m.Conversation, m.From, a.client.Username(), false, a.muted) {
 				Ring()
@@ -1560,7 +1581,7 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 			if a.client != nil && a.messages.conversation != "" {
 				for _, member := range a.client.ConvMembers(a.messages.conversation) {
 					if member == m.User {
-						a.messages.AddSystemMessage(m.User + "'s account was retired")
+						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + "'s account was retired")
 						break
 					}
 				}
@@ -1624,9 +1645,9 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 				// Show system message in the active conversation stream
 				if m.Conversation == a.messages.conversation {
 					if m.Reason == "retirement" {
-						a.messages.AddSystemMessage(m.User + "'s account was retired")
+						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + "'s account was retired")
 					} else {
-						a.messages.AddSystemMessage(m.User + " left the conversation")
+						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " left the conversation")
 					}
 				}
 				// If WE left, remove from sidebar and switch away
@@ -1647,7 +1668,7 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			a.sidebar.RenameConversation(m.Conversation, m.Name)
 			if m.Conversation == a.messages.conversation {
-				a.messages.AddSystemMessage(m.RenamedBy + " renamed the conversation to " + m.Name)
+				a.messages.AddSystemMessage(a.resolveDisplayName(m.RenamedBy) + " renamed the conversation to " + m.Name)
 			}
 		}
 	case "room_event":
@@ -1656,9 +1677,9 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 			if m.Room == a.messages.room {
 				switch m.Event {
 				case "join":
-					a.messages.AddSystemMessage(m.User + " joined")
+					a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " joined")
 				case "leave":
-					a.messages.AddSystemMessage(m.User + " left")
+					a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " left")
 				}
 			}
 		}
@@ -1746,6 +1767,11 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		var m protocol.Error
 		json.Unmarshal(msg.Raw, &m)
 		a.statusBar.SetError(m.Message)
+		// If this is a username_taken error and settings is open, show it
+		// prominently so the user knows their name change failed
+		if m.Code == "username_taken" || m.Code == "invalid_profile" {
+			a.statusBar.SetError("Name change failed: " + m.Message)
+		}
 	case "server_shutdown":
 		var m protocol.ServerShutdown
 		json.Unmarshal(msg.Raw, &m)

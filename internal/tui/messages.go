@@ -55,7 +55,8 @@ var (
 // DisplayMessage is a message ready for rendering.
 type DisplayMessage struct {
 	ID           string
-	From         string
+	FromID       string // raw username (nanoid) for logic/comparison
+	From         string // display name for rendering
 	Body         string // decrypted body (or "(encrypted)" if not decryptable)
 	TS           int64
 	Room         string
@@ -140,7 +141,9 @@ type MessagesModel struct {
 	cursor         int  // selected message index (-1 = none)
 	scrollOffset   int
 	typingUsers    map[string]time.Time // user -> last typing time
-	currentUser    string               // for @mention highlighting
+	currentUser    string               // display name — for @mention highlighting in body
+	currentUserID  string               // nanoid — for mention detection in payload
+	resolveName    func(string) string  // nanoid → display name (set by App)
 	loadingHistory bool
 	hasMore        bool              // server indicated more history available
 	unreadFromID   string            // first unread message ID (for divider)
@@ -211,9 +214,14 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 	m.messages = nil
 	msgIDs := make([]string, 0, len(stored))
 	for _, s := range stored {
+		from := s.Sender
+		if c != nil {
+			from = c.DisplayName(s.Sender)
+		}
 		m.messages = append(m.messages, DisplayMessage{
 			ID:           s.ID,
-			From:         s.Sender,
+			FromID:       s.Sender,
+			From:         from,
 			Body:         s.Body,
 			TS:           s.TS,
 			Room:         s.Room,
@@ -350,9 +358,15 @@ func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
 		}
 	}
 
+	from := msg.From
+	if c != nil {
+		from = c.DisplayName(msg.From)
+	}
+
 	m.messages = append(m.messages, DisplayMessage{
 		ID:          msg.ID,
-		From:        msg.From,
+		FromID:      msg.From,
+		From:        from,
 		Body:        body,
 		TS:          msg.TS,
 		Room:        msg.Room,
@@ -393,9 +407,15 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 		}
 	}
 
+	from := msg.From
+	if c != nil {
+		from = c.DisplayName(msg.From)
+	}
+
 	m.messages = append(m.messages, DisplayMessage{
 		ID:           msg.ID,
-		From:         msg.From,
+		FromID:       msg.From,
+		From:         from,
 		Body:         body,
 		TS:           msg.TS,
 		Conversation: msg.Conversation,
@@ -545,6 +565,14 @@ func (m *MessagesModel) SetTyping(user, room, conversation string) {
 	if room == m.room || conversation == m.conversation {
 		m.typingUsers[user] = time.Now()
 	}
+}
+
+// MessageAt returns the message at the given index, or nil if out of bounds.
+func (m *MessagesModel) MessageAt(idx int) *DisplayMessage {
+	if idx >= 0 && idx < len(m.messages) {
+		return &m.messages[idx]
+	}
+	return nil
 }
 
 func (m *MessagesModel) SelectedMessage() *DisplayMessage {
@@ -703,10 +731,10 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 			// Highlight @mentions in the body
 			body := " " + highlightLinks(highlightMentions(msg.Body, m.currentUser))
 
-			// Check if this message mentions the current user
+			// Check if this message mentions the current user (mentions are nanoids)
 			isMentioned := false
 			for _, mention := range msg.Mentions {
-				if mention == m.currentUser {
+				if mention == m.currentUserID {
 					isMentioned = true
 					break
 				}
@@ -716,7 +744,7 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 			if showHeader {
 				ts := time.Unix(msg.TS, 0).Format("3:04 PM")
 				header := usernameStyle.Render(msg.From)
-				if m.retired[msg.From] {
+				if m.retired[msg.FromID] {
 					header += " " + helpDescStyle.Render("[retired]")
 				}
 				header += "  " + timestampStyle.Render(ts)
@@ -788,7 +816,11 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 	cutoff := time.Now().Add(-5 * time.Second)
 	for user, t := range m.typingUsers {
 		if t.After(cutoff) {
-			typingNames = append(typingNames, user)
+			name := user
+			if m.resolveName != nil {
+				name = m.resolveName(user)
+			}
+			typingNames = append(typingNames, name)
 		}
 	}
 	if len(typingNames) > 0 {

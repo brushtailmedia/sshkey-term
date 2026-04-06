@@ -2,13 +2,12 @@ package main
 
 import (
 	"encoding/json"
-	"log/slog"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
@@ -28,28 +27,11 @@ func TestPersistenceComprehensive(t *testing.T) {
 	bobSynced := make(chan bool, 1)
 
 	mkClient := func(keyPath, deviceID, dataDir string, synced chan bool, msgs chan json.RawMessage) *client.Client {
-		return client.New(client.Config{
-			Host:     "127.0.0.1",
-			Port:     port,
-			KeyPath:  keyPath,
-			DeviceID: deviceID,
-			DataDir:  dataDir,
-			Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
-			OnMessage: func(msgType string, raw json.RawMessage) {
-				switch msgType {
-				case "sync_complete":
-					synced <- true
-				case "profile":
-					// drop
-				default:
-					msgs <- raw
-				}
-			},
-		})
+		return testutil.MkClient(port, keyPath, deviceID, dataDir, synced, msgs)
 	}
 
-	alice := mkClient("/tmp/sshkey-test-key", "dev_alice_persist", aliceDir, aliceSynced, aliceMessages)
-	bob := mkClient("/tmp/sshkey-test-key-bob", "dev_bob_persist", bobDir, bobSynced, bobMessages)
+	alice := mkClient(testutil.Alice.KeyPath, "dev_alice_persist", aliceDir, aliceSynced, aliceMessages)
+	bob := mkClient(testutil.Bob.KeyPath, "dev_bob_persist", bobDir, bobSynced, bobMessages)
 
 	if err := alice.Connect(); err != nil {
 		t.Fatalf("alice connect: %v", err)
@@ -67,7 +49,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 	time.Sleep(time.Second)
 
 	// Create a 1:1 DM
-	alice.CreateDM([]string{"bob"}, "")
+	alice.CreateDM([]string{testutil.Bob.Username}, "")
 	raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 	var dmCreated protocol.DMCreated
 	json.Unmarshal(raw, &dmCreated)
@@ -243,7 +225,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 		if reactions[0].Emoji != "👍" {
 			t.Errorf("emoji = %q, want 👍", reactions[0].Emoji)
 		}
-		if reactions[0].User != "bob" {
+		if reactions[0].User != testutil.Bob.Username {
 			t.Errorf("user = %q, want bob", reactions[0].User)
 		}
 
@@ -450,7 +432,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 		// Connect carol for the group
 		carolSynced := make(chan bool, 1)
 		carolMsgs := make(chan json.RawMessage, 200)
-		carol := mkClient("/tmp/sshkey-test-key-carol", "dev_carol_persist", t.TempDir(), carolSynced, carolMsgs)
+		carol := mkClient(testutil.Carol.KeyPath, "dev_carol_persist", t.TempDir(), carolSynced, carolMsgs)
 		if err := carol.Connect(); err != nil {
 			t.Fatalf("carol connect: %v", err)
 		}
@@ -458,7 +440,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 		<-carolSynced
 
 		// Create group DM
-		alice.CreateDM([]string{"bob", "carol"}, "Persist Group")
+		alice.CreateDM([]string{testutil.Bob.Username, testutil.Carol.Username}, "Persist Group")
 		raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 		var group protocol.DMCreated
 		json.Unmarshal(raw, &group)
@@ -534,7 +516,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 		// able to decrypt messages using epoch keys loaded from DB.
 		alice2Synced := make(chan bool, 1)
 		alice2Msgs := make(chan json.RawMessage, 200)
-		alice2 := mkClient("/tmp/sshkey-test-key", "dev_alice_persist2", aliceDir, alice2Synced, alice2Msgs)
+		alice2 := mkClient(testutil.Alice.KeyPath, "dev_alice_persist2", aliceDir, alice2Synced, alice2Msgs)
 
 		if err := alice2.Connect(); err != nil {
 			t.Fatalf("alice2 connect: %v", err)
@@ -574,7 +556,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 		// Create a new client with same data dir
 		alice3Synced := make(chan bool, 1)
 		alice3Msgs := make(chan json.RawMessage, 200)
-		alice3 := mkClient("/tmp/sshkey-test-key", "dev_alice_persist3", aliceDir, alice3Synced, alice3Msgs)
+		alice3 := mkClient(testutil.Alice.KeyPath, "dev_alice_persist3", aliceDir, alice3Synced, alice3Msgs)
 
 		if err := alice3.Connect(); err != nil {
 			t.Fatalf("alice3 connect: %v", err)

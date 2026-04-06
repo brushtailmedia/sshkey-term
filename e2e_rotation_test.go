@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
@@ -27,7 +28,7 @@ func TestE2EEpochRotationOnJoin(t *testing.T) {
 	alice := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key",
+		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_alice_rot",
 		DataDir:  t.TempDir(),
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -90,7 +91,7 @@ func TestE2EEpochRotationOnJoin(t *testing.T) {
 	bob := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key-bob",
+		KeyPath:  testutil.Bob.KeyPath,
 		DeviceID: "dev_bob_rot",
 		DataDir:  t.TempDir(),
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -169,7 +170,7 @@ func TestE2EEpochRotationPeriodic(t *testing.T) {
 	c := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key",
+		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_periodic_rot",
 		DataDir:  t.TempDir(),
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -238,7 +239,7 @@ func TestE2EEpochGraceWindow(t *testing.T) {
 	c := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key",
+		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_grace_test",
 		DataDir:  t.TempDir(),
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -300,7 +301,7 @@ func TestE2EMultiDeviceEpochKey(t *testing.T) {
 	dev1 := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key",
+		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_alice_d1",
 		DataDir:  t.TempDir(),
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
@@ -331,7 +332,7 @@ func TestE2EMultiDeviceEpochKey(t *testing.T) {
 	dev2 := client.New(client.Config{
 		Host:     "127.0.0.1",
 		Port:     port,
-		KeyPath:  "/tmp/sshkey-test-key",
+		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_alice_d2",
 		DataDir:  t.TempDir(),
 		Logger:   slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),

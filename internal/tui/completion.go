@@ -35,9 +35,14 @@ type CompletionModel struct {
 	prefix  string // the trigger prefix (e.g., "@bo", "/re")
 }
 
+// Items returns the completion items (for testing).
+func (c *CompletionModel) Items() []CompletionItem {
+	return c.items
+}
+
 // Complete returns completion items for the current input.
 // Returns nil if no completion is active.
-func Complete(input string, cursorPos int, members []string) *CompletionModel {
+func Complete(input string, cursorPos int, members []MemberEntry) *CompletionModel {
 	if cursorPos == 0 || len(input) == 0 {
 		return nil
 	}
@@ -63,15 +68,15 @@ func Complete(input string, cursorPos int, members []string) *CompletionModel {
 	}
 }
 
-func completeMentions(prefix string, members []string) *CompletionModel {
+func completeMentions(prefix string, members []MemberEntry) *CompletionModel {
 	query := strings.ToLower(prefix[1:]) // strip @
 	var items []CompletionItem
 
 	for _, m := range members {
-		if strings.HasPrefix(strings.ToLower(m), query) {
+		if strings.HasPrefix(strings.ToLower(m.DisplayName), query) {
 			items = append(items, CompletionItem{
-				Text:    "@" + m + " ",
-				Display: "@" + m,
+				Text:    "@" + m.DisplayName + " ",
+				Display: "@" + m.DisplayName,
 			})
 		}
 	}
