@@ -67,11 +67,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: macos-13
-            goarch: amd64
-          - runner: macos-latest
-            goarch: arm64
-    runs-on: ${{ matrix.runner }}
+          - goarch: amd64
+          - goarch: arm64
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
