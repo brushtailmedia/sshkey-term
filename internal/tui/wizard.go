@@ -181,10 +181,12 @@ func (w WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // -- Step updates --
 
 func (w WizardModel) updateWelcome(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "enter" {
+	switch msg.String() {
+	case "enter":
 		w.step = WizardChooseName
 		w.nameInput.Focus()
-		return w, nil
+	case "q":
+		return w, tea.Quit
 	}
 	return w, nil
 }
@@ -206,6 +208,10 @@ func (w WizardModel) updateChooseName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w.step = WizardKeySelect
 		w.keys = scanSSHKeys()
 	case "esc":
+		w.step = WizardWelcome
+		w.nameInput.Blur()
+		w.err = ""
+	case "q":
 		return w, tea.Quit
 	default:
 		var cmd tea.Cmd
@@ -251,6 +257,10 @@ func (w WizardModel) updateKeySelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			w.genFocused = 0
 		}
 	case "esc":
+		w.step = WizardChooseName
+		w.nameInput.Focus()
+		w.err = ""
+	case "q":
 		return w, tea.Quit
 	}
 	return w, nil
@@ -485,62 +495,164 @@ func (w WizardModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w.step = WizardDone
 		return w, tea.Quit
 	case "esc":
+		w.serverInputs[w.serverFocused].Blur()
+		w.step = WizardShare
+		w.err = ""
+	case "q":
 		return w, tea.Quit
 	default:
 		var cmd tea.Cmd
 		w.serverInputs[w.serverFocused], cmd = w.serverInputs[w.serverFocused].Update(msg)
 		return w, cmd
 	}
+	return w, nil
 }
 
-// handleMouse processes mouse clicks for wizard screens that benefit from it.
+// handleMouse processes mouse clicks for wizard screens.
+// Uses rendered view line counting to find clickable targets rather than
+// hardcoded Y offsets, making it resilient to layout changes.
 func (w WizardModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	// dialogStyle: border(1) + padding(1) = content starts at Y=2
-	const contentY = 2
-
 	switch w.step {
-	case WizardKeySelect:
-		// Layout: header(1) + blank(1) + "Select..."(1) + blank(1) = keys start at Y offset 4
-		// After keys: blank(1) + divider(1) + blank(1) = import at keys+3, generate at keys+4
-		keyStartY := contentY + 4
-		clickIdx := msg.Y - keyStartY
-		totalItems := len(w.keys) + 2 // keys + import + generate
-
-		// Account for the divider between keys and import/generate (3 lines)
-		if clickIdx >= len(w.keys) {
-			clickIdx -= 3 // skip blank + divider + blank
-		}
-
-		if clickIdx >= 0 && clickIdx < totalItems {
-			w.keyCursor = clickIdx
-		}
-
-	case WizardBackup:
-		// [e] and [a] are the clickable lines
-		// Layout: header(1) + blank(1) + 4 lines text + blank(1) + "Your key:"(1) + path(1) + blank(1) = options at ~Y=12
-		lineY := msg.Y - contentY
-		if lineY >= 10 && lineY <= 11 {
-			// [e] Export
-			return w.updateBackup(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
-		}
-		if lineY >= 12 && lineY <= 13 {
-			// [a] Acknowledge
-			return w.updateBackup(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
-		}
-
-	case WizardShare:
-		// [c] Copy is the main clickable element
-		lineY := msg.Y - contentY
-		if lineY >= 10 && lineY <= 12 {
-			return w.updateShare(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
-		}
-
 	case WizardWelcome:
 		// Click anywhere → continue
 		return w.updateWelcome(tea.KeyMsg{Type: tea.KeyEnter})
+
+	case WizardChooseName:
+		// Click anywhere focuses the text input (it's the only element)
+		w.nameInput.Focus()
+
+	case WizardKeySelect:
+		line := w.clickLineInView(msg.Y)
+		if line < 0 {
+			break
+		}
+		// Find clickable items in rendered view
+		view := w.viewKeySelect()
+		lines := strings.Split(view, "\n")
+		for i, l := range lines {
+			if i != line {
+				continue
+			}
+			// Check if this line matches a key entry or action button
+			for ki, key := range w.keys {
+				if strings.Contains(l, key.Path) {
+					w.keyCursor = ki
+					return w, nil
+				}
+			}
+			if strings.Contains(l, "Import from file") {
+				w.keyCursor = len(w.keys)
+				return w, nil
+			}
+			if strings.Contains(l, "Generate new key") {
+				w.keyCursor = len(w.keys) + 1
+				return w, nil
+			}
+		}
+
+	case WizardKeyImport:
+		// Click focuses the text input
+		w.importInput.Focus()
+
+	case WizardKeyGenerate:
+		// Click on a field label or input to focus that field
+		line := w.clickLineInView(msg.Y)
+		if line >= 0 {
+			view := w.viewKeyGenerate()
+			lines := strings.Split(view, "\n")
+			if line < len(lines) {
+				l := lines[line]
+				if strings.Contains(l, "Save to") || line > 0 && line < len(lines) && strings.Contains(lines[max(0, line-1)], "Save to") {
+					w.setGenFocus(0)
+				} else if strings.Contains(l, "Passphrase") || line > 0 && strings.Contains(lines[max(0, line-1)], "Passphrase") {
+					w.setGenFocus(1)
+				} else if strings.Contains(l, "Confirm") || line > 0 && strings.Contains(lines[max(0, line-1)], "Confirm") {
+					w.setGenFocus(2)
+				}
+			}
+		}
+
+	case WizardBackup:
+		line := w.clickLineInView(msg.Y)
+		if line >= 0 {
+			view := w.viewBackup()
+			lines := strings.Split(view, "\n")
+			if line < len(lines) {
+				l := lines[line]
+				if strings.Contains(l, "[e]") || strings.Contains(l, "Export copy") {
+					return w.updateBackup(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+				}
+				if strings.Contains(l, "[a]") || strings.Contains(l, "back it up myself") {
+					return w.updateBackup(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+				}
+			}
+		}
+
+	case WizardExport:
+		// Click focuses the text input
+		w.exportInput.Focus()
+
+	case WizardShare:
+		line := w.clickLineInView(msg.Y)
+		if line >= 0 {
+			view := w.viewShare()
+			lines := strings.Split(view, "\n")
+			if line < len(lines) {
+				if strings.Contains(lines[line], "[c]") || strings.Contains(lines[line], "Copy public key") {
+					return w.updateShare(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+				}
+			}
+		}
+
+	case WizardServer:
+		// Click on a field label or input to focus that field
+		line := w.clickLineInView(msg.Y)
+		if line >= 0 {
+			view := w.viewServer()
+			lines := strings.Split(view, "\n")
+			if line < len(lines) {
+				l := lines[line]
+				for i, label := range w.serverLabels {
+					if strings.Contains(l, label) || (line > 0 && line < len(lines) && strings.Contains(lines[max(0, line-1)], label)) {
+						w.serverInputs[w.serverFocused].Blur()
+						w.serverFocused = i
+						w.serverInputs[i].Focus()
+						return w, nil
+					}
+				}
+			}
+		}
 	}
 
 	return w, nil
+}
+
+// clickLineInView converts a screen Y coordinate to a line index within
+// the rendered view string. Returns -1 if out of bounds.
+// dialogStyle has border(1) + padding(1) = content starts at Y=2.
+func (w WizardModel) clickLineInView(screenY int) int {
+	const contentY = 2
+	line := screenY - contentY
+	if line < 0 {
+		return -1
+	}
+	return line
+}
+
+// setGenFocus switches focus between the key generation input fields.
+func (w *WizardModel) setGenFocus(idx int) {
+	w.genPathInput.Blur()
+	w.genPassInput.Blur()
+	w.genConfirm.Blur()
+	w.genFocused = idx
+	switch idx {
+	case 0:
+		w.genPathInput.Focus()
+	case 1:
+		w.genPassInput.Focus()
+	case 2:
+		w.genConfirm.Focus()
+	}
 }
 
 // embedNameInPubKey updates the .pub file comment to include the chosen name.
@@ -623,7 +735,7 @@ func (w WizardModel) viewChooseName() string {
 	b.WriteString("  Your admin can change it if needed.\n\n")
 	b.WriteString("  Display name:\n")
 	b.WriteString("  " + w.nameInput.View() + "\n\n")
-	b.WriteString(helpDescStyle.Render("  Enter=continue  Esc=quit"))
+	b.WriteString(helpDescStyle.Render("  Enter=continue  Esc=back  q=quit"))
 	if w.err != "" {
 		b.WriteString("\n\n  " + errorStyle.Render(w.err))
 	}
@@ -779,7 +891,7 @@ func (w WizardModel) viewServer() string {
 		b.WriteString("  " + w.serverInputs[i].View() + "\n\n")
 	}
 
-	b.WriteString(helpDescStyle.Render("  Tab=next field  Enter=connect  Esc=quit"))
+	b.WriteString(helpDescStyle.Render("  Tab=next field  Enter=connect  Esc=back  q=quit"))
 	if w.err != "" {
 		b.WriteString("\n\n  " + errorStyle.Render(w.err))
 	}

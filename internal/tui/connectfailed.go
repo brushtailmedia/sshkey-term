@@ -34,17 +34,28 @@ func (c ConnectFailedModel) HandleMouse(msg tea.MouseMsg) (ConnectFailedModel, t
 	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionRelease {
 		return c, nil
 	}
-	// dialogStyle: border(1) + padding(1) = content at Y=2
-	// Layout: header(1) + blank(1) + 2 lines text + blank(1) + fingerprint(2) + blank(1)
-	// + pubkey(2) + blank(1) = actions at ~Y=13
-	lineY := msg.Y - 2
-	if lineY >= 11 && lineY <= 11 {
+	// Match click target by rendered view content rather than hardcoded Y offsets.
+	// dialogStyle: border(1) + padding(1) = content starts at Y=2.
+	const contentY = 2
+	lineIdx := msg.Y - contentY
+	if lineIdx < 0 {
+		return c, nil
+	}
+
+	view := c.View(80) // width doesn't affect line structure
+	lines := strings.Split(view, "\n")
+	if lineIdx >= len(lines) {
+		return c, nil
+	}
+	line := lines[lineIdx]
+
+	if strings.Contains(line, "[r]") || strings.Contains(line, "Retry") {
 		return c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	}
-	if lineY >= 12 && lineY <= 12 {
+	if strings.Contains(line, "[c]") || strings.Contains(line, "Copy public key") {
 		return c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
 	}
-	if lineY >= 13 && lineY <= 13 {
+	if strings.Contains(line, "[q]") || strings.Contains(line, "Quit") {
 		return c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	}
 	return c, nil

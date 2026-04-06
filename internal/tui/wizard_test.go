@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -265,7 +266,75 @@ func TestWizard_EscNavigation(t *testing.T) {
 		t.Fatalf("esc from generate: step = %d, want KeySelect", w.step)
 	}
 
-	t.Log("esc navigation: generate → keyselect OK")
+	// Esc → back to ChooseName
+	sendSpecial(&w, tea.KeyEsc)
+	if w.step != WizardChooseName {
+		t.Fatalf("esc from keyselect: step = %d, want ChooseName", w.step)
+	}
+
+	// Esc → back to Welcome
+	sendSpecial(&w, tea.KeyEsc)
+	if w.step != WizardWelcome {
+		t.Fatalf("esc from choosename: step = %d, want Welcome", w.step)
+	}
+
+	t.Log("esc navigation: generate → keyselect → choosename → welcome OK")
+}
+
+func TestWizard_EscFromServer(t *testing.T) {
+	w := NewWizard()
+
+	// Advance through full path to Server
+	advanceToKeySelect(&w)
+	for i := 0; i < len(w.keys)+2; i++ {
+		sendKey(&w, "j")
+	}
+	sendSpecial(&w, tea.KeyEnter)
+	tmpDir := t.TempDir()
+	w.genPathInput.SetValue(filepath.Join(tmpDir, "esc_server_test"))
+	sendSpecial(&w, tea.KeyEnter) // → backup
+	sendKey(&w, "a")              // → share
+	sendSpecial(&w, tea.KeyEnter) // → server
+
+	if w.step != WizardServer {
+		t.Fatalf("step = %d, want WizardServer", w.step)
+	}
+
+	// Esc → back to Share
+	sendSpecial(&w, tea.KeyEsc)
+	if w.step != WizardShare {
+		t.Fatalf("esc from server: step = %d, want Share", w.step)
+	}
+
+	t.Log("esc from server → share OK")
+}
+
+func TestWizard_QuitFromAnyStep(t *testing.T) {
+	// q should quit from any step
+	steps := []struct {
+		name  string
+		setup func(w *WizardModel)
+	}{
+		{"welcome", func(w *WizardModel) {}},
+		{"choosename", func(w *WizardModel) {
+			sendSpecial(w, tea.KeyEnter) // welcome → choosename
+		}},
+		{"keyselect", func(w *WizardModel) {
+			advanceToKeySelect(w)
+		}},
+	}
+
+	for _, tc := range steps {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewWizard()
+			tc.setup(&w)
+			model, cmd := w.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+			_ = model
+			if cmd == nil {
+				t.Fatalf("q at %s should emit quit command", tc.name)
+			}
+		})
+	}
 }
 
 func TestWizard_ShareScreenView(t *testing.T) {
@@ -297,7 +366,6 @@ func TestWizard_ShareScreenView(t *testing.T) {
 		"Copy public key to clipboard",
 		"trusted channel",
 		"Enter=continue",
-		"Esc=back",
 	}
 
 	for _, want := range checks {
@@ -378,15 +446,29 @@ func TestWizard_MouseKeySelect(t *testing.T) {
 		t.Fatal("not at key select")
 	}
 
-	// Click on the "Generate new key" option (last item)
+	// Find the Y coordinate of "Generate new key" in the rendered view
+	view := w.viewKeySelect()
+	lines := strings.Split(view, "\n")
+	generateLine := -1
+	for i, l := range lines {
+		if strings.Contains(l, "Generate new key") {
+			generateLine = i
+			break
+		}
+	}
+	if generateLine < 0 {
+		t.Fatal("'Generate new key' not found in view")
+	}
+
+	// dialogStyle: border(1) + padding(1) = content starts at Y=2
+	clickY := 2 + generateLine
 	totalItems := len(w.keys) + 2
-	generateY := 2 + 4 + len(w.keys) + 3 + 1 // contentY + header offset + keys + divider + 1 for generate
 
 	model, _ := w.Update(tea.MouseMsg{
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionRelease,
 		X:      10,
-		Y:      generateY,
+		Y:      clickY,
 	})
 	w = model.(WizardModel)
 

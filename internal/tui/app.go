@@ -301,6 +301,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.help.IsVisible() {
 			if msg.String() == "esc" || msg.String() == "?" {
 				a.help.Hide()
+				a.focus = FocusInput
 			}
 			return a, nil
 		}
@@ -309,6 +310,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.settings.IsVisible() {
 			var cmd tea.Cmd
 			a.settings, cmd = a.settings.Update(msg)
+			if !a.settings.IsVisible() {
+				a.focus = FocusInput
+			}
 			return a, cmd
 		}
 
@@ -316,6 +320,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.addServer.IsVisible() {
 			var cmd tea.Cmd
 			a.addServer, cmd = a.addServer.Update(msg)
+			if !a.addServer.IsVisible() {
+				a.focus = FocusInput
+			}
 			return a, cmd
 		}
 
@@ -323,6 +330,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.infoPanel.IsVisible() {
 			var cmd tea.Cmd
 			a.infoPanel, cmd = a.infoPanel.Update(msg)
+			if !a.infoPanel.IsVisible() {
+				a.focus = FocusInput
+			}
 			return a, cmd
 		}
 
@@ -330,6 +340,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.pendingPanel.IsVisible() {
 			var cmd tea.Cmd
 			a.pendingPanel, cmd = a.pendingPanel.Update(msg)
+			if !a.pendingPanel.IsVisible() {
+				a.focus = FocusInput
+			}
 			return a, cmd
 		}
 
@@ -337,6 +350,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.emojiPicker.IsVisible() {
 			var cmd tea.Cmd
 			a.emojiPicker, cmd = a.emojiPicker.Update(msg)
+			if !a.emojiPicker.IsVisible() {
+				a.focus = FocusInput
+			}
 			return a, cmd
 		}
 
@@ -344,6 +360,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.newConv.IsVisible() {
 			var cmd tea.Cmd
 			a.newConv, cmd = a.newConv.Update(msg, a.client)
+			if !a.newConv.IsVisible() {
+				a.focus = FocusInput
+			}
 			return a, cmd
 		}
 
@@ -351,6 +370,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.search.IsVisible() {
 			var cmd tea.Cmd
 			a.search, cmd = a.search.Update(msg, a.client)
+			if !a.search.IsVisible() {
+				a.focus = FocusInput
+			}
 			return a, cmd
 		}
 

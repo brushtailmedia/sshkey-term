@@ -694,11 +694,20 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 		title = "no room selected"
 	}
 
-	// Visible messages (bottom-aligned)
+	// Visible messages — bottom-aligned by default, but shifts up to
+	// keep the cursor visible when the user scrolls with keyboard/mouse.
 	visibleHeight := height - 2 // borders
 	start := 0
 	if len(m.messages) > visibleHeight {
 		start = len(m.messages) - visibleHeight
+	}
+	// If cursor is above the visible window, shift start to show it
+	if m.cursor >= 0 && m.cursor < start {
+		start = m.cursor
+	}
+	// If cursor is below the visible window, shift start down
+	if m.cursor >= 0 && m.cursor >= start+visibleHeight {
+		start = m.cursor - visibleHeight + 1
 	}
 
 	unreadShown := false
@@ -861,10 +870,32 @@ func highlightMentions(body, currentUser string) string {
 	if currentUser == "" {
 		return body
 	}
-	// Highlight current user's @mention in accent
+	// Highlight current user's @mention in accent, respecting word boundaries.
 	target := "@" + currentUser
-	if strings.Contains(body, target) {
-		body = strings.ReplaceAll(body, target, mentionStyle.Render(target))
+	var result strings.Builder
+	idx := 0
+	for idx < len(body) {
+		pos := strings.Index(body[idx:], target)
+		if pos < 0 {
+			result.WriteString(body[idx:])
+			break
+		}
+		absPos := idx + pos
+		end := absPos + len(target)
+
+		// Word boundary: @ at start or after whitespace
+		atBoundary := absPos == 0 || body[absPos-1] == ' ' || body[absPos-1] == '\n' || body[absPos-1] == '\t'
+		// Trailing boundary: end of string or punctuation/whitespace
+		atEnd := end >= len(body) || body[end] == ' ' || body[end] == '\n' || body[end] == '\t' || body[end] == ',' || body[end] == '.' || body[end] == '!' || body[end] == '?' || body[end] == ':' || body[end] == ';'
+
+		if atBoundary && atEnd {
+			result.WriteString(body[idx:absPos])
+			result.WriteString(mentionStyle.Render(target))
+			idx = end
+		} else {
+			result.WriteString(body[idx : absPos+1])
+			idx = absPos + 1
+		}
 	}
-	return body
+	return result.String()
 }

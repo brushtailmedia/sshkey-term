@@ -207,17 +207,46 @@ func (i *InputModel) SetMembers(members []MemberEntry) {
 
 // ExtractMentions scans the message body for @displayName patterns and
 // returns the corresponding nanoid usernames for the protocol mentions array.
+// Only matches when the @ is at a word boundary (start of string or after whitespace).
 func (i *InputModel) ExtractMentions(body string) []string {
 	var mentions []string
 	seen := make(map[string]bool)
 	for _, m := range i.members {
+		if seen[m.Username] {
+			continue
+		}
 		target := "@" + m.DisplayName
-		if strings.Contains(body, target) && !seen[m.Username] {
+		if containsMention(body, target) {
 			mentions = append(mentions, m.Username)
 			seen[m.Username] = true
 		}
 	}
 	return mentions
+}
+
+// containsMention checks if body contains target at a word boundary.
+// The @ must be at the start of the string or preceded by whitespace.
+func containsMention(body, target string) bool {
+	idx := 0
+	for {
+		pos := strings.Index(body[idx:], target)
+		if pos < 0 {
+			return false
+		}
+		absPos := idx + pos
+		// Check word boundary: @ must be at start or after whitespace
+		if absPos == 0 || body[absPos-1] == ' ' || body[absPos-1] == '\n' || body[absPos-1] == '\t' {
+			// Check trailing boundary: must end at string end or non-alphanumeric
+			end := absPos + len(target)
+			if end >= len(body) || body[end] == ' ' || body[end] == '\n' || body[end] == '\t' || body[end] == ',' || body[end] == '.' || body[end] == '!' || body[end] == '?' || body[end] == ':' || body[end] == ';' {
+				return true
+			}
+		}
+		idx = absPos + 1
+		if idx >= len(body) {
+			return false
+		}
+	}
 }
 
 func (i InputModel) View(width int, focused bool) string {
