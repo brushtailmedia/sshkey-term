@@ -67,6 +67,7 @@ type App struct {
 	deviceRevoked DeviceRevokedModel
 	deviceMgr     DeviceMgrModel
 	quickSwitch QuickSwitchModel
+	threadPanel ThreadPanelModel
 	pinnedBar   PinnedBarModel
 
 	// Config state
@@ -364,6 +365,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.newConv, cmd = a.newConv.Update(msg, a.client)
 			if !a.newConv.IsVisible() {
 				a.focus = FocusInput
+			}
+			return a, cmd
+		}
+
+		// Thread panel intercepts keys when visible
+		if a.threadPanel.IsVisible() {
+			var cmd tea.Cmd
+			a.threadPanel, cmd = a.threadPanel.Update(msg)
+			if !a.threadPanel.IsVisible() {
+				a.focus = FocusMessages
 			}
 			return a, cmd
 		}
@@ -1054,6 +1065,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err := a.client.SendUnreact(ids[0]); err != nil {
 				a.statusBar.SetError("Unreact failed: " + err.Error())
 			}
+		case "thread":
+			a.threadPanel.Show(msg.Data, a.messages.messages)
 		}
 		return a, nil
 
@@ -1075,6 +1088,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.messages.currentUserID = a.client.Username()
 		a.messages.resolveName = a.client.DisplayName
 		a.search.resolveName = a.client.DisplayName
+		if st := a.client.Store(); st != nil {
+			a.search.SetFTS(st.HasFTS())
+		}
 		a.sidebar.resolveName = a.client.DisplayName
 		a.newConv.resolveName = a.client.DisplayName
 		if len(a.client.Rooms()) > 0 {
@@ -1139,13 +1155,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.err = msg.Err
 		a.statusBar.SetConnected(false)
 		if a.connected || a.reconnectAttempt > 0 {
-			// Was previously connected — auto-reconnect
+			// Was previously connected — auto-reconnect with exponential backoff
 			a.connected = false
 			a.reconnectAttempt++
-			delay := time.Duration(a.reconnectAttempt) * time.Second
-			if delay > 60*time.Second {
-				delay = 60 * time.Second
-			}
+			delay := reconnectDelay(a.reconnectAttempt)
 			a.statusBar.SetReconnecting(a.reconnectAttempt, delay)
 			cmds = append(cmds, a.reconnect(a.reconnectAttempt))
 		} else {
@@ -1207,7 +1220,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Other overlays are keyboard-only
-	if a.help.IsVisible() || a.search.IsVisible() || a.quickSwitch.IsVisible() || a.newConv.IsVisible() ||
+	if a.help.IsVisible() || a.search.IsVisible() || a.quickSwitch.IsVisible() || a.threadPanel.IsVisible() || a.newConv.IsVisible() ||
 		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.pendingPanel.IsVisible() ||
 		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
 		a.quitConfirm.IsVisible() ||
@@ -1353,12 +1366,22 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// reconnect attempts to reconnect after a delay with exponential backoff.
-func (a App) reconnect(attempt int) tea.Cmd {
-	delay := time.Second * time.Duration(attempt)
-	if delay > 60*time.Second {
-		delay = 60 * time.Second
+// reconnectDelay returns the backoff duration for a given attempt number.
+// Exponential: 1s, 2s, 4s, 8s, 16s, 30s, 30s... (capped at 30s).
+func reconnectDelay(attempt int) time.Duration {
+	delay := time.Second
+	for i := 1; i < attempt && delay < 30*time.Second; i++ {
+		delay *= 2
 	}
+	if delay > 30*time.Second {
+		delay = 30 * time.Second
+	}
+	return delay
+}
+
+// reconnect attempts to reconnect after the backoff delay.
+func (a App) reconnect(attempt int) tea.Cmd {
+	delay := reconnectDelay(attempt)
 	return tea.Tick(delay, func(t time.Time) tea.Msg {
 		return reconnectAttemptMsg{attempt: attempt}
 	})
@@ -2022,6 +2045,9 @@ func (a App) View() string {
 	// Overlays
 	if a.help.IsVisible() {
 		return a.help.View(a.width, a.height)
+	}
+	if a.threadPanel.IsVisible() {
+		return a.threadPanel.View(a.width, a.height)
 	}
 	if a.quickSwitch.IsVisible() {
 		return a.quickSwitch.View(a.width)

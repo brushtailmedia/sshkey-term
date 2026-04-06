@@ -33,6 +33,7 @@ type SearchModel struct {
 	cursor      int
 	lastQuery   string
 	resolveName func(string) string // nanoid → display name
+	hasFTS      bool                // true if FTS5 is available
 }
 
 func NewSearch() SearchModel {
@@ -59,6 +60,11 @@ func (s *SearchModel) Hide() {
 
 func (s *SearchModel) IsVisible() bool {
 	return s.visible
+}
+
+// SetFTS updates whether FTS5 full-text search is available.
+func (s *SearchModel) SetFTS(hasFTS bool) {
+	s.hasFTS = hasFTS
 }
 
 // SelectedResult returns the selected search result (for jump-to-message).
@@ -166,6 +172,11 @@ func (s SearchModel) View(width, height int) string {
 		}
 	} else if s.lastQuery != "" {
 		b.WriteString(searchResultStyle.Render(" No results"))
+	}
+
+	if !s.hasFTS {
+		b.WriteString("\n")
+		b.WriteString(helpDescStyle.Render(" Basic search — build with CGO_CFLAGS=\"-DSQLITE_ENABLE_FTS5\" for better results"))
 	}
 
 	// Pad to fill

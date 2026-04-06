@@ -527,3 +527,13 @@ func TestState_Overwrite(t *testing.T) {
 		t.Errorf("got %q, want v2", got)
 	}
 }
+
+// -- FTS5 availability --
+
+func TestHasFTS_Unencrypted(t *testing.T) {
+	s := openTestStore(t)
+	// SQLCipher built with FTS5 should have it; without, HasFTS returns false.
+	// Either result is valid — just ensure the method doesn't panic.
+	_ = s.HasFTS()
+	t.Logf("HasFTS = %v", s.HasFTS())
+}

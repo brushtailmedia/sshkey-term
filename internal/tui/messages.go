@@ -780,6 +780,22 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 				return MessageAction{Action: "unreact", Msg: *sel}
 			}
 		}
+	case "g": // go to parent (jump to message this is replying to)
+		if sel := m.SelectedMessage(); sel != nil && sel.ReplyTo != "" {
+			m.ScrollToMessage(sel.ReplyTo)
+		}
+	case "t": // open thread view
+		if sel := m.SelectedMessage(); sel != nil {
+			// Use the message itself as the root if it has replies,
+			// or jump to the root if this is a reply.
+			rootID := sel.ID
+			if sel.ReplyTo != "" {
+				rootID = sel.ReplyTo
+			}
+			return m, func() tea.Msg {
+				return MessageAction{Action: "thread", Msg: *sel, Data: rootID}
+			}
+		}
 	case "enter": // open context menu on selected message (keyboard path)
 		if sel := m.SelectedMessage(); sel != nil {
 			return m, func() tea.Msg {
@@ -875,7 +891,8 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 			}
 
 			if msg.ReplyTo != "" {
-				line += "\n " + replyRefStyle.Render("  ↳ re: "+msg.ReplyTo)
+				replyPreview := m.replyPreview(msg.ReplyTo)
+				line += "\n " + replyRefStyle.Render("  ↳ "+replyPreview)
 			}
 
 			if counts := msg.DisplayReactions(); len(counts) > 0 {
@@ -941,8 +958,16 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 		}
 	}
 	if len(typingNames) > 0 {
-		typing := strings.Join(typingNames, " and ")
-		b.WriteString(systemMsgStyle.Render(fmt.Sprintf(" ── %s is typing... ──", typing)))
+		var typing string
+		switch len(typingNames) {
+		case 1:
+			typing = typingNames[0] + " is typing..."
+		case 2:
+			typing = typingNames[0] + " and " + typingNames[1] + " are typing..."
+		default:
+			typing = fmt.Sprintf("%d people are typing...", len(typingNames))
+		}
+		b.WriteString(systemMsgStyle.Render(" ── " + typing + " ──"))
 		b.WriteString("\n")
 	}
 
@@ -974,6 +999,25 @@ func formatSize(b int64) string {
 }
 
 // highlightMentions replaces @username with styled version.
+// replyPreview returns a short preview of the parent message for reply rendering.
+// Looks up the message by ID in the current message list.
+func (m *MessagesModel) replyPreview(msgID string) string {
+	for _, msg := range m.messages {
+		if msg.ID == msgID {
+			preview := msg.From + ": " + msg.Body
+			if len(preview) > 60 {
+				preview = preview[:57] + "..."
+			}
+			return preview
+		}
+	}
+	// Not in current view — show truncated ID
+	if len(msgID) > 12 {
+		return msgID[:12] + "..."
+	}
+	return msgID
+}
+
 func highlightMentions(body, currentUser string) string {
 	if currentUser == "" {
 		return body

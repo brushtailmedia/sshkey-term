@@ -17,7 +17,8 @@ import (
 
 // Store is the client-side encrypted local database for a single server.
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	hasFTS bool // true if FTS5 full-text search is available
 }
 
 // Open creates or opens an encrypted local database.
@@ -102,6 +103,11 @@ func DeriveDBKey(privateKeySeed []byte) ([]byte, error) {
 		return nil, err
 	}
 	return key, nil
+}
+
+// HasFTS returns true if FTS5 full-text search is available.
+func (s *Store) HasFTS() bool {
+	return s.hasFTS
 }
 
 func (s *Store) Close() error {
@@ -196,6 +202,7 @@ func (s *Store) init() error {
 		body, sender, id UNINDEXED,
 		content='messages', content_rowid='rowid'
 	)`)
+	s.hasFTS = ftsErr == nil
 	if ftsErr == nil {
 		s.db.Exec(`CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
 			INSERT INTO messages_fts(rowid, body, sender, id) VALUES (new.rowid, new.body, new.sender, new.id);

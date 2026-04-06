@@ -66,6 +66,8 @@ func (h HelpModel) View(width, height int) string {
 		{"u", "remove my reaction"},
 		{"p", "pin/unpin (rooms)"},
 		{"d", "delete (own only)"},
+		{"g", "go to parent (reply)"},
+		{"t", "thread view"},
 		{"c", "copy text"},
 		{"Enter", "context menu"},
 		{"", ""},

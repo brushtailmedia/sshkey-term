@@ -200,6 +200,11 @@ func (c *Client) Connect() error {
 	// Start message loop
 	go c.readLoop()
 
+	// Start SSH keepalive — detects dead connections faster than TCP timeout.
+	// Sends keepalive@openssh.com every 30s. If 3 consecutive fail, closes
+	// the connection to trigger the TUI's reconnect logic.
+	go c.keepalive()
+
 	return nil
 }
 
@@ -541,6 +546,38 @@ func (c *Client) storeEpochKey(room string, epoch int64, wrappedKey string) {
 	if store != nil {
 		if err := store.StoreEpochKey(room, epoch, key); err != nil {
 			c.logger.Warn("failed to persist epoch key", "room", room, "epoch", epoch, "error", err)
+		}
+	}
+}
+
+// keepalive sends periodic SSH keepalive requests to detect dead connections.
+func (c *Client) keepalive() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	failures := 0
+	const maxFailures = 3
+
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ticker.C:
+			if c.conn == nil {
+				return
+			}
+			_, _, err := c.conn.SendRequest("keepalive@openssh.com", true, nil)
+			if err != nil {
+				failures++
+				c.logger.Warn("keepalive failed", "failures", failures, "error", err)
+				if failures >= maxFailures {
+					c.logger.Error("connection dead — closing after keepalive failures", "failures", failures)
+					c.Close()
+					return
+				}
+			} else {
+				failures = 0
+			}
 		}
 	}
 }
