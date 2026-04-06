@@ -12,20 +12,38 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - runs_on: ubuntu-latest
+            goos: linux
+          - runs_on: macos-15-intel
+            goos: darwin
+          - runs_on: macos-15
+            goos: darwin
+    runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
-      - name: Install SQLCipher deps (Linux)
-        if: runner.os == 'Linux'
+          go-version: "1.25.1"
+
+      - name: Install build deps (Linux)
+        if: matrix.goos == 'linux'
         run: sudo apt-get update && sudo apt-get install -y gcc
+
       - name: Build
-        run: CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="${{ runner.os == 'Linux' && '-lm' || '' }}" go build .
+        env:
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
+          CGO_LDFLAGS: ${{ matrix.goos == 'linux' && '-lm' || '' }}
+        run: go build .
+
       - name: Test
-        run: CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="${{ runner.os == 'Linux' && '-lm' || '' }}" go test -count=1 -p 1 ./...
+        env:
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
+          CGO_LDFLAGS: ${{ matrix.goos == 'linux' && '-lm' || '' }}
+        run: go test -count=1 -p 1 ./...
 
   release-linux:
     needs: test
@@ -34,18 +52,22 @@ jobs:
         include:
           - goarch: amd64
             cc: gcc
+            packages: ""
           - goarch: arm64
             cc: aarch64-linux-gnu-gcc
             packages: gcc-aarch64-linux-gnu
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.25.1"
+
       - name: Install cross-compiler
         if: matrix.packages != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+
       - name: Build
         env:
           GOOS: linux
@@ -57,6 +79,7 @@ jobs:
         run: |
           go build -ldflags="-s -w" -o sshkey-chat .
           tar czf sshkey-term_${{ github.ref_name }}_linux_${{ matrix.goarch }}.tar.gz sshkey-chat README.md LICENSE CHANGELOG.md
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.goarch }}
@@ -68,13 +91,17 @@ jobs:
       matrix:
         include:
           - goarch: amd64
+            runs_on: macos-15-intel
           - goarch: arm64
-    runs-on: macos-latest
+            runs_on: macos-15
+    runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.25.1"
+
       - name: Build
         env:
           GOOS: darwin
@@ -84,6 +111,7 @@ jobs:
         run: |
           go build -ldflags="-s -w" -o sshkey-chat .
           tar czf sshkey-term_${{ github.ref_name }}_darwin_${{ matrix.goarch }}.tar.gz sshkey-chat README.md LICENSE CHANGELOG.md
+
       - uses: actions/upload-artifact@v4
         with:
           name: darwin-${{ matrix.goarch }}
@@ -94,11 +122,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+
       - name: Generate checksums
         run: sha256sum *.tar.gz > checksums.txt
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
