@@ -1,6 +1,6 @@
 # sshkey-term
 
-Work in Progress - Expect breaking changes until v1.0.
+v0.1.0 — Expect breaking changes until v1.0.
 
 Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat) -- a private messaging server over SSH with E2E encryption.
 
