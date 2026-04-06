@@ -8,7 +8,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
-	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
 // InfoPanelModel manages the room/group info overlay.
@@ -51,23 +50,35 @@ func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[stri
 	i.isGroup = false
 	i.cursor = 0
 
-	// Get room info from client profiles
+	// Start with an empty member list — populated by SetRoomMembers when
+	// the server responds to room_members. The caller sends the request.
 	i.members = nil
-	if c != nil {
-		c.ForEachProfile(func(p *protocol.Profile) {
-			// Check if user is in this room (we don't have per-room member lists client-side,
-			// so show all known users for now — TODO: track room membership)
-			verified := false
-			if st := c.Store(); st != nil {
-				_, verified, _ = st.GetPinnedKey(p.User)
-			}
-			i.members = append(i.members, memberInfo{
-				User:        p.User,
-				DisplayName: p.DisplayName,
-				Online:      online[p.User],
-				Admin:       p.Admin,
-				Verified:    verified,
-			})
+}
+
+// SetRoomMembers populates the member list from a server room_members_list response.
+func (i *InfoPanelModel) SetRoomMembers(room string, members []string, c *client.Client, online map[string]bool) {
+	if room != i.room || !i.visible {
+		return
+	}
+	i.members = nil
+	for _, user := range members {
+		p := c.Profile(user)
+		displayName := user
+		admin := false
+		if p != nil {
+			displayName = p.DisplayName
+			admin = p.Admin
+		}
+		verified := false
+		if st := c.Store(); st != nil {
+			_, verified, _ = st.GetPinnedKey(user)
+		}
+		i.members = append(i.members, memberInfo{
+			User:        user,
+			DisplayName: displayName,
+			Online:      online[user],
+			Admin:       admin,
+			Verified:    verified,
 		})
 	}
 	sortMembersAdminsFirst(i.members)

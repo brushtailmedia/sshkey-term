@@ -435,7 +435,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.memberPanel.Toggle()
 			if a.memberPanel.IsVisible() {
 				a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
-				// Also update input members for @completion
+				// Request actual room membership from server (lazy)
+				if a.messages.room != "" && a.client != nil {
+					a.client.RequestRoomMembers(a.messages.room)
+				}
 				a.input.SetMembers(a.activeMemberEntries())
 			}
 			return a, nil
@@ -460,6 +463,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.client != nil {
 				if a.messages.room != "" {
 					a.infoPanel.ShowRoom(a.messages.room, a.client, a.sidebar.online)
+					// Request actual room membership from server (lazy)
+					a.client.RequestRoomMembers(a.messages.room)
 				} else if a.messages.conversation != "" {
 					a.infoPanel.ShowConversation(a.messages.conversation, a.client, a.sidebar.online)
 				}
@@ -525,9 +530,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
+					if a.messages.room != "" && a.client != nil {
+						a.client.RequestRoomMembers(a.messages.room)
+					}
 					a.input.SetMembers(a.activeMemberEntries())
 				}
-				// Send read receipt for the new context
 				a.sendReadReceipt()
 			}
 		case FocusMessages:
@@ -802,13 +809,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SearchJumpMsg:
 		// Jump to the message in context
 		a.search.Hide()
+		a.focus = FocusInput
 		if msg.Room != "" {
 			a.messages.SetContext(msg.Room, "")
 		} else {
 			a.messages.SetContext("", msg.Conversation)
 		}
 		a.messages.LoadFromDB(a.client)
-		// TODO: scroll to the specific message ID
+		a.messages.ScrollToMessage(msg.MessageID)
 		return a, nil
 
 	case HistoryRequestMsg:
@@ -1218,6 +1226,9 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
+					if a.messages.room != "" && a.client != nil {
+						a.client.RequestRoomMembers(a.messages.room)
+					}
 					a.input.SetMembers(a.activeMemberEntries())
 				}
 				a.sendReadReceipt()
@@ -1246,7 +1257,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				pinIdx := relY - 1
 				if pinIdx >= 0 && pinIdx < len(a.pinnedBar.pins) {
 					a.pinnedBar.cursor = pinIdx
-					// TODO: jump to pinned message in stream
+					a.messages.ScrollToMessage(a.pinnedBar.pins[pinIdx].ID)
 				}
 			}
 			return a, nil
@@ -1360,8 +1371,15 @@ func (a *App) sendReadReceipt() {
 			st.StoreReadPosition(target, lastID)
 		}
 	}
-	// Clear unread divider — user has now seen everything
+	// Clear unread divider and sidebar badge — user has now seen everything
 	a.messages.SetUnreadFrom("")
+	target := a.messages.room
+	if target == "" {
+		target = a.messages.conversation
+	}
+	if target != "" {
+		a.sidebar.SetUnread(target, 0)
+	}
 }
 
 // activeMemberNames returns the member list for @completion, excluding
@@ -1505,9 +1523,10 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		var m protocol.Message
 		json.Unmarshal(msg.Raw, &m)
 		a.messages.AddRoomMessage(m, a.client)
-		// Auto-send read receipt if this is the active room
 		if m.Room == a.messages.room {
 			a.sendReadReceipt()
+		} else {
+			a.sidebar.IncrementUnread(m.Room)
 		}
 		// Notifications for messages not from self
 		if a.client != nil && m.From != a.client.Username() {
@@ -1537,9 +1556,10 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		var m protocol.DM
 		json.Unmarshal(msg.Raw, &m)
 		a.messages.AddDMMessage(m, a.client)
-		// Auto-send read receipt if this is the active conversation
 		if m.Conversation == a.messages.conversation {
 			a.sendReadReceipt()
+		} else {
+			a.sidebar.IncrementUnread(m.Conversation)
 		}
 		if a.client != nil && m.From != a.client.Username() {
 			payload, err := a.client.DecryptDMMessage(m.WrappedKeys, m.Payload)
@@ -1636,6 +1656,16 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 			keys := a.client.PendingKeys()
 			a.pendingPanel.Show(keys)
 			a.statusBar.SetPending(len(keys) > 0)
+		}
+	case "room_members_list":
+		// Response to room_members — update info panel and member panel
+		if a.client != nil {
+			room, members := a.client.RoomMembersList()
+			a.infoPanel.SetRoomMembers(room, members, a.client, a.sidebar.online)
+			if a.memberPanel.IsVisible() && a.messages.room == room {
+				a.memberPanel.SetRoomMembers(members, a.client, a.sidebar.online)
+				a.input.SetMembers(a.activeMemberEntries())
+			}
 		}
 	case "device_revoked":
 		var m protocol.DeviceRevoked
@@ -1737,10 +1767,34 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 	case "history_result":
 		var result protocol.HistoryResult
 		json.Unmarshal(msg.Raw, &result)
+
+		// Build display messages and prepend (history arrives oldest-first).
+		// Epoch keys are already unwrapped by the client layer (handleHistoryKeys),
+		// and messages are persisted there too (storeRoomMessage/storeDMMessage).
+		var histMsgs []DisplayMessage
 		for _, raw := range result.Messages {
 			histType, _ := protocol.TypeOf(raw)
-			a.handleServerMessage(ServerMsg{Type: histType, Raw: raw})
+			switch histType {
+			case "message":
+				var pm protocol.Message
+				if json.Unmarshal(raw, &pm) == nil {
+					histMsgs = append(histMsgs, a.messages.buildDisplayMsg(pm, a.client))
+				}
+			case "dm":
+				var dm protocol.DM
+				if json.Unmarshal(raw, &dm) == nil {
+					histMsgs = append(histMsgs, a.messages.buildDisplayDM(dm, a.client))
+				}
+			}
 		}
+		if len(histMsgs) > 0 {
+			a.messages.PrependMessages(histMsgs, result.HasMore)
+		} else {
+			a.messages.loadingHistory = false
+			a.messages.hasMore = result.HasMore
+		}
+
+		// Apply reactions from the history batch
 		for _, raw := range result.Reactions {
 			a.handleServerMessage(ServerMsg{Type: "reaction", Raw: raw})
 		}

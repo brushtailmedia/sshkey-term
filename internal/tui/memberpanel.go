@@ -7,7 +7,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
-	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
 var (
@@ -79,19 +78,39 @@ func (m *MemberPanelModel) Refresh(room, conversation string, c *client.Client, 
 			})
 		}
 	} else if room != "" {
-		// Room members — show all profiles (we don't track per-room membership client-side)
-		c.ForEachProfile(func(p *protocol.Profile) {
-			retired, _ := c.IsRetired(p.User)
-			m.members = append(m.members, memberPanelEntry{
-				User:        p.User,
-				DisplayName: p.DisplayName,
-				Online:      online[p.User],
-				Retired:     retired,
-			})
-		})
+		// Room members will be populated by SetRoomMembers when the server
+		// responds to room_members. The caller sends the request.
 	}
 
 	// Check verified status from store
+	if c.Store() != nil {
+		for i, mem := range m.members {
+			_, verified, err := c.Store().GetPinnedKey(mem.User)
+			if err == nil {
+				m.members[i].Verified = verified
+			}
+		}
+	}
+}
+
+// SetRoomMembers populates the member list from a server room_members_list response.
+func (m *MemberPanelModel) SetRoomMembers(members []string, c *client.Client, online map[string]bool) {
+	m.members = nil
+	for _, user := range members {
+		p := c.Profile(user)
+		displayName := user
+		if p != nil {
+			displayName = p.DisplayName
+		}
+		retired, _ := c.IsRetired(user)
+		m.members = append(m.members, memberPanelEntry{
+			User:        user,
+			DisplayName: displayName,
+			Online:      online[user],
+			Retired:     retired,
+		})
+	}
+	// Update verified status
 	if c.Store() != nil {
 		for i, mem := range m.members {
 			_, verified, err := c.Store().GetPinnedKey(mem.User)

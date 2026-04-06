@@ -159,6 +159,18 @@ func NewMessages() MessagesModel {
 	}
 }
 
+// ScrollToMessage sets the cursor to the message with the given ID.
+// Returns true if the message was found.
+func (m *MessagesModel) ScrollToMessage(msgID string) bool {
+	for i, msg := range m.messages {
+		if msg.ID == msgID {
+			m.cursor = i
+			return true
+		}
+	}
+	return false
+}
+
 // SetRetired updates the set of known-retired users. Called by the app when
 // user_retired / retired_users events arrive. Used by View() to append a
 // [retired] marker next to historical sender names.
@@ -184,6 +196,8 @@ func (m *MessagesModel) SetContext(room, conversation string) {
 	m.cursor = -1
 	m.scrollOffset = 0
 	m.unreadFromID = ""
+	m.hasMore = true
+	m.loadingHistory = false
 }
 
 // SetUnreadFrom sets the first unread message ID for the divider.
@@ -423,6 +437,100 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 		Mentions:     mentions,
 		Attachments:  attachments,
 	})
+}
+
+// buildDisplayMsg creates a DisplayMessage from a room protocol message without appending it.
+// Used by history prepend where messages go to the front, not the back.
+func (m *MessagesModel) buildDisplayMsg(msg protocol.Message, c *client.Client) DisplayMessage {
+	body := "(encrypted)"
+	replyTo := ""
+	var mentions []string
+	var attachments []DisplayAttachment
+
+	if c != nil {
+		payload, err := c.DecryptRoomMessage(msg.Room, msg.Epoch, msg.Payload)
+		if err == nil {
+			body = payload.Body
+			replyTo = payload.ReplyTo
+			mentions = payload.Mentions
+			for _, a := range payload.Attachments {
+				fileEpoch := a.FileEpoch
+				if fileEpoch == 0 {
+					fileEpoch = msg.Epoch
+				}
+				attachments = append(attachments, DisplayAttachment{
+					FileID:     a.FileID,
+					Name:       a.Name,
+					Size:       a.Size,
+					Mime:       a.Mime,
+					IsImage:    isImageMime(a.Mime),
+					DecryptKey: c.RoomEpochKey(msg.Room, fileEpoch),
+				})
+			}
+		}
+	}
+
+	from := msg.From
+	if c != nil {
+		from = c.DisplayName(msg.From)
+	}
+
+	return DisplayMessage{
+		ID:          msg.ID,
+		FromID:      msg.From,
+		From:        from,
+		Body:        body,
+		TS:          msg.TS,
+		Room:        msg.Room,
+		ReplyTo:     replyTo,
+		Mentions:    mentions,
+		Attachments: attachments,
+	}
+}
+
+// buildDisplayDM creates a DisplayMessage from a DM protocol message without appending it.
+func (m *MessagesModel) buildDisplayDM(msg protocol.DM, c *client.Client) DisplayMessage {
+	body := "(encrypted)"
+	replyTo := ""
+	var mentions []string
+	var attachments []DisplayAttachment
+
+	if c != nil {
+		payload, err := c.DecryptDMMessage(msg.WrappedKeys, msg.Payload)
+		if err == nil {
+			body = payload.Body
+			replyTo = payload.ReplyTo
+			mentions = payload.Mentions
+			for _, a := range payload.Attachments {
+				decKey, _ := base64.StdEncoding.DecodeString(a.FileKey)
+				attachments = append(attachments, DisplayAttachment{
+					FileID:     a.FileID,
+					Name:       a.Name,
+					Size:       a.Size,
+					Mime:       a.Mime,
+					IsImage:    isImageMime(a.Mime),
+					DecryptKey: decKey,
+				})
+			}
+		}
+	}
+
+	from := msg.From
+	if c != nil {
+		from = c.DisplayName(msg.From)
+	}
+
+	return DisplayMessage{
+		ID:           msg.ID,
+		FromID:       msg.From,
+		From:         from,
+		Body:         body,
+		TS:           msg.TS,
+		Conversation: msg.Conversation,
+		ReplyTo:      replyTo,
+		Mentions:     mentions,
+		Attachments:  attachments,
+	}
 }
 
 // isImageMime returns true for image mime types.

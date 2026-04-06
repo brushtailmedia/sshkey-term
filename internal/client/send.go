@@ -654,3 +654,15 @@ func (c *Client) ClearPendingAlert() {
 	c.hasPendingKeys = len(c.pendingKeys) > 0
 	c.mu.Unlock()
 }
+
+// RequestRoomMembers asks the server for the member list of a room.
+func (c *Client) RequestRoomMembers(room string) error {
+	return c.enc.Encode(protocol.RoomMembers{Type: "room_members", Room: room})
+}
+
+// RoomMembersList returns the most recently received room members list.
+func (c *Client) RoomMembersList() (string, []string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.roomMembersRoom, c.roomMembers
+}

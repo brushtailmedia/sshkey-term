@@ -67,8 +67,10 @@ type Client struct {
 	epochKeys      map[string]map[int64][]byte // room -> epoch -> unwrapped key
 	currentEpoch   map[string]int64            // room -> current epoch number
 	seqCounters    map[string]int64            // "room:x" or "conv:x" -> next seq
-	hasPendingKeys bool                        // true when admin_notify arrived (cleared on list refresh)
-	pendingKeys    []protocol.PendingKeyEntry  // populated by pending_keys_list
+	hasPendingKeys  bool                        // true when admin_notify arrived (cleared on list refresh)
+	pendingKeys     []protocol.PendingKeyEntry  // populated by pending_keys_list
+	roomMembersRoom string                      // room for latest room_members_list
+	roomMembers     []string                    // member usernames from room_members_list
 	privKey        ed25519.PrivateKey
 	signer      ssh.Signer
 	lastSynced  string
@@ -442,6 +444,14 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			c.mu.Lock()
 			c.pendingKeys = pkl.Keys
 			c.hasPendingKeys = len(pkl.Keys) > 0
+			c.mu.Unlock()
+		}
+	case "room_members_list":
+		var rml protocol.RoomMembersList
+		if err := json.Unmarshal(raw, &rml); err == nil {
+			c.mu.Lock()
+			c.roomMembersRoom = rml.Room
+			c.roomMembers = rml.Members
 			c.mu.Unlock()
 		}
 	case "reaction":

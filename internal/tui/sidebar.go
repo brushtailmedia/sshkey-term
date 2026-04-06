@@ -123,6 +123,12 @@ func (s *SidebarModel) SetUnreadConv(conv string, count int) {
 	s.unread[conv] = count
 }
 
+// IncrementUnread bumps the unread count for a room or conversation by one.
+// Called when a message arrives for a non-active context.
+func (s *SidebarModel) IncrementUnread(key string) {
+	s.unread[key]++
+}
+
 func (s *SidebarModel) SetOnline(user string, online bool) {
 	s.online[user] = online
 }
