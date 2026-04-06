@@ -72,11 +72,20 @@ The client auto-detects your terminal and uses the best available image protocol
 
 Works over SSH -- the image protocol passes through to your local terminal. Use one of the recommended terminals locally for the full experience.
 
-## Quick start
+## Install
+
+```bash
+# Install via go install (requires cgo for SQLCipher)
+CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" go install github.com/brushtailmedia/sshkey-term@latest
+```
+
+Or download pre-built binaries from [Releases](https://github.com/brushtailmedia/sshkey-term/releases).
+
+## Build from source
 
 ```bash
 # Build with FTS5 full-text search support (recommended)
-CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go build -o sshkey-chat .
+CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" go build -o sshkey-chat .
 
 # Or build without FTS5 (search falls back to LIKE queries)
 go build -o sshkey-chat .
