@@ -294,11 +294,45 @@ func (c *Client) UnwrapKey(wrappedBase64 string) ([]byte, error) {
 }
 
 // RoomEpochKey returns the raw epoch key for a (room, epoch) pair, or nil
-// if not known. Used by the TUI to decrypt room attachments.
+// if not known. Checks local DB as fallback if not in memory.
 func (c *Client) RoomEpochKey(room string, epoch int64) []byte {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.epochKeys[room][epoch]
+	key := c.epochKeys[room][epoch]
+	c.mu.RUnlock()
+	if key == nil && c.store != nil {
+		if dbKey, err := c.store.GetEpochKey(room, epoch); err == nil && dbKey != nil {
+			c.mu.Lock()
+			if c.epochKeys[room] == nil {
+				c.epochKeys[room] = make(map[int64][]byte)
+			}
+			c.epochKeys[room][epoch] = dbKey
+			c.mu.Unlock()
+			key = dbKey
+		}
+	}
+	return key
+}
+
+// LoadEpochKeysFromDB loads specific epoch keys from the local DB into the
+// in-memory cache. Called when displaying messages that reference epochs not
+// yet in memory (e.g., messages loaded from local DB on room switch).
+func (c *Client) LoadEpochKeysFromDB(room string, epochs []int64) {
+	if c.store == nil || len(epochs) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.epochKeys[room] == nil {
+		c.epochKeys[room] = make(map[int64][]byte)
+	}
+	for _, epoch := range epochs {
+		if c.epochKeys[room][epoch] != nil {
+			continue // already in memory
+		}
+		if key, err := c.store.GetEpochKey(room, epoch); err == nil && key != nil {
+			c.epochKeys[room][epoch] = key
+		}
+	}
 }
 
 // DecryptRoomMessage decrypts a room message payload.
@@ -306,6 +340,19 @@ func (c *Client) DecryptRoomMessage(room string, epoch int64, payloadBase64 stri
 	c.mu.RLock()
 	key := c.epochKeys[room][epoch]
 	c.mu.RUnlock()
+
+	// Try loading from local DB if not in memory
+	if key == nil && c.store != nil {
+		if dbKey, err := c.store.GetEpochKey(room, epoch); err == nil && dbKey != nil {
+			c.mu.Lock()
+			if c.epochKeys[room] == nil {
+				c.epochKeys[room] = make(map[int64][]byte)
+			}
+			c.epochKeys[room][epoch] = dbKey
+			c.mu.Unlock()
+			key = dbKey
+		}
+	}
 
 	if key == nil {
 		return nil, fmt.Errorf("no epoch key for room %s epoch %d", room, epoch)
@@ -576,4 +623,34 @@ func (c *Client) SendRevokeDevice(deviceID string) error {
 		Type:     "revoke_device",
 		DeviceID: deviceID,
 	})
+}
+
+// SendListPendingKeys requests the list of pending (unapproved) SSH keys.
+// Admin-only — the server rejects non-admin callers with an error.
+// The response arrives as a pending_keys_list message.
+func (c *Client) SendListPendingKeys() error {
+	return c.enc.Encode(protocol.ListPendingKeys{Type: "list_pending_keys"})
+}
+
+// HasPendingKeys returns true if any admin_notify events have been received
+// since the last pending_keys_list refresh.
+func (c *Client) HasPendingKeys() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.hasPendingKeys
+}
+
+// PendingKeys returns the most recent pending keys list from the server.
+func (c *Client) PendingKeys() []protocol.PendingKeyEntry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.pendingKeys
+}
+
+// ClearPendingAlert resets the pending-keys indicator (called when the
+// admin opens the /pending panel).
+func (c *Client) ClearPendingAlert() {
+	c.mu.Lock()
+	c.hasPendingKeys = len(c.pendingKeys) > 0
+	c.mu.Unlock()
 }

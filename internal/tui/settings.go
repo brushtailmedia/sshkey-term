@@ -86,6 +86,8 @@ func (s *SettingsModel) buildItems(username string, currentServer int) {
 		s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
 		s.items = append(s.items, settingsItem{label: "  Keys", value: "", action: ""})
 		s.items = append(s.items, settingsItem{label: "    SSH key", value: srv.Key, action: ""})
+		s.items = append(s.items, settingsItem{label: "    [Copy public key]", value: "", action: "copy_pubkey"})
+		s.items = append(s.items, settingsItem{label: "    [Copy fingerprint]", value: "", action: "copy_fingerprint"})
 	}
 
 	// All servers section

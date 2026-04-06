@@ -80,6 +80,44 @@ func (c *Client) storeDMMessage(raw json.RawMessage) {
 	})
 }
 
+// storeReaction decrypts and persists a reaction to the local DB.
+func (c *Client) storeReaction(raw json.RawMessage) {
+	if c.store == nil {
+		return
+	}
+
+	var r protocol.Reaction
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return
+	}
+
+	// Decrypt to get the emoji
+	var emoji string
+	if r.Room != "" {
+		dr, err := c.DecryptRoomReaction(r.Room, r.Epoch, r.Payload)
+		if err == nil {
+			emoji = dr.Emoji
+		}
+	} else if r.Conversation != "" {
+		dr, err := c.DecryptDMReaction(r.WrappedKeys, r.Payload)
+		if err == nil {
+			emoji = dr.Emoji
+		}
+	}
+
+	if emoji == "" {
+		return // can't decrypt — don't persist garbage
+	}
+
+	c.store.InsertReaction(store.StoredReaction{
+		ReactionID: r.ReactionID,
+		MessageID:  r.ID,
+		User:       r.User,
+		Emoji:      emoji,
+		TS:         r.TS,
+	})
+}
+
 // checkReplay checks for replay attacks using seq high-water marks.
 func (c *Client) checkReplay(sender, deviceID, room, conv string, seq int64) {
 	if c.store == nil || seq == 0 {

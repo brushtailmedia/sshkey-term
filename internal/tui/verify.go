@@ -8,6 +8,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/crypto"
+	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
 // VerifyModel manages the safety numbers verification dialog.
@@ -16,6 +17,7 @@ type VerifyModel struct {
 	user         string
 	safetyNumber string
 	verified     bool
+	err          string
 }
 
 // VerifyActionMsg is sent when the user marks someone as verified.
@@ -28,14 +30,34 @@ func (v *VerifyModel) Show(targetUser string, c *client.Client) {
 	v.user = targetUser
 	v.verified = false
 	v.safetyNumber = ""
+	v.err = ""
 
 	if c == nil {
 		return
 	}
 
-	// Get both public keys
+	// Can't verify yourself
+	if targetUser == c.Username() {
+		v.err = "Cannot verify yourself"
+		return
+	}
+
+	// Get both public keys — try live profile first, fall back to stored
 	targetProfile := c.Profile(targetUser)
 	if targetProfile == nil {
+		// Offline fallback: use stored pubkey from pinned_keys
+		if st := c.Store(); st != nil {
+			_, _, storedKey := st.GetPinnedKeyFull(targetUser)
+			if storedKey != "" {
+				targetProfile = &protocol.Profile{
+					User:   targetUser,
+					PubKey: storedKey,
+				}
+			}
+		}
+	}
+	if targetProfile == nil {
+		v.err = targetUser + "'s profile not available yet"
 		return
 	}
 
@@ -99,6 +121,13 @@ func (v VerifyModel) View(width int) string {
 
 	b.WriteString(searchHeaderStyle.Render(" Verify: " + v.user))
 	b.WriteString("\n\n")
+
+	if v.err != "" {
+		b.WriteString("  " + errorStyle.Render(v.err) + "\n\n")
+		b.WriteString(helpDescStyle.Render("  Esc=close"))
+		return dialogStyle.Width(width - 4).Render(b.String())
+	}
+
 	b.WriteString("  Safety number:\n\n")
 
 	if v.safetyNumber != "" {

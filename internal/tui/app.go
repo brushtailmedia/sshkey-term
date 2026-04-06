@@ -54,7 +54,9 @@ type App struct {
 	search      SearchModel
 	newConv     NewConvModel
 	emojiPicker EmojiPickerModel
-	infoPanel   InfoPanelModel
+	infoPanel    InfoPanelModel
+	pendingPanel  PendingPanelModel
+	connectFailed ConnectFailedModel
 	settings    SettingsModel
 	addServer   AddServerModel
 	memberPanel MemberPanelModel
@@ -220,6 +222,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Connection failed overlay (first-run)
+		if a.connectFailed.IsVisible() {
+			var cmd tea.Cmd
+			a.connectFailed, cmd = a.connectFailed.Update(msg)
+			return a, cmd
+		}
+
 		// Passphrase dialog intercepts all keys
 		if a.passphrase.IsVisible() {
 			var cmd tea.Cmd
@@ -314,6 +323,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.infoPanel.IsVisible() {
 			var cmd tea.Cmd
 			a.infoPanel, cmd = a.infoPanel.Update(msg)
+			return a, cmd
+		}
+
+		// Pending panel intercepts keys when visible
+		if a.pendingPanel.IsVisible() {
+			var cmd tea.Cmd
+			a.pendingPanel, cmd = a.pendingPanel.Update(msg)
 			return a, cmd
 		}
 
@@ -646,6 +662,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.client != nil {
 				a.client.SendListDevices()
 			}
+		case "copy_pubkey":
+			if a.client != nil {
+				pubKey := a.client.PublicKeyAuthorized()
+				if pubKey != "" {
+					CopyToClipboard(pubKey)
+					a.statusBar.SetError("Public key copied to clipboard")
+				}
+			}
+		case "copy_fingerprint":
+			if a.client != nil {
+				fp := a.client.KeyFingerprint()
+				if fp != "" {
+					CopyToClipboard(fp)
+					a.statusBar.SetError(fp + " — copied to clipboard")
+				}
+			}
 		}
 		return a, nil
 
@@ -756,9 +788,72 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case HistoryRequestMsg:
-		if a.client != nil {
-			a.client.RequestHistory(msg.Room, msg.Conversation, msg.BeforeID, 100)
+		if a.client == nil {
+			return a, nil
 		}
+		// Try local DB first — avoids a server round-trip when messages
+		// are already cached from previous sync/history fetches
+		if st := a.client.Store(); st != nil {
+			localMsgs, err := st.GetMessagesBefore(msg.Room, msg.Conversation, msg.BeforeID, 100)
+			if err == nil && len(localMsgs) > 0 {
+				// Load epoch keys for these messages so they can be decrypted
+				if msg.Room != "" {
+					epochs := make(map[int64]bool)
+					for _, m := range localMsgs {
+						if m.Epoch > 0 {
+							epochs[m.Epoch] = true
+						}
+					}
+					epochList := make([]int64, 0, len(epochs))
+					for e := range epochs {
+						epochList = append(epochList, e)
+					}
+					a.client.LoadEpochKeysFromDB(msg.Room, epochList)
+				}
+
+				// Convert to display messages and prepend
+				var display []DisplayMessage
+				for _, m := range localMsgs {
+					display = append(display, DisplayMessage{
+						ID:           m.ID,
+						From:         m.Sender,
+						Body:         m.Body,
+						TS:           m.TS,
+						Room:         m.Room,
+						Conversation: m.Conversation,
+						ReplyTo:      m.ReplyTo,
+						Mentions:     m.Mentions,
+					})
+				}
+				hasMore := len(localMsgs) >= 100
+				a.messages.PrependMessages(display, hasMore)
+				a.messages.loadingHistory = false
+
+				// Load reactions for the prepended messages
+				msgIDs := make([]string, 0, len(localMsgs))
+				for _, m := range localMsgs {
+					if m.ID != "" {
+						msgIDs = append(msgIDs, m.ID)
+					}
+				}
+				if len(msgIDs) > 0 {
+					if reactions, err := st.GetReactionsForMessages(msgIDs); err == nil {
+						for _, r := range reactions {
+							a.messages.addReactionRecord(r.MessageID, r.ReactionID, r.User, r.Emoji)
+						}
+					}
+				}
+
+				// If local DB had fewer than a full page, also hit server
+				// for any remaining that haven't been synced yet
+				if !hasMore {
+					a.client.RequestHistory(msg.Room, msg.Conversation, msg.BeforeID, 100)
+				}
+				return a, nil
+			}
+		}
+		// No local data — fall through to server
+		a.client.RequestHistory(msg.Room, msg.Conversation, msg.BeforeID, 100)
 		return a, nil
 
 	case MessageAction:
@@ -948,8 +1043,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ErrMsg:
 		a.err = msg.Err
 		a.statusBar.SetConnected(false)
-		// Auto-reconnect if we were previously connected
 		if a.connected || a.reconnectAttempt > 0 {
+			// Was previously connected — auto-reconnect
 			a.connected = false
 			a.reconnectAttempt++
 			delay := time.Duration(a.reconnectAttempt) * time.Second
@@ -958,7 +1053,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			a.statusBar.SetReconnecting(a.reconnectAttempt, delay)
 			cmds = append(cmds, a.reconnect(a.reconnectAttempt))
+		} else {
+			// First-ever connection failed — show guidance overlay
+			// with key info so the user can share with admin
+			fp := ""
+			pubKey := ""
+			if a.client != nil {
+				fp = a.client.KeyFingerprint()
+				pubKey = a.client.PublicKeyAuthorized()
+			}
+			if fp == "" {
+				// Client didn't initialize — read key directly
+				fp = "unknown"
+			}
+			a.connectFailed.Show(msg.Err.Error(), fp, pubKey)
 		}
+
+	case ConnectFailedRetryMsg:
+		// User pressed [r] from the connection failed overlay
+		cmds = append(cmds, a.connect())
 	}
 
 	return a, tea.Batch(cmds...)
@@ -967,6 +1080,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleMouse processes mouse events — clicks and scroll wheel.
 func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// Dialogs with mouse support — route clicks to the dialog.
+	if a.connectFailed.IsVisible() {
+		var cmd tea.Cmd
+		a.connectFailed, cmd = a.connectFailed.HandleMouse(msg)
+		return a, cmd
+	}
 	if a.addServer.IsVisible() {
 		var cmd tea.Cmd
 		a.addServer, cmd = a.addServer.HandleMouse(msg)
@@ -995,7 +1113,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	// Other overlays are keyboard-only
 	if a.help.IsVisible() || a.search.IsVisible() || a.newConv.IsVisible() ||
-		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() ||
+		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.pendingPanel.IsVisible() ||
 		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
 		a.quitConfirm.IsVisible() ||
 		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
@@ -1189,6 +1307,16 @@ func (a *App) sendReadReceipt() {
 		return
 	}
 	a.client.SendRead(a.messages.room, a.messages.conversation, lastID)
+	// Persist locally so the unread divider survives restarts
+	if st := a.client.Store(); st != nil {
+		target := a.messages.room
+		if target == "" {
+			target = a.messages.conversation
+		}
+		if target != "" {
+			st.StoreReadPosition(target, lastID)
+		}
+	}
 	// Clear unread divider — user has now seen everything
 	a.messages.SetUnreadFrom("")
 }
@@ -1246,6 +1374,13 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		if sc.Arg != "" && a.client != nil {
 			a.verify.Show(sc.Arg, a.client)
 		}
+	case "/unverify":
+		if sc.Arg != "" && a.client != nil {
+			if st := a.client.Store(); st != nil {
+				st.ClearVerified(sc.Arg)
+				a.statusBar.SetError("Verification removed for " + sc.Arg)
+			}
+		}
 	case "/search":
 		a.search.Show()
 	case "/settings":
@@ -1256,6 +1391,28 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		a.settings.Show(a.appConfig, a.configDir, username, a.serverIdx)
 	case "/help":
 		a.help.Toggle()
+	case "/pending":
+		if a.client == nil {
+			return
+		}
+		if !a.client.IsAdmin() {
+			a.statusBar.SetError("Admin required")
+			return
+		}
+		a.client.SendListPendingKeys()
+	case "/mykey":
+		if a.client == nil {
+			return
+		}
+		pubKey := a.client.PublicKeyAuthorized()
+		fingerprint := a.client.KeyFingerprint()
+		if pubKey == "" {
+			a.statusBar.SetError("No key available")
+			return
+		}
+		CopyToClipboard(pubKey)
+		a.statusBar.SetError(fingerprint + " — public key copied to clipboard")
+		// Panel will open when pending_keys_list response arrives
 	case "/upload":
 		if sc.Arg == "" {
 			a.statusBar.SetError("Usage: /upload <file path>")
@@ -1425,6 +1582,18 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 			a.messages.MarkRetired(p.User)
 			a.sidebar.MarkRetired(p.User)
 		}
+	case "admin_notify":
+		// Update status bar pending indicator for admins
+		if a.client != nil && a.client.IsAdmin() {
+			a.statusBar.SetPending(true)
+		}
+	case "pending_keys_list":
+		// Response to /pending — show the panel
+		if a.client != nil {
+			keys := a.client.PendingKeys()
+			a.pendingPanel.Show(keys)
+			a.statusBar.SetPending(len(keys) > 0)
+		}
 	case "device_revoked":
 		var m protocol.DeviceRevoked
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
@@ -1451,14 +1620,56 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 	case "conversation_event":
 		var m protocol.ConversationEvent
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
-			// Show a system message in the stream when it's the active conversation
-			if m.Conversation == a.messages.conversation && m.Event == "leave" {
-				if m.Reason == "retirement" {
-					a.messages.AddSystemMessage(m.User + "'s account was retired")
-				} else {
-					a.messages.AddSystemMessage(m.User + " left the conversation")
+			if m.Event == "leave" {
+				// Show system message in the active conversation stream
+				if m.Conversation == a.messages.conversation {
+					if m.Reason == "retirement" {
+						a.messages.AddSystemMessage(m.User + "'s account was retired")
+					} else {
+						a.messages.AddSystemMessage(m.User + " left the conversation")
+					}
+				}
+				// If WE left, remove from sidebar and switch away
+				if a.client != nil && m.User == a.client.Username() {
+					a.sidebar.RemoveConversation(m.Conversation)
+					if a.messages.conversation == m.Conversation {
+						a.messages.SetContext("", "")
+						if len(a.sidebar.rooms) > 0 {
+							a.sidebar.selectedRoom = a.sidebar.rooms[0]
+							a.messages.SetContext(a.sidebar.rooms[0], "")
+						}
+					}
 				}
 			}
+		}
+	case "conversation_renamed":
+		var m protocol.ConversationRenamed
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.sidebar.RenameConversation(m.Conversation, m.Name)
+			if m.Conversation == a.messages.conversation {
+				a.messages.AddSystemMessage(m.RenamedBy + " renamed the conversation to " + m.Name)
+			}
+		}
+	case "room_event":
+		var m protocol.RoomEvent
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			if m.Room == a.messages.room {
+				switch m.Event {
+				case "join":
+					a.messages.AddSystemMessage(m.User + " joined")
+				case "leave":
+					a.messages.AddSystemMessage(m.User + " left")
+				}
+			}
+		}
+	case "dm_created":
+		var m protocol.DMCreated
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.sidebar.AddConversation(protocol.ConversationInfo{
+				ID:      m.Conversation,
+				Members: m.Members,
+				Name:    m.Name,
+			})
 		}
 	case "reaction":
 		var m protocol.Reaction
@@ -1475,12 +1686,20 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 			batchType, _ := protocol.TypeOf(raw)
 			a.handleServerMessage(ServerMsg{Type: batchType, Raw: raw})
 		}
+		// Apply reactions on the synced messages (reactions are encrypted
+		// and go through the same AddReactionDecrypted path as real-time)
+		for _, raw := range batch.Reactions {
+			a.handleServerMessage(ServerMsg{Type: "reaction", Raw: raw})
+		}
 	case "history_result":
 		var result protocol.HistoryResult
 		json.Unmarshal(msg.Raw, &result)
 		for _, raw := range result.Messages {
 			histType, _ := protocol.TypeOf(raw)
 			a.handleServerMessage(ServerMsg{Type: histType, Raw: raw})
+		}
+		for _, raw := range result.Reactions {
+			a.handleServerMessage(ServerMsg{Type: "reaction", Raw: raw})
 		}
 	case "pins":
 		var m protocol.Pins
@@ -1636,6 +1855,12 @@ func (a App) View() string {
 	}
 	if a.emojiPicker.IsVisible() {
 		return a.emojiPicker.View()
+	}
+	if a.connectFailed.IsVisible() {
+		return a.connectFailed.View(a.width)
+	}
+	if a.pendingPanel.IsVisible() {
+		return a.pendingPanel.View(a.width)
 	}
 	if a.infoPanel.IsVisible() {
 		return a.infoPanel.View(a.width)

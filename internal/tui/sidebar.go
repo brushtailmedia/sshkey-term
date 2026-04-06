@@ -81,6 +81,39 @@ func (s *SidebarModel) SetConversations(convs []protocol.ConversationInfo) {
 	s.conversations = convs
 }
 
+// AddConversation appends a new conversation if it doesn't already exist.
+func (s *SidebarModel) AddConversation(conv protocol.ConversationInfo) {
+	for _, c := range s.conversations {
+		if c.ID == conv.ID {
+			return // already present (dedup)
+		}
+	}
+	s.conversations = append(s.conversations, conv)
+}
+
+// RemoveConversation removes a conversation by ID (e.g., after /leave).
+func (s *SidebarModel) RemoveConversation(convID string) {
+	for i, c := range s.conversations {
+		if c.ID == convID {
+			s.conversations = append(s.conversations[:i], s.conversations[i+1:]...)
+			if s.selectedConv == convID {
+				s.selectedConv = ""
+			}
+			return
+		}
+	}
+}
+
+// RenameConversation updates the display name for a conversation.
+func (s *SidebarModel) RenameConversation(convID, name string) {
+	for i, c := range s.conversations {
+		if c.ID == convID {
+			s.conversations[i].Name = name
+			return
+		}
+	}
+}
+
 func (s *SidebarModel) SetUnread(room string, count int) {
 	s.unread[room] = count
 }

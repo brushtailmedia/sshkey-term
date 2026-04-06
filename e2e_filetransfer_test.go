@@ -624,4 +624,76 @@ func TestFileTransferComprehensive(t *testing.T) {
 
 		t.Log("download error: fails fast and leaves no residual state")
 	})
+
+	// =========================================================================
+	// Content hash: upload hashes encrypted bytes, download verifies
+	// =========================================================================
+	t.Run("content_hash_roundtrip", func(t *testing.T) {
+		content := "content hash verification — BLAKE2b-256"
+		path := mkTempFile("hash-test", content)
+
+		err := alice.SendRoomMessageFile("general", "hash test", path, "", nil)
+		if err != nil {
+			t.Fatalf("upload: %v", err)
+		}
+
+		raw := waitForType(t, bobMessages, "message", 5*time.Second)
+		var msg protocol.Message
+		json.Unmarshal(raw, &msg)
+
+		payload, err := bob.DecryptRoomMessage(msg.Room, msg.Epoch, msg.Payload)
+		if err != nil {
+			t.Fatalf("decrypt: %v", err)
+		}
+		if len(payload.Attachments) != 1 {
+			t.Fatalf("attachments = %d", len(payload.Attachments))
+		}
+		att := payload.Attachments[0]
+
+		key := bob.RoomEpochKey(msg.Room, att.FileEpoch)
+		localPath, err := bob.DownloadFile(att.FileID, key)
+		if err != nil {
+			t.Fatalf("download with hash verification: %v", err)
+		}
+		verifyDownload(t, localPath, content)
+
+		waitForType(t, aliceMessages, "message", 5*time.Second)
+		t.Log("content hash roundtrip: upload hashed, download verified, content matches")
+	})
+
+	// =========================================================================
+	// Content hash: DM file also hashed and verified
+	// =========================================================================
+	t.Run("content_hash_dm", func(t *testing.T) {
+		content := "DM hash verification"
+		path := mkTempFile("hash-dm", content)
+
+		err := alice.SendDMMessageFile(dmConvID, "dm hash test", path, "", nil)
+		if err != nil {
+			t.Fatalf("upload: %v", err)
+		}
+
+		raw := waitForType(t, bobMessages, "dm", 5*time.Second)
+		var dm protocol.DM
+		json.Unmarshal(raw, &dm)
+
+		payload, err := bob.DecryptDMMessage(dm.WrappedKeys, dm.Payload)
+		if err != nil {
+			t.Fatalf("decrypt: %v", err)
+		}
+		if len(payload.Attachments) != 1 {
+			t.Fatalf("attachments = %d", len(payload.Attachments))
+		}
+		att := payload.Attachments[0]
+
+		fileKey, _ := base64.StdEncoding.DecodeString(att.FileKey)
+		localPath, err := bob.DownloadFile(att.FileID, fileKey)
+		if err != nil {
+			t.Fatalf("download with hash verification: %v", err)
+		}
+		verifyDownload(t, localPath, content)
+
+		waitForType(t, aliceMessages, "dm", 5*time.Second)
+		t.Log("content hash dm: DM file hashed and verified on download")
+	})
 }

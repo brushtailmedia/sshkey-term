@@ -28,6 +28,7 @@ var (
 type StatusBarModel struct {
 	username     string
 	admin        bool
+	hasPending   bool
 	connected    bool
 	reconnecting bool
 	reconnAttempt int
@@ -42,6 +43,10 @@ func NewStatusBar() StatusBarModel {
 func (s *StatusBarModel) SetUser(username string, admin bool) {
 	s.username = username
 	s.admin = admin
+}
+
+func (s *StatusBarModel) SetPending(has bool) {
+	s.hasPending = has
 }
 
 func (s *StatusBarModel) SetConnected(connected bool) {
@@ -83,6 +88,9 @@ func (s StatusBarModel) View(width int) string {
 		right = s.username
 		if s.admin {
 			right += " (admin)"
+			if s.hasPending {
+				right += " " + statusReconnecting + statusBarStyle.Render(" pending")
+			}
 		}
 		right = statusBarStyle.Render(right + " ") + statusConnected
 	}

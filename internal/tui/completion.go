@@ -95,10 +95,13 @@ func completeCommands(prefix string) *CompletionModel {
 		{Text: "/rename ", Display: "/rename", Description: "rename group"},
 		{Text: "/upload ", Display: "/upload", Description: "upload file"},
 		{Text: "/verify ", Display: "/verify", Description: "verify user"},
+		{Text: "/unverify ", Display: "/unverify", Description: "remove verification"},
 		{Text: "/mute", Display: "/mute", Description: "toggle mute"},
 		{Text: "/search ", Display: "/search", Description: "search messages"},
 		{Text: "/leave", Display: "/leave", Description: "leave conversation"},
 		{Text: "/settings", Display: "/settings", Description: "open settings"},
+		{Text: "/pending", Display: "/pending", Description: "pending keys (admin)"},
+		{Text: "/mykey", Display: "/mykey", Description: "copy public key"},
 		{Text: "/help", Display: "/help", Description: "show help"},
 	}
 

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -28,6 +29,7 @@ type memberInfo struct {
 	DisplayName string
 	Online      bool
 	Verified    bool
+	Admin       bool
 }
 
 // MuteToggleMsg is sent when the user toggles mute on a room or conversation.
@@ -55,13 +57,20 @@ func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[stri
 		c.ForEachProfile(func(p *protocol.Profile) {
 			// Check if user is in this room (we don't have per-room member lists client-side,
 			// so show all known users for now — TODO: track room membership)
+			verified := false
+			if st := c.Store(); st != nil {
+				_, verified, _ = st.GetPinnedKey(p.User)
+			}
 			i.members = append(i.members, memberInfo{
 				User:        p.User,
 				DisplayName: p.DisplayName,
 				Online:      online[p.User],
+				Admin:       p.Admin,
+				Verified:    verified,
 			})
 		})
 	}
+	sortMembersAdminsFirst(i.members)
 }
 
 func (i *InfoPanelModel) ShowConversation(convID string, c *client.Client, online map[string]bool) {
@@ -77,16 +86,25 @@ func (i *InfoPanelModel) ShowConversation(convID string, c *client.Client, onlin
 		for _, m := range members {
 			p := c.Profile(m)
 			displayName := m
+			admin := false
 			if p != nil {
 				displayName = p.DisplayName
+				admin = p.Admin
+			}
+			verified := false
+			if st := c.Store(); st != nil {
+				_, verified, _ = st.GetPinnedKey(m)
 			}
 			i.members = append(i.members, memberInfo{
 				User:        m,
 				DisplayName: displayName,
 				Online:      online[m],
+				Admin:       admin,
+				Verified:    verified,
 			})
 		}
 	}
+	sortMembersAdminsFirst(i.members)
 }
 
 func (i *InfoPanelModel) Hide() {
@@ -164,9 +182,16 @@ func (i InfoPanelModel) View(width int) string {
 	}
 	b.WriteString(fmt.Sprintf(" Muted: [%s]  (press m to toggle)\n\n", muteLabel))
 
-	// Members
-	b.WriteString(fmt.Sprintf(" Members (%d):\n", len(i.members)))
-	for idx, m := range i.members {
+	// Split members into admins and non-admins (preserving cursor indices
+	// into i.members which is already sorted admins-first after Show*).
+	var adminCount int
+	for _, m := range i.members {
+		if m.Admin {
+			adminCount++
+		}
+	}
+
+	renderMember := func(idx int, m memberInfo) string {
 		dot := "○"
 		if m.Online {
 			dot = checkStyle.Render("●")
@@ -178,11 +203,30 @@ func (i InfoPanelModel) View(width int) string {
 		if m.Verified {
 			line += checkStyle.Render(" ✓")
 		}
-
 		if idx == i.cursor {
 			line = completionSelectedStyle.Render(line)
 		}
-		b.WriteString(line + "\n")
+		return line
+	}
+
+	b.WriteString(fmt.Sprintf(" Members (%d):\n", len(i.members)))
+	if adminCount > 0 {
+		b.WriteString(sidebarHeaderStyle.Render("  [Admins]") + "\n")
+		for idx, m := range i.members {
+			if !m.Admin {
+				continue
+			}
+			b.WriteString(renderMember(idx, m) + "\n")
+		}
+	}
+	if adminCount < len(i.members) {
+		b.WriteString(sidebarHeaderStyle.Render("  [Members]") + "\n")
+		for idx, m := range i.members {
+			if m.Admin {
+				continue
+			}
+			b.WriteString(renderMember(idx, m) + "\n")
+		}
 	}
 
 	if i.isGroup {
@@ -194,4 +238,15 @@ func (i InfoPanelModel) View(width int) string {
 	}
 
 	return dialogStyle.Width(width - 4).Render(b.String())
+}
+
+// sortMembersAdminsFirst orders admins before non-admins, alphabetical within
+// each group. This keeps cursor indices stable with the rendered section order.
+func sortMembersAdminsFirst(members []memberInfo) {
+	sort.SliceStable(members, func(i, j int) bool {
+		if members[i].Admin != members[j].Admin {
+			return members[i].Admin // admins first
+		}
+		return members[i].User < members[j].User
+	})
 }

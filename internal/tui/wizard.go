@@ -21,6 +21,7 @@ const (
 	WizardKeyGenerate
 	WizardBackup
 	WizardExport
+	WizardShare
 	WizardServer
 	WizardDone
 )
@@ -128,6 +129,12 @@ func (w WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		w.height = msg.Height
 		return w, nil
 
+	case tea.MouseMsg:
+		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionRelease {
+			return w.handleMouse(msg)
+		}
+		return w, nil
+
 	case tea.KeyMsg:
 		// Global
 		if msg.String() == "ctrl+c" {
@@ -147,6 +154,8 @@ func (w WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return w.updateBackup(msg)
 		case WizardExport:
 			return w.updateExport(msg)
+		case WizardShare:
+			return w.updateShare(msg)
 		case WizardServer:
 			return w.updateServer(msg)
 		}
@@ -320,9 +329,7 @@ func (w WizardModel) updateBackup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w.exportInput.Focus()
 	case "a":
 		// Explicit acknowledgement: "I'll back it up myself — no recovery exists"
-		w.step = WizardServer
-		w.serverInputs[0].Focus()
-		w.serverFocused = 0
+		w.step = WizardShare
 	case "esc":
 		// Go back to key selection rather than silently skipping
 		w.step = WizardKeySelect
@@ -359,9 +366,7 @@ func (w WizardModel) updateExport(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			os.WriteFile(dst+".pub", pubData, 0644)
 		}
 		w.err = ""
-		w.step = WizardServer
-		w.serverInputs[0].Focus()
-		w.serverFocused = 0
+		w.step = WizardShare
 	case "esc":
 		w.step = WizardBackup
 		w.err = ""
@@ -371,6 +376,35 @@ func (w WizardModel) updateExport(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return w, cmd
 	}
 	return w, nil
+}
+
+func (w WizardModel) updateShare(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "c":
+		// Copy full public key to clipboard
+		pubKey := w.readPublicKey()
+		if pubKey != "" {
+			CopyToClipboard(pubKey)
+			w.err = "Public key copied to clipboard"
+		}
+	case "enter":
+		w.step = WizardServer
+		w.serverInputs[0].Focus()
+		w.serverFocused = 0
+		w.err = ""
+	case "esc":
+		w.step = WizardBackup
+		w.err = ""
+	}
+	return w, nil
+}
+
+func (w WizardModel) readPublicKey() string {
+	data, err := os.ReadFile(w.result.KeyPath + ".pub")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func (w WizardModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -415,6 +449,56 @@ func (w WizardModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// handleMouse processes mouse clicks for wizard screens that benefit from it.
+func (w WizardModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// dialogStyle: border(1) + padding(1) = content starts at Y=2
+	const contentY = 2
+
+	switch w.step {
+	case WizardKeySelect:
+		// Layout: header(1) + blank(1) + "Select..."(1) + blank(1) = keys start at Y offset 4
+		// After keys: blank(1) + divider(1) + blank(1) = import at keys+3, generate at keys+4
+		keyStartY := contentY + 4
+		clickIdx := msg.Y - keyStartY
+		totalItems := len(w.keys) + 2 // keys + import + generate
+
+		// Account for the divider between keys and import/generate (3 lines)
+		if clickIdx >= len(w.keys) {
+			clickIdx -= 3 // skip blank + divider + blank
+		}
+
+		if clickIdx >= 0 && clickIdx < totalItems {
+			w.keyCursor = clickIdx
+		}
+
+	case WizardBackup:
+		// [e] and [a] are the clickable lines
+		// Layout: header(1) + blank(1) + 4 lines text + blank(1) + "Your key:"(1) + path(1) + blank(1) = options at ~Y=12
+		lineY := msg.Y - contentY
+		if lineY >= 10 && lineY <= 11 {
+			// [e] Export
+			return w.updateBackup(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+		}
+		if lineY >= 12 && lineY <= 13 {
+			// [a] Acknowledge
+			return w.updateBackup(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+		}
+
+	case WizardShare:
+		// [c] Copy is the main clickable element
+		lineY := msg.Y - contentY
+		if lineY >= 10 && lineY <= 12 {
+			return w.updateShare(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+		}
+
+	case WizardWelcome:
+		// Click anywhere → continue
+		return w.updateWelcome(tea.KeyMsg{Type: tea.KeyEnter})
+	}
+
+	return w, nil
+}
+
 func (w WizardModel) computeFingerprint(keyPath string) string {
 	data, err := os.ReadFile(keyPath)
 	if err != nil {
@@ -444,6 +528,8 @@ func (w WizardModel) View() string {
 		return w.viewBackup()
 	case WizardExport:
 		return w.viewExport()
+	case WizardShare:
+		return w.viewShare()
 	case WizardServer:
 		return w.viewServer()
 	default:
@@ -565,6 +651,38 @@ func (w WizardModel) viewExport() string {
 	if w.err != "" {
 		b.WriteString("\n\n  " + errorStyle.Render(w.err))
 	}
+	return dialogStyle.Render(b.String())
+}
+
+func (w WizardModel) viewShare() string {
+	var b strings.Builder
+	b.WriteString(searchHeaderStyle.Render(" Share With Your Admin"))
+	b.WriteString("\n\n")
+	b.WriteString("  Your server admin needs your public key\n")
+	b.WriteString("  to add you to the server.\n\n")
+
+	b.WriteString("  Fingerprint:\n")
+	b.WriteString("  " + searchHeaderStyle.Render(w.keyFingerprint) + "\n\n")
+
+	pubKey := w.readPublicKey()
+	if pubKey != "" {
+		display := pubKey
+		if len(display) > 50 {
+			display = display[:50] + "..."
+		}
+		b.WriteString("  Public key:\n")
+		b.WriteString("  " + helpDescStyle.Render(display) + "\n\n")
+	}
+
+	b.WriteString("  " + searchHeaderStyle.Render("[c] Copy public key to clipboard") + "\n\n")
+	b.WriteString(helpDescStyle.Render("  Send this to your admin via a trusted channel."))
+	b.WriteString("\n\n")
+	b.WriteString(helpDescStyle.Render("  Enter=continue  Esc=back"))
+
+	if w.err != "" {
+		b.WriteString("\n\n  " + checkStyle.Render(w.err))
+	}
+
 	return dialogStyle.Render(b.String())
 }
 

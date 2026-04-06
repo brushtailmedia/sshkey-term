@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sort"
 
+	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/crypto/ssh"
@@ -320,4 +321,22 @@ func ed25519PrivToX25519(priv ed25519.PrivateKey) []byte {
 	h[31] &= 127
 	h[31] |= 64
 	return h[:32]
+}
+
+// ContentHash computes a BLAKE2b-256 hash of the given data and returns it
+// in tagged format: "blake2b-256:<hex>". Used to verify file integrity on
+// upload and download — hash is computed on the encrypted bytes.
+func ContentHash(data []byte) string {
+	h := blake2b.Sum256(data)
+	return fmt.Sprintf("blake2b-256:%x", h)
+}
+
+// VerifyContentHash checks that data matches the expected tagged hash string.
+// Returns nil on match, error on mismatch or invalid format.
+func VerifyContentHash(data []byte, expected string) error {
+	actual := ContentHash(data)
+	if actual != expected {
+		return fmt.Errorf("content hash mismatch: expected %s, got %s", expected, actual)
+	}
+	return nil
 }

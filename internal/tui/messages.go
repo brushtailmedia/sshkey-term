@@ -188,7 +188,8 @@ func (m *MessagesModel) SetUnreadFrom(msgID string) {
 	m.unreadFromID = msgID
 }
 
-// LoadFromDB populates the message list from the local DB.
+// LoadFromDB populates the message list from the local DB, including
+// persisted reactions.
 func (m *MessagesModel) LoadFromDB(c *client.Client) {
 	if c == nil {
 		return
@@ -208,6 +209,7 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 	}
 
 	m.messages = nil
+	msgIDs := make([]string, 0, len(stored))
 	for _, s := range stored {
 		m.messages = append(m.messages, DisplayMessage{
 			ID:           s.ID,
@@ -219,6 +221,42 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 			ReplyTo:      s.ReplyTo,
 			Mentions:     s.Mentions,
 		})
+		if s.ID != "" {
+			msgIDs = append(msgIDs, s.ID)
+		}
+	}
+
+	// Load persisted reactions and apply to loaded messages
+	if st := c.Store(); st != nil && len(msgIDs) > 0 {
+		reactions, err := st.GetReactionsForMessages(msgIDs)
+		if err == nil {
+			for _, r := range reactions {
+				m.addReactionRecord(r.MessageID, r.ReactionID, r.User, r.Emoji)
+			}
+		}
+	}
+
+	// Restore unread divider from persisted read position
+	if st := c.Store(); st != nil {
+		target := m.room
+		if target == "" {
+			target = m.conversation
+		}
+		if target != "" {
+			if lastRead, err := st.GetReadPosition(target); err == nil && lastRead != "" {
+				// Set divider after the last-read message
+				found := false
+				for _, msg := range m.messages {
+					if found && msg.ID != "" && !msg.IsSystem {
+						m.unreadFromID = msg.ID
+						break
+					}
+					if msg.ID == lastRead {
+						found = true
+					}
+				}
+			}
+		}
 	}
 }
 

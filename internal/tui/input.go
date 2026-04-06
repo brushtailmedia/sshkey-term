@@ -175,7 +175,7 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, conversa
 		}
 	case "/mute":
 		// Handled via info panel toggle — just set a flag
-	case "/verify", "/search", "/settings", "/help":
+	case "/verify", "/unverify", "/search", "/settings", "/help", "/pending", "/mykey":
 		// These need to be handled at the app level
 		// Store the command for the app to pick up
 		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Conv: conversation}

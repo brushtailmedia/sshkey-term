@@ -109,6 +109,68 @@ func (s *Store) DeleteMessage(id string) error {
 	return err
 }
 
+// StoredReaction represents a decrypted reaction in the local DB.
+type StoredReaction struct {
+	ReactionID string
+	MessageID  string
+	User       string
+	Emoji      string
+	TS         int64
+}
+
+// InsertReaction stores a decrypted reaction locally.
+func (s *Store) InsertReaction(r StoredReaction) error {
+	_, err := s.db.Exec(`
+		INSERT OR IGNORE INTO reactions (reaction_id, message_id, user, emoji, ts)
+		VALUES (?, ?, ?, ?, ?)`,
+		r.ReactionID, r.MessageID, r.User, r.Emoji, r.TS,
+	)
+	return err
+}
+
+// DeleteReaction removes a reaction by its reaction_id.
+func (s *Store) DeleteReaction(reactionID string) error {
+	_, err := s.db.Exec(`DELETE FROM reactions WHERE reaction_id = ?`, reactionID)
+	return err
+}
+
+// GetReactionsForMessages returns all reactions for a set of message IDs.
+func (s *Store) GetReactionsForMessages(messageIDs []string) ([]StoredReaction, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := ""
+	args := make([]any, len(messageIDs))
+	for i, id := range messageIDs {
+		if i > 0 {
+			placeholders += ","
+		}
+		placeholders += "?"
+		args[i] = id
+	}
+	rows, err := s.db.Query(`
+		SELECT reaction_id, message_id, user, emoji, ts
+		FROM reactions
+		WHERE message_id IN (`+placeholders+`)
+		ORDER BY ts ASC`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reactions []StoredReaction
+	for rows.Next() {
+		var r StoredReaction
+		if err := rows.Scan(&r.ReactionID, &r.MessageID, &r.User, &r.Emoji, &r.TS); err != nil {
+			return nil, err
+		}
+		reactions = append(reactions, r)
+	}
+	return reactions, rows.Err()
+}
+
 // SearchMessages performs full-text search across all messages.
 // Tries FTS5 first, falls back to LIKE if FTS5 is not available.
 func (s *Store) SearchMessages(query string, limit int) ([]StoredMessage, error) {

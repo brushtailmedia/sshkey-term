@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,10 +64,12 @@ type Client struct {
 	profiles     map[string]*protocol.Profile
 	convMembers  map[string][]string         // conversation ID -> member usernames
 	retired      map[string]string           // retired username -> retired_at timestamp
-	epochKeys    map[string]map[int64][]byte // room -> epoch -> unwrapped key
-	currentEpoch map[string]int64            // room -> current epoch number
-	seqCounters  map[string]int64            // "room:x" or "conv:x" -> next seq
-	privKey      ed25519.PrivateKey
+	epochKeys      map[string]map[int64][]byte // room -> epoch -> unwrapped key
+	currentEpoch   map[string]int64            // room -> current epoch number
+	seqCounters    map[string]int64            // "room:x" or "conv:x" -> next seq
+	hasPendingKeys bool                        // true when admin_notify arrived (cleared on list refresh)
+	pendingKeys    []protocol.PendingKeyEntry  // populated by pending_keys_list
+	privKey        ed25519.PrivateKey
 	signer      ssh.Signer
 	lastSynced  string
 
@@ -177,6 +180,18 @@ func (c *Client) Connect() error {
 			// Load last_synced from DB
 			if synced, err := st.GetState("last_synced"); err == nil && synced != "" {
 				c.lastSynced = synced
+			}
+
+			// Load cached conversations so sidebar is populated
+			// before the server sends a fresh conversation_list
+			if convs, err := st.GetAllConversations(); err == nil {
+				c.mu.Lock()
+				for id, info := range convs {
+					if _, ok := c.convMembers[id]; !ok {
+						c.convMembers[id] = strings.Split(info[1], ",")
+					}
+				}
+				c.mu.Unlock()
 			}
 		}
 	}
@@ -357,6 +372,9 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			c.mu.Lock()
 			c.convMembers[dm.Conversation] = dm.Members
 			c.mu.Unlock()
+			if c.store != nil {
+				c.store.StoreConversation(dm.Conversation, dm.Name, strings.Join(dm.Members, ","))
+			}
 		}
 	case "conversation_list":
 		var cl protocol.ConversationList
@@ -366,6 +384,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 				c.convMembers[conv.ID] = conv.Members
 			}
 			c.mu.Unlock()
+			if c.store != nil {
+				for _, conv := range cl.Conversations {
+					c.store.StoreConversation(conv.ID, conv.Name, strings.Join(conv.Members, ","))
+				}
+			}
 		}
 	case "conversation_event":
 		var ce protocol.ConversationEvent
@@ -400,12 +423,34 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 	case "download_start":
 		var ds protocol.DownloadStart
 		if err := json.Unmarshal(raw, &ds); err == nil {
-			HandleDownloadStart(ds.FileID)
+			HandleDownloadStart(ds.FileID, ds.ContentHash)
 		}
 	case "download_error":
 		var de protocol.DownloadError
 		if err := json.Unmarshal(raw, &de); err == nil {
 			HandleDownloadError(de.FileID, fmt.Errorf("%s: %s", de.Code, de.Message))
+		}
+	case "admin_notify":
+		var an protocol.AdminNotify
+		if err := json.Unmarshal(raw, &an); err == nil && an.Event == "pending_key" {
+			c.mu.Lock()
+			c.hasPendingKeys = true
+			c.mu.Unlock()
+		}
+	case "pending_keys_list":
+		var pkl protocol.PendingKeysList
+		if err := json.Unmarshal(raw, &pkl); err == nil {
+			c.mu.Lock()
+			c.pendingKeys = pkl.Keys
+			c.hasPendingKeys = len(pkl.Keys) > 0
+			c.mu.Unlock()
+		}
+	case "reaction":
+		c.storeReaction(raw)
+	case "reaction_removed":
+		var rm protocol.ReactionRemoved
+		if err := json.Unmarshal(raw, &rm); err == nil && c.store != nil {
+			c.store.DeleteReaction(rm.ReactionID)
 		}
 	case "deleted":
 		var d protocol.Deleted
@@ -446,7 +491,25 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 // storeEpochKey unwraps and stores an epoch key in memory AND persists it
 // to the local encrypted DB so it survives across app restarts. Without
 // persistence, the client would lose the ability to decrypt past messages.
+//
+// If the key is already in memory for this (room, epoch), the unwrap and
+// DB write are skipped entirely — avoids redundant ECDH+HKDF work when
+// the server re-sends a key the client already has (common on reconnect).
 func (c *Client) storeEpochKey(room string, epoch int64, wrappedKey string) {
+	// Skip if already in memory (server re-sent a key we already have)
+	c.mu.RLock()
+	existing := c.epochKeys[room][epoch]
+	c.mu.RUnlock()
+	if existing != nil {
+		// Still update currentEpoch in case this is a newer epoch number
+		c.mu.Lock()
+		if epoch > c.currentEpoch[room] {
+			c.currentEpoch[room] = epoch
+		}
+		c.mu.Unlock()
+		return
+	}
+
 	key, err := c.UnwrapKey(wrappedKey)
 	if err != nil {
 		c.logger.Warn("failed to unwrap epoch key", "room", room, "epoch", epoch, "error", err)
@@ -522,6 +585,23 @@ func (c *Client) RetiredUsers() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// PublicKeyAuthorized returns the SSH public key in authorized_keys format
+// (e.g., "ssh-ed25519 AAAA... user@host"). Suitable for sharing with admins.
+func (c *Client) PublicKeyAuthorized() string {
+	if c.signer == nil {
+		return ""
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(c.signer.PublicKey())))
+}
+
+// KeyFingerprint returns the SHA256 fingerprint of the user's SSH public key.
+func (c *Client) KeyFingerprint() string {
+	if c.signer == nil {
+		return ""
+	}
+	return ssh.FingerprintSHA256(c.signer.PublicKey())
 }
 
 // ConvMembers returns the member list for a conversation.

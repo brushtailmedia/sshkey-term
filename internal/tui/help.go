@@ -111,6 +111,30 @@ func (h HelpModel) View(width, height int) string {
 		b.WriteString(leftPadded + right + "\n")
 	}
 
+	// Slash commands
+	commands := []struct{ cmd, desc string }{
+		{"/help", "this screen"},
+		{"/search <query>", "search messages"},
+		{"/upload <path>", "upload a file"},
+		{"/verify <user>", "verify safety number"},
+		{"/rename <name>", "rename group DM"},
+		{"/leave", "leave group DM"},
+		{"/mute", "toggle mute"},
+		{"/settings", "open settings"},
+		{"/unverify <user>", "remove verification"},
+		{"/pending", "pending keys (admin)"},
+		{"/mykey", "copy public key"},
+	}
+
+	b.WriteString("\n")
+	b.WriteString("  " + helpHeaderStyle.Render("Slash Commands"))
+	b.WriteString("\n")
+	b.WriteString("  " + strings.Repeat("─", 52))
+	b.WriteString("\n")
+	for _, c := range commands {
+		b.WriteString("  " + helpKeyStyle.Render(padRight(c.cmd, 20)) + " " + helpDescStyle.Render(c.desc) + "\n")
+	}
+
 	b.WriteString("\n")
 	b.WriteString(helpDescStyle.Render("  Press Esc or ? to close"))
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/brushtailmedia/sshkey-term/internal/crypto"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
@@ -28,8 +29,9 @@ var (
 
 // pendingDownload tracks an in-progress download (file_id-keyed).
 type pendingDownload struct {
-	started chan struct{} // signalled when download_start arrives
-	err     chan error    // signalled when download_error arrives
+	started     chan struct{} // signalled when download_start arrives
+	err         chan error    // signalled when download_error arrives
+	contentHash string       // set by HandleDownloadStart from download_start
 }
 
 var (
@@ -93,6 +95,9 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, conversation string)
 	}
 	encBytes := []byte(encrypted)
 
+	// Compute content hash of encrypted bytes for integrity verification
+	contentHash := crypto.ContentHash(encBytes)
+
 	uploadID := generateNanoID("up_")
 
 	pending := &pendingUpload{
@@ -115,6 +120,7 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, conversation string)
 		Type:         "upload_start",
 		UploadID:     uploadID,
 		Size:         int64(len(encBytes)),
+		ContentHash:  contentHash,
 		Room:         room,
 		Conversation: conversation,
 	})
@@ -131,6 +137,8 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, conversation string)
 		return "", err
 	case <-c.done:
 		return "", fmt.Errorf("disconnected")
+	case <-time.After(30 * time.Second):
+		return "", fmt.Errorf("upload timed out waiting for server")
 	}
 
 	c.mu.RLock()
@@ -157,6 +165,8 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, conversation string)
 		return "", err
 	case <-c.done:
 		return "", fmt.Errorf("disconnected")
+	case <-time.After(30 * time.Second):
+		return "", fmt.Errorf("upload timed out waiting for completion")
 	}
 }
 
@@ -202,11 +212,14 @@ func HandleUploadError(uploadID string, err error) {
 }
 
 // HandleDownloadStart is called from handleInternal when download_start
-// arrives. Signals the matching DownloadFile call that bytes are inbound
-// on Channel 2 and it's safe to start reading.
-func HandleDownloadStart(fileID string) {
+// arrives. Stores the content hash and signals the matching DownloadFile
+// call that bytes are inbound on Channel 2.
+func HandleDownloadStart(fileID, contentHash string) {
 	downloadsMu.Lock()
 	p, ok := downloads[fileID]
+	if ok {
+		p.contentHash = contentHash
+	}
 	downloadsMu.Unlock()
 	if ok {
 		select {
@@ -289,6 +302,8 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 		return "", err
 	case <-c.done:
 		return "", fmt.Errorf("disconnected")
+	case <-time.After(30 * time.Second):
+		return "", fmt.Errorf("download timed out waiting for server")
 	}
 
 	// Read binary frame from Channel 2
@@ -297,13 +312,23 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 		return "", fmt.Errorf("read binary: %w", err)
 	}
 
-	// Decrypt
+	// Verify content hash before writing anything to disk (catches
+	// truncation, bit rot, and transit corruption). The hash was
+	// computed on the encrypted bytes by the uploader.
+	downloadsMu.Lock()
+	expectedHash := pending.contentHash
+	downloadsMu.Unlock()
+	if err := crypto.VerifyContentHash(data, expectedHash); err != nil {
+		return "", fmt.Errorf("download integrity check failed: %w", err)
+	}
+
+	// Decrypt (GCM tag provides a second integrity check)
 	plaintext, err := crypto.Decrypt(decryptKey, string(data))
 	if err != nil {
 		return "", fmt.Errorf("decrypt: %w", err)
 	}
 
-	// Save
+	// Save — only reached if both hash and GCM verification passed
 	localPath := filepath.Join(filesDir, fileID)
 	if err := os.WriteFile(localPath, plaintext, 0600); err != nil {
 		return "", err
