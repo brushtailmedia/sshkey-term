@@ -66,6 +66,7 @@ type App struct {
 	retireConfirm RetireConfirmModel
 	deviceRevoked DeviceRevokedModel
 	deviceMgr     DeviceMgrModel
+	quickSwitch QuickSwitchModel
 	pinnedBar   PinnedBarModel
 
 	// Config state
@@ -109,6 +110,7 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		search:      NewSearch(),
 		newConv:     NewNewConv(),
 		emojiPicker: NewEmojiPicker(),
+		quickSwitch: NewQuickSwitch(),
 		memberPanel: NewMemberPanel(),
 		settings:     NewSettings(),
 		addServer:    NewAddServer(),
@@ -366,6 +368,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
+		// Quick switch intercepts keys when visible
+		if a.quickSwitch.IsVisible() {
+			var cmd tea.Cmd
+			a.quickSwitch, cmd = a.quickSwitch.Update(msg)
+			if !a.quickSwitch.IsVisible() {
+				a.focus = FocusInput
+			}
+			return a, cmd
+		}
+
 		// Search screen intercepts keys when visible
 		if a.search.IsVisible() {
 			var cmd tea.Cmd
@@ -490,6 +502,26 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 				a.newConv.Show(allMembers)
 			}
+			return a, nil
+
+		case "alt+up":
+			if a.sidebar.cursor > 0 {
+				a.sidebar.cursor--
+				a.sidebar.updateSelection()
+				a.switchToSidebarSelection()
+			}
+			return a, nil
+
+		case "alt+down":
+			if a.sidebar.cursor < a.sidebar.totalItems()-1 {
+				a.sidebar.cursor++
+				a.sidebar.updateSelection()
+				a.switchToSidebarSelection()
+			}
+			return a, nil
+
+		case "ctrl+k":
+			a.quickSwitch.Show(a.sidebar.rooms, a.sidebar.conversations, a.sidebar.resolveName)
 			return a, nil
 
 		case "tab":
@@ -804,6 +836,27 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case CreateConvMsg:
 		// DM created — the dm_created response will come via ServerMsg
 		// and the sidebar will update
+		return a, nil
+
+	case QuickSwitchMsg:
+		// Switch to the selected room or conversation
+		if msg.Room != "" {
+			for i, r := range a.sidebar.rooms {
+				if r == msg.Room {
+					a.sidebar.cursor = i
+					break
+				}
+			}
+		} else if msg.Conversation != "" {
+			for i, c := range a.sidebar.conversations {
+				if c.ID == msg.Conversation {
+					a.sidebar.cursor = len(a.sidebar.rooms) + i
+					break
+				}
+			}
+		}
+		a.sidebar.updateSelection()
+		a.switchToSidebarSelection()
 		return a, nil
 
 	case SearchJumpMsg:
@@ -1154,7 +1207,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Other overlays are keyboard-only
-	if a.help.IsVisible() || a.search.IsVisible() || a.newConv.IsVisible() ||
+	if a.help.IsVisible() || a.search.IsVisible() || a.quickSwitch.IsVisible() || a.newConv.IsVisible() ||
 		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.pendingPanel.IsVisible() ||
 		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
 		a.quitConfirm.IsVisible() ||
@@ -1380,6 +1433,24 @@ func (a *App) sendReadReceipt() {
 	if target != "" {
 		a.sidebar.SetUnread(target, 0)
 	}
+}
+
+// switchToSidebarSelection switches the messages context to whatever the
+// sidebar currently has selected. Used by Alt+Up/Down and quick switch.
+func (a *App) switchToSidebarSelection() {
+	if a.sidebar.SelectedRoom() == a.messages.room && a.sidebar.SelectedConv() == a.messages.conversation {
+		return
+	}
+	a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedConv())
+	a.messages.LoadFromDB(a.client)
+	if a.memberPanel.IsVisible() {
+		a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
+		if a.messages.room != "" && a.client != nil {
+			a.client.RequestRoomMembers(a.messages.room)
+		}
+		a.input.SetMembers(a.activeMemberEntries())
+	}
+	a.sendReadReceipt()
 }
 
 // activeMemberNames returns the member list for @completion, excluding
@@ -1951,6 +2022,9 @@ func (a App) View() string {
 	// Overlays
 	if a.help.IsVisible() {
 		return a.help.View(a.width, a.height)
+	}
+	if a.quickSwitch.IsVisible() {
+		return a.quickSwitch.View(a.width)
 	}
 	if a.newConv.IsVisible() {
 		return a.newConv.View(a.width)
