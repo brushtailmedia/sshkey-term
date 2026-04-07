@@ -129,7 +129,10 @@ func (s *Store) init() error {
 			reply_to        TEXT NOT NULL DEFAULT '',
 			mentions        TEXT NOT NULL DEFAULT '',
 			has_attachments INTEGER NOT NULL DEFAULT 0,
-			raw_payload     TEXT NOT NULL DEFAULT ''
+			raw_payload     TEXT NOT NULL DEFAULT '',
+			deleted         INTEGER NOT NULL DEFAULT 0,
+			deleted_by      TEXT NOT NULL DEFAULT '',
+			attachments     TEXT NOT NULL DEFAULT ''
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room, ts) WHERE room != '';
@@ -212,6 +215,11 @@ func (s *Store) init() error {
 		END`)
 	}
 	// If FTS5 isn't available, search falls back to LIKE queries
+
+	// Migrations for existing DBs (no-op if columns already present)
+	s.db.Exec(`ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0`)
+	s.db.Exec(`ALTER TABLE messages ADD COLUMN deleted_by TEXT NOT NULL DEFAULT ''`)
+	s.db.Exec(`ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT ''`)
 
 	return nil
 }

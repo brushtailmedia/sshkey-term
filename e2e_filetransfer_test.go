@@ -161,7 +161,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		// Upload each file separately, then send ONE message referencing all
 		attachments := make([]protocol.Attachment, len(paths))
 		for i, p := range paths {
-			fileID, err := alice.UploadFile(p, "general", "")
+			fileID, _, err := alice.UploadFile(p, "general", "")
 			if err != nil {
 				t.Fatalf("upload %d: %v", i, err)
 			}
@@ -421,7 +421,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				fileIDs[i], errs[i] = alice.UploadFile(paths[i], "general", "")
+				fileIDs[i], _, errs[i] = alice.UploadFile(paths[i], "general", "")
 			}(i)
 		}
 		wg.Wait()
@@ -473,7 +473,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		// Alice uploads them sequentially (we're testing downloads, not uploads)
 		fileIDs := make([]string, N)
 		for i := 0; i < N; i++ {
-			id, err := alice.UploadFile(paths[i], "general", "")
+			id, _, err := alice.UploadFile(paths[i], "general", "")
 			if err != nil {
 				t.Fatalf("upload %d: %v", i, err)
 			}
@@ -516,7 +516,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		// Pre-upload a file for bob to download
 		dlContent := "file for download while upload is happening"
 		dlPath := mkTempFile("mixed-dl", dlContent)
-		dlFileID, err := alice.UploadFile(dlPath, "general", "")
+		dlFileID, _, err := alice.UploadFile(dlPath, "general", "")
 		if err != nil {
 			t.Fatalf("pre-upload: %v", err)
 		}
@@ -539,7 +539,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			ulFileID, ulErr = alice.UploadFile(ulPath, "general", "")
+			ulFileID, _, ulErr = alice.UploadFile(ulPath, "general", "")
 		}()
 		wg.Wait()
 
@@ -593,7 +593,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		// residual state)
 		content := "post-error download works"
 		path := mkTempFile("post-error", content)
-		fileID, err := alice.UploadFile(path, "general", "")
+		fileID, _, err := alice.UploadFile(path, "general", "")
 		if err != nil {
 			t.Fatalf("upload: %v", err)
 		}

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/base64"
 	"encoding/json"
 
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
@@ -22,25 +23,41 @@ func (c *Client) storeRoomMessage(raw json.RawMessage) {
 	replyTo := ""
 	var mentions []string
 
+	var attachments []store.StoredAttachment
+
 	payload, err := c.DecryptRoomMessage(msg.Room, msg.Epoch, msg.Payload)
 	if err == nil {
 		body = payload.Body
 		replyTo = payload.ReplyTo
 		mentions = payload.Mentions
-
-		// Replay detection
 		c.checkReplay(msg.From, payload.DeviceID, msg.Room, "", payload.Seq)
+
+		for _, a := range payload.Attachments {
+			fileEpoch := a.FileEpoch
+			if fileEpoch == 0 {
+				fileEpoch = msg.Epoch
+			}
+			key := c.RoomEpochKey(msg.Room, fileEpoch)
+			attachments = append(attachments, store.StoredAttachment{
+				FileID:     a.FileID,
+				Name:       a.Name,
+				Size:       a.Size,
+				Mime:       a.Mime,
+				DecryptKey: base64.StdEncoding.EncodeToString(key),
+			})
+		}
 	}
 
 	c.store.InsertMessage(store.StoredMessage{
-		ID:       msg.ID,
-		Sender:   msg.From,
-		Body:     body,
-		TS:       msg.TS,
-		Room:     msg.Room,
-		Epoch:    msg.Epoch,
-		ReplyTo:  replyTo,
-		Mentions: mentions,
+		ID:          msg.ID,
+		Sender:      msg.From,
+		Body:        body,
+		TS:          msg.TS,
+		Room:        msg.Room,
+		Epoch:       msg.Epoch,
+		ReplyTo:     replyTo,
+		Mentions:    mentions,
+		Attachments: attachments,
 	})
 }
 
@@ -59,14 +76,24 @@ func (c *Client) storeDMMessage(raw json.RawMessage) {
 	replyTo := ""
 	var mentions []string
 
+	var attachments []store.StoredAttachment
+
 	payload, err := c.DecryptDMMessage(msg.WrappedKeys, msg.Payload)
 	if err == nil {
 		body = payload.Body
 		replyTo = payload.ReplyTo
 		mentions = payload.Mentions
-
-		// Replay detection
 		c.checkReplay(msg.From, payload.DeviceID, "", msg.Conversation, payload.Seq)
+
+		for _, a := range payload.Attachments {
+			attachments = append(attachments, store.StoredAttachment{
+				FileID:     a.FileID,
+				Name:       a.Name,
+				Size:       a.Size,
+				Mime:       a.Mime,
+				DecryptKey: a.FileKey, // DMs: already base64-encoded per-file K_file
+			})
+		}
 	}
 
 	c.store.InsertMessage(store.StoredMessage{
@@ -77,6 +104,7 @@ func (c *Client) storeDMMessage(raw json.RawMessage) {
 		Conversation: msg.Conversation,
 		ReplyTo:      replyTo,
 		Mentions:     mentions,
+		Attachments:  attachments,
 	})
 }
 

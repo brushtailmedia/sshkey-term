@@ -45,25 +45,30 @@ var (
 // message payload.
 //
 // Returns the server-assigned file_id.
-func (c *Client) UploadFile(localPath, room, conversation string) (string, error) {
+// UploadFile encrypts a file with the current room epoch key and uploads it.
+// Returns the server-assigned file_id and the epoch used for encryption, so
+// the caller can stamp FileEpoch on the attachment metadata correctly (avoids
+// a race if the epoch rotates between upload and send).
+func (c *Client) UploadFile(localPath, room, conversation string) (fileID string, epoch int64, err error) {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
-		return "", fmt.Errorf("read file: %w", err)
+		return "", 0, fmt.Errorf("read file: %w", err)
 	}
 
 	if room == "" {
-		return "", fmt.Errorf("UploadFile requires a room; for DM attachments use UploadDMFile")
+		return "", 0, fmt.Errorf("UploadFile requires a room; for DM attachments use UploadDMFile")
 	}
 
 	c.mu.RLock()
-	epoch := c.currentEpoch[room]
+	epoch = c.currentEpoch[room]
 	encKey := c.epochKeys[room][epoch]
 	c.mu.RUnlock()
 	if encKey == nil {
-		return "", fmt.Errorf("no epoch key for room %s", room)
+		return "", 0, fmt.Errorf("no epoch key for room %s", room)
 	}
 
-	return c.uploadEncrypted(data, encKey, room, conversation)
+	fileID, err = c.uploadEncrypted(data, encKey, room, conversation)
+	return fileID, epoch, err
 }
 
 // UploadDMFile encrypts a file with the given per-file key (K_file) and

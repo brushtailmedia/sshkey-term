@@ -94,15 +94,16 @@ func (c *Client) SendRoomMessageFile(room, body, filePath, replyTo string, menti
 	if err != nil {
 		return fmt.Errorf("stat: %w", err)
 	}
-	fileID, err := c.UploadFile(filePath, room, "")
+	fileID, uploadEpoch, err := c.UploadFile(filePath, room, "")
 	if err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
 	attachment := protocol.Attachment{
-		FileID: fileID,
-		Name:   filepath.Base(filePath),
-		Size:   info.Size(),
-		Mime:   sniffMimeType(filePath),
+		FileID:    fileID,
+		Name:      filepath.Base(filePath),
+		Size:      info.Size(),
+		Mime:      sniffMimeType(filePath),
+		FileEpoch: uploadEpoch, // pin to the epoch used for encryption
 	}
 	return c.SendRoomMessageFull(room, body, replyTo, mentions, []protocol.Attachment{attachment})
 }

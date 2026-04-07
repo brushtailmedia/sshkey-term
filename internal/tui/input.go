@@ -32,6 +32,7 @@ type InputModel struct {
 	completion     *CompletionModel  // active completion popup
 	members        []MemberEntry    // current room/conv members for @completion
 	pendingCmd     *SlashCommandMsg // slash command needing app-level handling
+	didSend        bool             // true after a message was sent (cleared by DidSend)
 }
 
 func NewInput() InputModel {
@@ -99,6 +100,7 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, conversation 
 			i.handleCommand(text, c, room, conversation)
 			i.textInput.Reset()
 			i.clearReply()
+			i.didSend = true
 			return i, nil
 		}
 
@@ -110,6 +112,7 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, conversation 
 			} else if conversation != "" {
 				c.SendDMMessage(conversation, text, i.replyTo, mentions)
 			}
+			i.didSend = true
 		}
 
 		i.textInput.Reset()
@@ -192,6 +195,14 @@ func (i *InputModel) PendingCommand() *SlashCommandMsg {
 	cmd := i.pendingCmd
 	i.pendingCmd = nil
 	return cmd
+}
+
+// DidSend returns true if a message or command was sent during the last Update.
+// Resets the flag on read.
+func (i *InputModel) DidSend() bool {
+	sent := i.didSend
+	i.didSend = false
+	return sent
 }
 
 // MemberEntry holds a username (nanoid) and display name for @completion.

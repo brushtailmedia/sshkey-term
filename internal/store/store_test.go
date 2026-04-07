@@ -257,12 +257,21 @@ func TestMessages_LimitRespected(t *testing.T) {
 func TestMessages_Delete(t *testing.T) {
 	s := openTestStore(t)
 	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "secret", TS: 1, Room: "general"})
-	if err := s.DeleteMessage("m1"); err != nil {
+	if _, err := s.DeleteMessage("m1", "alice"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	got, _ := s.GetRoomMessages("general", 10)
-	if len(got) != 0 {
-		t.Errorf("deleted message should not appear: %v", got)
+	if len(got) != 1 {
+		t.Fatalf("soft-deleted message should still be in results, got %d", len(got))
+	}
+	if !got[0].Deleted {
+		t.Error("message should be marked as deleted")
+	}
+	if got[0].DeletedBy != "alice" {
+		t.Errorf("deleted_by = %q, want alice", got[0].DeletedBy)
+	}
+	if got[0].Body != "" {
+		t.Errorf("body should be cleared, got %q", got[0].Body)
 	}
 }
 

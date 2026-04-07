@@ -2,8 +2,20 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"strings"
 )
+
+// StoredAttachment holds attachment metadata persisted in the local DB.
+// Includes the decrypt key so files can be downloaded and decrypted from
+// DB-loaded messages without re-deriving keys.
+type StoredAttachment struct {
+	FileID     string `json:"file_id"`
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	Mime       string `json:"mime"`
+	DecryptKey string `json:"decrypt_key"` // base64-encoded symmetric key
+}
 
 // StoredMessage represents a message in the local DB.
 type StoredMessage struct {
@@ -16,15 +28,26 @@ type StoredMessage struct {
 	Epoch        int64
 	ReplyTo      string
 	Mentions     []string
+	Deleted      bool
+	DeletedBy    string
+	Attachments  []StoredAttachment
 }
 
 // InsertMessage stores a decrypted message.
 func (s *Store) InsertMessage(msg StoredMessage) error {
 	mentions := strings.Join(msg.Mentions, ",")
+	attachJSON := ""
+	hasAttach := 0
+	if len(msg.Attachments) > 0 {
+		if b, err := json.Marshal(msg.Attachments); err == nil {
+			attachJSON = string(b)
+			hasAttach = 1
+		}
+	}
 	_, err := s.db.Exec(`
-		INSERT OR IGNORE INTO messages (id, sender, body, ts, room, conversation, epoch, reply_to, mentions)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, msg.Sender, msg.Body, msg.TS, msg.Room, msg.Conversation, msg.Epoch, msg.ReplyTo, mentions,
+		INSERT OR IGNORE INTO messages (id, sender, body, ts, room, conversation, epoch, reply_to, mentions, has_attachments, attachments)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, msg.Sender, msg.Body, msg.TS, msg.Room, msg.Conversation, msg.Epoch, msg.ReplyTo, mentions, hasAttach, attachJSON,
 	)
 	return err
 }
@@ -32,7 +55,7 @@ func (s *Store) InsertMessage(msg StoredMessage) error {
 // GetRoomMessages returns messages for a room, ordered by timestamp ascending.
 func (s *Store) GetRoomMessages(room string, limit int) ([]StoredMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions
+		SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions, deleted, deleted_by, attachments
 		FROM messages WHERE room = ? ORDER BY rowid DESC LIMIT ?`,
 		room, limit,
 	)
@@ -56,7 +79,7 @@ func (s *Store) GetRoomMessages(room string, limit int) ([]StoredMessage, error)
 // GetConvMessages returns messages for a conversation, ordered by timestamp ascending.
 func (s *Store) GetConvMessages(convID string, limit int) ([]StoredMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions
+		SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions, deleted, deleted_by, attachments
 		FROM messages WHERE conversation = ? ORDER BY rowid DESC LIMIT ?`,
 		convID, limit,
 	)
@@ -83,14 +106,14 @@ func (s *Store) GetMessagesBefore(room, convID, beforeID string, limit int) ([]S
 
 	if room != "" {
 		rows, err = s.db.Query(`
-			SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions
+			SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions, deleted, deleted_by, attachments
 			FROM messages WHERE room = ? AND rowid < (SELECT rowid FROM messages WHERE id = ?)
 			ORDER BY rowid DESC LIMIT ?`,
 			room, beforeID, limit,
 		)
 	} else {
 		rows, err = s.db.Query(`
-			SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions
+			SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions, deleted, deleted_by, attachments
 			FROM messages WHERE conversation = ? AND rowid < (SELECT rowid FROM messages WHERE id = ?)
 			ORDER BY rowid DESC LIMIT ?`,
 			convID, beforeID, limit,
@@ -103,10 +126,29 @@ func (s *Store) GetMessagesBefore(room, convID, beforeID string, limit int) ([]S
 	return scanMessages(rows)
 }
 
-// DeleteMessage removes a message from the local DB.
-func (s *Store) DeleteMessage(id string) error {
-	_, err := s.db.Exec(`DELETE FROM messages WHERE id = ?`, id)
-	return err
+// DeleteMessage soft-deletes a message and hard-deletes its reactions.
+// Returns file IDs from stored attachments for cache cleanup.
+func (s *Store) DeleteMessage(id, deletedBy string) ([]string, error) {
+	// Read attachment file IDs before soft-deleting
+	var attachJSON string
+	s.db.QueryRow(`SELECT attachments FROM messages WHERE id = ?`, id).Scan(&attachJSON)
+
+	s.db.Exec(`DELETE FROM reactions WHERE message_id = ?`, id)
+	_, err := s.db.Exec(`UPDATE messages SET deleted = 1, deleted_by = ?, body = '' WHERE id = ?`,
+		deletedBy, id)
+
+	var fileIDs []string
+	if attachJSON != "" {
+		var atts []StoredAttachment
+		if json.Unmarshal([]byte(attachJSON), &atts) == nil {
+			for _, a := range atts {
+				if a.FileID != "" {
+					fileIDs = append(fileIDs, a.FileID)
+				}
+			}
+		}
+	}
+	return fileIDs, err
 }
 
 // StoredReaction represents a decrypted reaction in the local DB.
@@ -176,10 +218,10 @@ func (s *Store) GetReactionsForMessages(messageIDs []string) ([]StoredReaction, 
 func (s *Store) SearchMessages(query string, limit int) ([]StoredMessage, error) {
 	// Try FTS5 first
 	rows, err := s.db.Query(`
-		SELECT m.id, m.sender, m.body, m.ts, m.room, m.conversation, m.epoch, m.reply_to, m.mentions
+		SELECT m.id, m.sender, m.body, m.ts, m.room, m.conversation, m.epoch, m.reply_to, m.mentions, m.deleted, m.deleted_by, m.attachments
 		FROM messages_fts f
 		JOIN messages m ON f.rowid = m.rowid
-		WHERE messages_fts MATCH ?
+		WHERE messages_fts MATCH ? AND m.deleted = 0
 		ORDER BY m.ts DESC LIMIT ?`,
 		query, limit,
 	)
@@ -191,9 +233,9 @@ func (s *Store) SearchMessages(query string, limit int) ([]StoredMessage, error)
 	// FTS5 not available — fall back to LIKE
 	likeQuery := "%" + query + "%"
 	rows, err = s.db.Query(`
-		SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions
+		SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions, deleted, deleted_by, attachments
 		FROM messages
-		WHERE body LIKE ? OR sender LIKE ?
+		WHERE deleted = 0 AND (body LIKE ? OR sender LIKE ?)
 		ORDER BY ts DESC LIMIT ?`,
 		likeQuery, likeQuery, limit,
 	)
@@ -209,12 +251,18 @@ func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 	for rows.Next() {
 		var m StoredMessage
 		var mentionsStr string
-		err := rows.Scan(&m.ID, &m.Sender, &m.Body, &m.TS, &m.Room, &m.Conversation, &m.Epoch, &m.ReplyTo, &mentionsStr)
+		var deleted int
+		var attachJSON string
+		err := rows.Scan(&m.ID, &m.Sender, &m.Body, &m.TS, &m.Room, &m.Conversation, &m.Epoch, &m.ReplyTo, &mentionsStr, &deleted, &m.DeletedBy, &attachJSON)
 		if err != nil {
 			return nil, err
 		}
+		m.Deleted = deleted != 0
 		if mentionsStr != "" {
 			m.Mentions = strings.Split(mentionsStr, ",")
+		}
+		if attachJSON != "" {
+			json.Unmarshal([]byte(attachJSON), &m.Attachments)
 		}
 		msgs = append(msgs, m)
 	}

@@ -608,6 +608,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd != nil {
 				cmds = append(cmds, cmd)
 			}
+			// Clear status bar error on send (not on typing)
+			if a.input.DidSend() {
+				a.statusBar.ClearError()
+			}
 			// Check for pending slash commands
 			if sc := a.input.PendingCommand(); sc != nil {
 				a.handleSlashCommand(sc)
@@ -958,6 +962,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case MessageAction:
+		a.statusBar.ClearError()
 		switch msg.Action {
 		case "reply":
 			preview := msg.Msg.Body
@@ -1707,7 +1712,7 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 	case "deleted":
 		var m protocol.Deleted
 		json.Unmarshal(msg.Raw, &m)
-		a.messages.RemoveMessage(m.ID)
+		a.messages.MarkDeleted(m.ID, m.DeletedBy)
 	case "user_retired":
 		var m protocol.UserRetired
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {

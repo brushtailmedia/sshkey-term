@@ -33,7 +33,6 @@ type StatusBarModel struct {
 	reconnecting bool
 	reconnAttempt int
 	errorMsg     string
-	errorTime    time.Time
 }
 
 func NewStatusBar() StatusBarModel {
@@ -64,7 +63,10 @@ func (s *StatusBarModel) SetReconnecting(attempt int, nextRetry time.Duration) {
 
 func (s *StatusBarModel) SetError(msg string) {
 	s.errorMsg = msg
-	s.errorTime = time.Now()
+}
+
+func (s *StatusBarModel) ClearError() {
+	s.errorMsg = ""
 }
 
 func (s StatusBarModel) View(width int) string {
@@ -95,9 +97,9 @@ func (s StatusBarModel) View(width int) string {
 		right = statusBarStyle.Render(right + " ") + statusConnected
 	}
 
-	// Error (fades after 5 seconds)
+	// Error (persists until next user action clears it)
 	mid := ""
-	if s.errorMsg != "" && time.Since(s.errorTime) < 5*time.Second {
+	if s.errorMsg != "" {
 		mid = errorStyle.Render("  ⚠ " + s.errorMsg)
 	}
 

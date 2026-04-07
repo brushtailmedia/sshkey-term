@@ -70,6 +70,8 @@ type DisplayMessage struct {
 	Attachments     []DisplayAttachment
 	IsSystem        bool
 	SystemText      string
+	Deleted         bool
+	DeletedBy       string
 }
 
 // DisplayReactions returns the emoji→count map for rendering, counting the
@@ -232,6 +234,19 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 		if c != nil {
 			from = c.DisplayName(s.Sender)
 		}
+		var attachments []DisplayAttachment
+		for _, a := range s.Attachments {
+			key, _ := base64.StdEncoding.DecodeString(a.DecryptKey)
+			attachments = append(attachments, DisplayAttachment{
+				FileID:     a.FileID,
+				Name:       a.Name,
+				Size:       a.Size,
+				Mime:       a.Mime,
+				IsImage:    isImageMime(a.Mime),
+				DecryptKey: key,
+			})
+		}
+
 		m.messages = append(m.messages, DisplayMessage{
 			ID:           s.ID,
 			FromID:       s.Sender,
@@ -242,6 +257,9 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 			Conversation: s.Conversation,
 			ReplyTo:      s.ReplyTo,
 			Mentions:     s.Mentions,
+			Deleted:      s.Deleted,
+			DeletedBy:    s.DeletedBy,
+			Attachments:  attachments,
 		})
 		if s.ID != "" {
 			msgIDs = append(msgIDs, s.ID)
@@ -550,10 +568,26 @@ func (m *MessagesModel) AddSystemMessage(text string) {
 	})
 }
 
-func (m *MessagesModel) RemoveMessage(id string) {
+// MarkDeleted flags a message as deleted in-place. The message stays in the
+// list and renders as a tombstone. Reactions are cleaned up.
+// File cleanup is handled by the client layer (store.DeleteMessage returns
+// file IDs from the DB, client deletes cached files).
+func (m *MessagesModel) MarkDeleted(id, deletedBy string) {
 	for i, msg := range m.messages {
 		if msg.ID == id {
-			m.messages = append(m.messages[:i], m.messages[i+1:]...)
+			// Clean up reaction tracker entries
+			for _, byEmoji := range msg.ReactionsByUser {
+				for _, ids := range byEmoji {
+					for _, rid := range ids {
+						delete(reactionTracker, rid)
+					}
+				}
+			}
+			m.messages[i].Deleted = true
+			m.messages[i].DeletedBy = deletedBy
+			m.messages[i].Body = ""
+			m.messages[i].ReactionsByUser = nil
+			m.messages[i].Attachments = nil
 			return
 		}
 	}
@@ -731,49 +765,49 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 			m.cursor++
 		}
 	case "r": // reply
-		if sel := m.SelectedMessage(); sel != nil {
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "reply", Msg: *sel}
 			}
 		}
 	case "d": // delete
-		if sel := m.SelectedMessage(); sel != nil {
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "delete", Msg: *sel}
 			}
 		}
 	case "p": // pin
-		if sel := m.SelectedMessage(); sel != nil && m.room != "" {
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted && m.room != "" {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "pin", Msg: *sel}
 			}
 		}
 	case "c": // copy
-		if sel := m.SelectedMessage(); sel != nil {
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "copy", Msg: *sel}
 			}
 		}
 	case "o": // open attachment
-		if sel := m.SelectedMessage(); sel != nil && len(sel.Attachments) > 0 {
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted && len(sel.Attachments) > 0 {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "open_attachment", Msg: *sel}
 			}
 		}
 	case "s": // save attachment
-		if sel := m.SelectedMessage(); sel != nil && len(sel.Attachments) > 0 {
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted && len(sel.Attachments) > 0 {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "save_attachment", Msg: *sel}
 			}
 		}
 	case "e": // react (emoji picker)
-		if sel := m.SelectedMessage(); sel != nil {
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "react", Msg: *sel}
 			}
 		}
 	case "u": // unreact — remove one of current user's reactions
-		if sel := m.SelectedMessage(); sel != nil {
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
 			return m, func() tea.Msg {
 				// Empty Data means "pick first emoji user has reacted with";
 				// app handler resolves to the specific reaction_id.
@@ -797,7 +831,7 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 			}
 		}
 	case "enter": // open context menu on selected message (keyboard path)
-		if sel := m.SelectedMessage(); sel != nil {
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "open_menu", Msg: *sel}
 			}
@@ -849,6 +883,19 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 
 		if msg.IsSystem {
 			line := systemMsgStyle.Render(" ── " + msg.SystemText + " ──")
+			b.WriteString(line)
+			prevSender = ""
+			prevTS = 0
+		} else if msg.Deleted {
+			tombstone := "message deleted"
+			if msg.DeletedBy != "" && msg.DeletedBy != msg.FromID {
+				deleterName := msg.DeletedBy
+				if m.resolveName != nil {
+					deleterName = m.resolveName(msg.DeletedBy)
+				}
+				tombstone = "message removed by " + deleterName
+			}
+			line := systemMsgStyle.Render(" ── " + tombstone + " ──")
 			b.WriteString(line)
 			prevSender = ""
 			prevTS = 0
@@ -1004,6 +1051,9 @@ func formatSize(b int64) string {
 func (m *MessagesModel) replyPreview(msgID string) string {
 	for _, msg := range m.messages {
 		if msg.ID == msgID {
+			if msg.Deleted {
+				return "Deleted message"
+			}
 			preview := msg.From + ": " + msg.Body
 			if len(preview) > 60 {
 				preview = preview[:57] + "..."

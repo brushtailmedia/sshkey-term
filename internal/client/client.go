@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -469,7 +470,14 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 	case "deleted":
 		var d protocol.Deleted
 		if err := json.Unmarshal(raw, &d); err == nil && c.store != nil {
-			c.store.DeleteMessage(d.ID)
+			fileIDs, _ := c.store.DeleteMessage(d.ID, d.DeletedBy)
+			// Clean up locally cached files
+			if len(fileIDs) > 0 && c.cfg.DataDir != "" {
+				filesDir := filepath.Join(c.cfg.DataDir, "files")
+				for _, fid := range fileIDs {
+					os.Remove(filepath.Join(filesDir, fid))
+				}
+			}
 		}
 	case "sync_batch":
 		c.handleSyncBatchKeys(raw)

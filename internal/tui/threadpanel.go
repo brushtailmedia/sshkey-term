@@ -105,19 +105,32 @@ func (t ThreadPanelModel) View(width, height int) string {
 	for i := start; i < len(t.messages) && i < start+visibleHeight; i++ {
 		msg := t.messages[i]
 
-		ts := time.Unix(msg.TS, 0).Format("3:04 PM")
-		from := usernameStyle.Render(msg.From)
-		line := " " + from + "  " + timestampStyle.Render(ts) + "\n"
+		var line string
+		if msg.Deleted {
+			tombstone := "message deleted"
+			if msg.DeletedBy != "" && msg.DeletedBy != msg.FromID {
+				tombstone = "message removed by " + msg.DeletedBy
+			}
+			line = systemMsgStyle.Render(" ── " + tombstone + " ──")
+		} else {
+			ts := time.Unix(msg.TS, 0).Format("3:04 PM")
+			from := usernameStyle.Render(msg.From)
+			line = " " + from + "  " + timestampStyle.Render(ts) + "\n"
 
-		body := " " + msg.Body
-		if len(body) > width-4 {
-			body = body[:width-7] + "..."
+			body := " " + msg.Body
+			if len(body) > width-4 {
+				body = body[:width-7] + "..."
+			}
+			line += body
 		}
-		line += body
 
 		if i == 0 {
 			// Root message — subtle indicator
-			line = " " + searchHeaderStyle.Render("root") + "\n" + line
+			label := "root"
+			if msg.Deleted {
+				label = "root · deleted"
+			}
+			line = " " + searchHeaderStyle.Render(label) + "\n" + line
 		}
 
 		if i == t.cursor {
