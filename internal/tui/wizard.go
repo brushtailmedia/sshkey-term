@@ -194,13 +194,9 @@ func (w WizardModel) updateWelcome(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (w WizardModel) updateChooseName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
-		name := strings.TrimSpace(w.nameInput.Value())
-		if name == "" {
-			w.err = "Name cannot be empty"
-			return w, nil
-		}
-		if len(name) < 2 {
-			w.err = "Name must be at least 2 characters"
+		name, err := ValidateDisplayName(w.nameInput.Value())
+		if err != nil {
+			w.err = err.Error()
 			return w, nil
 		}
 		w.chosenName = name

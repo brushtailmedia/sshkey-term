@@ -142,19 +142,28 @@ func (s SettingsModel) Update(msg tea.KeyMsg) (SettingsModel, tea.Cmd) {
 		case "enter":
 			value := strings.TrimSpace(s.editInput.Value())
 			action := s.editAction
-			s.editing = false
-			s.editInput.Blur()
 
 			switch action {
 			case "edit_name":
+				validated, err := ValidateDisplayName(value)
+				if err != nil {
+					// Stay in edit mode so user can fix it
+					return s, nil
+				}
+				s.editing = false
+				s.editInput.Blur()
 				return s, func() tea.Msg {
-					return ProfileUpdateMsg{DisplayName: value}
+					return ProfileUpdateMsg{DisplayName: validated}
 				}
 			case "edit_status":
+				s.editing = false
+				s.editInput.Blur()
 				return s, func() tea.Msg {
 					return StatusUpdateMsg{Text: value}
 				}
 			}
+			s.editing = false
+			s.editInput.Blur()
 			return s, nil
 		case "esc":
 			s.editing = false
