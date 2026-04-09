@@ -50,8 +50,10 @@ func TestPersistenceComprehensive(t *testing.T) {
 	// Wait for epoch rotation
 	time.Sleep(time.Second)
 
+	generalID := roomIDByName(t, alice, "general")
+
 	// Create a 1:1 DM
-	alice.CreateDM([]string{testutil.Bob.Username}, "")
+	alice.CreateDM([]string{testutil.Bob.UserID}, "")
 	raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 	var dmCreated protocol.DMCreated
 	json.Unmarshal(raw, &dmCreated)
@@ -68,7 +70,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 			t.Skip("no store")
 		}
 
-		room := "general"
+		room := generalID
 		epoch := alice.CurrentEpoch(room)
 		if epoch == 0 {
 			t.Skip("no epoch")
@@ -101,7 +103,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 	// 2. Epoch key dedup — storeEpochKey short-circuits when key already in memory
 	// =========================================================================
 	t.Run("epoch_key_dedup", func(t *testing.T) {
-		room := "general"
+		room := generalID
 		epoch := alice.CurrentEpoch(room)
 		if epoch == 0 {
 			t.Skip("no epoch")
@@ -158,7 +160,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 	// =========================================================================
 	t.Run("messages_stored_decrypted", func(t *testing.T) {
 		// Send a message so we have something in the DB
-		err := alice.SendRoomMessage("general", "persistence test body 12345", "", nil)
+		err := alice.SendRoomMessage(generalID, "persistence test body 12345", "", nil)
 		if err != nil {
 			t.Fatalf("send: %v", err)
 		}
@@ -170,7 +172,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 			t.Skip("no store")
 		}
 
-		msgs, err := st.GetRoomMessages("general", 100)
+		msgs, err := st.GetRoomMessages(generalID, 100)
 		if err != nil {
 			t.Fatalf("get messages: %v", err)
 		}
@@ -199,7 +201,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 		}
 
 		// Send a message, then react to it
-		err := alice.SendRoomMessage("general", "react to this", "", nil)
+		err := alice.SendRoomMessage(generalID, "react to this", "", nil)
 		if err != nil {
 			t.Fatalf("send: %v", err)
 		}
@@ -209,7 +211,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 		waitForType(t, aliceMessages, "message", 5*time.Second)
 
 		// Bob reacts
-		err = bob.SendRoomReaction("general", msg.ID, "👍")
+		err = bob.SendRoomReaction(generalID, msg.ID, "👍")
 		if err != nil {
 			t.Fatalf("react: %v", err)
 		}
@@ -227,7 +229,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 		if reactions[0].Emoji != "👍" {
 			t.Errorf("emoji = %q, want 👍", reactions[0].Emoji)
 		}
-		if reactions[0].User != testutil.Bob.Username {
+		if reactions[0].User != testutil.Bob.UserID {
 			t.Errorf("user = %q, want bob", reactions[0].User)
 		}
 
@@ -244,10 +246,10 @@ func TestPersistenceComprehensive(t *testing.T) {
 		}
 
 		// Store a read position manually (simulating sendReadReceipt)
-		st.StoreReadPosition("general", "msg_fake_123")
+		st.StoreReadPosition(generalID, "msg_fake_123")
 
 		// Read it back
-		lastRead, err := st.GetReadPosition("general")
+		lastRead, err := st.GetReadPosition(generalID)
 		if err != nil {
 			t.Fatalf("get read position: %v", err)
 		}
@@ -256,8 +258,8 @@ func TestPersistenceComprehensive(t *testing.T) {
 		}
 
 		// Overwrite
-		st.StoreReadPosition("general", "msg_fake_456")
-		lastRead, _ = st.GetReadPosition("general")
+		st.StoreReadPosition(generalID, "msg_fake_456")
+		lastRead, _ = st.GetReadPosition(generalID)
 		if lastRead != "msg_fake_456" {
 			t.Errorf("updated lastRead = %q, want msg_fake_456", lastRead)
 		}
@@ -276,14 +278,14 @@ func TestPersistenceComprehensive(t *testing.T) {
 
 		// Send several messages so local DB has content (pace to avoid rate limit)
 		for i := 0; i < 3; i++ {
-			alice.SendRoomMessage("general", "scrollback msg", "", nil)
+			alice.SendRoomMessage(generalID, "scrollback msg", "", nil)
 			waitForType(t, bobMessages, "message", 5*time.Second)
 			waitForType(t, aliceMessages, "message", 5*time.Second)
 			time.Sleep(250 * time.Millisecond)
 		}
 
 		// Get all messages from local DB (includes messages from earlier subtests)
-		allMsgs, err := st.GetRoomMessages("general", 200)
+		allMsgs, err := st.GetRoomMessages(generalID, 200)
 		if err != nil {
 			t.Fatalf("get messages: %v", err)
 		}
@@ -293,7 +295,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 
 		// Simulate scroll-back: get messages before the latest one
 		latestID := allMsgs[len(allMsgs)-1].ID
-		older, err := st.GetMessagesBefore("general", "", latestID, 10)
+		older, err := st.GetMessagesBefore(generalID, "", latestID, 10)
 		if err != nil {
 			t.Fatalf("get messages before: %v", err)
 		}
@@ -362,13 +364,13 @@ func TestPersistenceComprehensive(t *testing.T) {
 		// GetMessagesBefore with limit=100 should return < 100 results,
 		// signaling to the TUI that local is exhausted and server should
 		// be queried for the remainder.
-		allMsgs, _ := st.GetRoomMessages("general", 200)
+		allMsgs, _ := st.GetRoomMessages(generalID, 200)
 		if len(allMsgs) < 2 {
 			t.Skip("need at least 2 messages")
 		}
 		latestID := allMsgs[len(allMsgs)-1].ID
 
-		older, err := st.GetMessagesBefore("general", "", latestID, 100)
+		older, err := st.GetMessagesBefore(generalID, "", latestID, 100)
 		if err != nil {
 			t.Fatalf("get messages before: %v", err)
 		}
@@ -442,7 +444,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 		<-carolSynced
 
 		// Create group DM
-		alice.CreateDM([]string{testutil.Bob.Username, testutil.Carol.Username}, "Persist Group")
+		alice.CreateDM([]string{testutil.Bob.UserID, testutil.Carol.UserID}, "Persist Group")
 		raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 		var group protocol.DMCreated
 		json.Unmarshal(raw, &group)
@@ -504,7 +506,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 			t.Skip("no store")
 		}
 
-		room := "general"
+		room := generalID
 		epoch := alice.CurrentEpoch(room)
 
 		// Verify the epoch key is in local DB
@@ -588,7 +590,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 		}
 
 		// Bob sends a message, alice reacts, then alice unreacts
-		err := bob.SendRoomMessage("general", "unreact target", "", nil)
+		err := bob.SendRoomMessage(generalID, "unreact target", "", nil)
 		if err != nil {
 			t.Fatalf("send: %v", err)
 		}
@@ -597,7 +599,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 		json.Unmarshal(raw, &msg)
 		waitForType(t, bobMessages, "message", 5*time.Second)
 
-		err = alice.SendRoomReaction("general", msg.ID, "❤️")
+		err = alice.SendRoomReaction(generalID, msg.ID, "❤️")
 		if err != nil {
 			t.Fatalf("react: %v", err)
 		}
@@ -633,7 +635,7 @@ func TestPersistenceComprehensive(t *testing.T) {
 	// 12. Epoch rotation — both old and new keys work, DB has both
 	// =========================================================================
 	t.Run("epoch_rotation_dual_key", func(t *testing.T) {
-		room := "general"
+		room := generalID
 		oldEpoch := alice.CurrentEpoch(room)
 		if oldEpoch == 0 {
 			t.Skip("no epoch")

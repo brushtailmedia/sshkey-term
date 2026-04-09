@@ -41,7 +41,7 @@ func (v *VerifyModel) Show(targetUser string, c *client.Client) {
 	v.displayName = c.DisplayName(targetUser)
 
 	// Can't verify yourself
-	if targetUser == c.Username() {
+	if targetUser == c.UserID() {
 		v.err = "Cannot verify yourself"
 		return
 	}
@@ -70,7 +70,7 @@ func (v *VerifyModel) Show(targetUser string, c *client.Client) {
 		return
 	}
 
-	myProfile := c.Profile(c.Username())
+	myProfile := c.Profile(c.UserID())
 	if myProfile == nil {
 		return
 	}

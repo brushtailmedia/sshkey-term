@@ -43,28 +43,30 @@ func TestTUIDisplayNameResolution(t *testing.T) {
 	<-bobSynced
 	time.Sleep(time.Second)
 
+	generalID := roomIDByName(t, alice, "general")
+
 	// --- Test 1: DisplayName resolver returns display name, not nanoid ---
 	t.Run("resolver_returns_display_name", func(t *testing.T) {
-		aliceDisplay := alice.DisplayName(alice.Username())
-		bobDisplay := alice.DisplayName(bob.Username())
+		aliceDisplay := alice.DisplayName(alice.UserID())
+		bobDisplay := alice.DisplayName(bob.UserID())
 
-		if aliceDisplay == alice.Username() {
+		if aliceDisplay == alice.UserID() {
 			t.Errorf("alice display name IS the nanoid: %q", aliceDisplay)
 		}
-		if bobDisplay == bob.Username() {
+		if bobDisplay == bob.UserID() {
 			t.Errorf("bob display name IS the nanoid: %q", bobDisplay)
 		}
-		if !strings.HasPrefix(alice.Username(), "usr_") {
-			t.Errorf("alice username doesn't look like nanoid: %q", alice.Username())
+		if !strings.HasPrefix(alice.UserID(), "usr_") {
+			t.Errorf("alice username doesn't look like nanoid: %q", alice.UserID())
 		}
 
-		t.Logf("alice: %s → %s", alice.Username(), aliceDisplay)
-		t.Logf("bob: %s → %s", bob.Username(), bobDisplay)
+		t.Logf("alice: %s → %s", alice.UserID(), aliceDisplay)
+		t.Logf("bob: %s → %s", bob.UserID(), bobDisplay)
 	})
 
 	// --- Test 2: AddRoomMessage resolves From to display name ---
 	t.Run("message_from_is_display_name", func(t *testing.T) {
-		err := alice.SendRoomMessage("general", "display name test", "", nil)
+		err := alice.SendRoomMessage(generalID, "display name test", "", nil)
 		if err != nil {
 			t.Fatalf("send: %v", err)
 		}
@@ -81,7 +83,7 @@ func TestTUIDisplayNameResolution(t *testing.T) {
 
 		// Simulate TUI AddRoomMessage
 		m := tui.NewMessages()
-		m.SetContext("general", "")
+		m.SetContext(generalID, "")
 		m.AddRoomMessage(msg, bob)
 
 		// The displayed message should use display name
@@ -101,12 +103,12 @@ func TestTUIDisplayNameResolution(t *testing.T) {
 
 	// --- Test 3: Mention completion uses display names ---
 	t.Run("mention_completion_display_name", func(t *testing.T) {
-		aliceDisplay := alice.DisplayName(alice.Username())
-		bobDisplay := bob.DisplayName(bob.Username())
+		aliceDisplay := alice.DisplayName(alice.UserID())
+		bobDisplay := bob.DisplayName(bob.UserID())
 
 		members := []tui.MemberEntry{
-			{Username: alice.Username(), DisplayName: aliceDisplay},
-			{Username: bob.Username(), DisplayName: bobDisplay},
+			{UserID: alice.UserID(), DisplayName: aliceDisplay},
+			{UserID: bob.UserID(), DisplayName: bobDisplay},
 		}
 
 		// Type @<first letter of bob's display name>
@@ -136,21 +138,21 @@ func TestTUIDisplayNameResolution(t *testing.T) {
 
 	// --- Test 4: ExtractMentions returns nanoid from @displayName ---
 	t.Run("extract_mentions_returns_nanoid", func(t *testing.T) {
-		bobDisplay := bob.DisplayName(bob.Username())
+		bobDisplay := bob.DisplayName(bob.UserID())
 		body := "hey @" + bobDisplay + " check this"
 
 		input := tui.NewInput()
 		input.SetMembers([]tui.MemberEntry{
-			{Username: alice.Username(), DisplayName: alice.DisplayName(alice.Username())},
-			{Username: bob.Username(), DisplayName: bobDisplay},
+			{UserID: alice.UserID(), DisplayName: alice.DisplayName(alice.UserID())},
+			{UserID: bob.UserID(), DisplayName: bobDisplay},
 		})
 
 		mentions := input.ExtractMentions(body)
 		if len(mentions) != 1 {
 			t.Fatalf("expected 1 mention, got %d", len(mentions))
 		}
-		if mentions[0] != bob.Username() {
-			t.Errorf("mention = %q, want %q (nanoid)", mentions[0], bob.Username())
+		if mentions[0] != bob.UserID() {
+			t.Errorf("mention = %q, want %q (nanoid)", mentions[0], bob.UserID())
 		}
 
 		t.Logf("extracted @%s → %s", bobDisplay, mentions[0])
@@ -176,7 +178,7 @@ func TestTUIWithPreSeededDB(t *testing.T) {
 	defer st.Close()
 
 	// Verify seeded messages have nanoid senders
-	msgs, err := st.GetRoomMessages("general", 100)
+	msgs, err := st.GetRoomMessages(testutil.TestRoomID, 100)
 	if err != nil {
 		t.Fatalf("get messages: %v", err)
 	}
@@ -194,7 +196,7 @@ func TestTUIWithPreSeededDB(t *testing.T) {
 	}
 
 	// Verify epoch key was seeded
-	key, _ := st.GetEpochKey("general", 1)
+	key, _ := st.GetEpochKey(testutil.TestRoomID, 1)
 	if key == nil {
 		t.Error("epoch key not seeded")
 	}
@@ -218,10 +220,12 @@ func TestTUIErrorRendering(t *testing.T) {
 	defer alice.Close()
 	<-aliceSynced
 
+	generalID := roomIDByName(t, alice, "general")
+
 	// --- Test: username_taken error message is user-friendly ---
 	t.Run("username_taken_error", func(t *testing.T) {
 		// Try to set display name to Bob's name (should fail)
-		bobDisplay := alice.DisplayName(testutil.Bob.Username)
+		bobDisplay := alice.DisplayName(testutil.Bob.UserID)
 		alice.Enc().Encode(protocol.SetProfile{
 			Type:        "set_profile",
 			DisplayName: bobDisplay,
@@ -249,7 +253,7 @@ func TestTUIErrorRendering(t *testing.T) {
 			Type:     "upload_start",
 			UploadID: uploadID,
 			Size:     100,
-			Room:     "general",
+			Room:     generalID,
 			// Missing content_hash
 		})
 

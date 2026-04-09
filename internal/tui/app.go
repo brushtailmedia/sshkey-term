@@ -62,9 +62,13 @@ type App struct {
 	memberPanel MemberPanelModel
 	verify      VerifyModel
 	keyWarning  KeyWarningModel
-	quitConfirm QuitConfirmModel
-	retireConfirm RetireConfirmModel
-	deviceRevoked DeviceRevokedModel
+	quitConfirm       QuitConfirmModel
+	retireConfirm     RetireConfirmModel
+	leaveConfirm      LeaveConfirmModel
+	leaveRoomConfirm  LeaveRoomConfirmModel
+	deleteDMConfirm   DeleteDMConfirmModel
+	deleteGroupConfirm DeleteGroupConfirmModel
+	deviceRevoked     DeviceRevokedModel
 	deviceMgr     DeviceMgrModel
 	quickSwitch QuickSwitchModel
 	threadPanel ThreadPanelModel
@@ -88,7 +92,33 @@ type App struct {
 	passphrase         PassphraseModel
 	passphraseCh       chan []byte
 	passphraseCache    map[string][]byte // keyPath -> passphrase
+
+	// pendingCreateDM tracks an in-flight create_dm so the client can
+	// transparently retry if the server returns server_busy (a cleanup
+	// mutex was held for a microsecond by a concurrent leave_dm). Single
+	// field rather than a map because the user can only kick off one
+	// create_dm at a time via the newconv dialog.
+	pendingCreateDM pendingCreateDMState
 }
+
+// pendingCreateDMState records a create_dm we have sent and are waiting
+// on a response for, along with how many automatic retries remain if
+// the response is server_busy.
+type pendingCreateDMState struct {
+	other   string
+	retries int
+}
+
+// maxCreateDMAutoRetries caps the number of silent retries on server_busy
+// before the error is surfaced to the user. Cleanup holds the mutex for
+// microseconds in the common case; 3 retries at ~80ms each should cover
+// any realistic contention without the user noticing.
+const maxCreateDMAutoRetries = 3
+
+// createDMRetryDelay is how long to wait before re-sending create_dm
+// after a server_busy response. Long enough that cleanup will finish,
+// short enough to feel instant to the user.
+const createDMRetryDelay = 80
 
 // Focus tracks which panel has keyboard focus.
 type Focus int
@@ -272,6 +302,34 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
+		// Leave confirmation intercepts all keys
+		if a.leaveConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.leaveConfirm, cmd = a.leaveConfirm.Update(msg)
+			return a, cmd
+		}
+
+		// Leave room confirmation intercepts all keys
+		if a.leaveRoomConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.leaveRoomConfirm, cmd = a.leaveRoomConfirm.Update(msg)
+			return a, cmd
+		}
+
+		// Delete-DM confirmation intercepts all keys
+		if a.deleteDMConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.deleteDMConfirm, cmd = a.deleteDMConfirm.Update(msg)
+			return a, cmd
+		}
+
+		// Delete-group confirmation intercepts all keys
+		if a.deleteGroupConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.deleteGroupConfirm, cmd = a.deleteGroupConfirm.Update(msg)
+			return a, cmd
+		}
+
 		// Device revoked dialog intercepts all keys
 		if a.deviceRevoked.IsVisible() {
 			var cmd tea.Cmd
@@ -441,9 +499,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.cfg.DataDir = filepath.Join(a.configDir, srv.Host)
 
 				// Clear UI state
-				a.messages.SetContext("", "")
+				a.messages.SetContext("", "", "")
 				a.sidebar.SetRooms(nil)
-				a.sidebar.SetConversations(nil)
+				a.sidebar.SetGroups(nil)
 				a.pinnedBar = PinnedBarModel{}
 				a.statusBar.SetError("Switching to " + srv.Name + "...")
 				a.statusBar.SetConnected(false)
@@ -457,7 +515,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+m":
 			a.memberPanel.Toggle()
 			if a.memberPanel.IsVisible() {
-				a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
+				a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
 				// Request actual room membership from server (lazy)
 				if a.messages.room != "" && a.client != nil {
 					a.client.RequestRoomMembers(a.messages.room)
@@ -477,7 +535,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+,":
 			username := ""
 			if a.client != nil {
-				username = a.client.Username()
+				username = a.client.UserID()
 			}
 			a.settings.Show(a.appConfig, a.configDir, username, a.serverIdx)
 			return a, nil
@@ -488,8 +546,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.infoPanel.ShowRoom(a.messages.room, a.client, a.sidebar.online)
 					// Request actual room membership from server (lazy)
 					a.client.RequestRoomMembers(a.messages.room)
-				} else if a.messages.conversation != "" {
-					a.infoPanel.ShowConversation(a.messages.conversation, a.client, a.sidebar.online)
+				} else if a.messages.group != "" {
+					a.infoPanel.ShowGroup(a.messages.group, a.client, a.sidebar.online)
+				} else if a.messages.dm != "" {
+					a.infoPanel.ShowDM(a.messages.dm, a.client, a.sidebar.online)
 				}
 			}
 			return a, nil
@@ -503,7 +563,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// Collect all known users except self, skipping retired accounts
 				a.client.ForEachProfile(func(p *protocol.Profile) {
-					if p.User == a.client.Username() {
+					if p.User == a.client.UserID() {
 						return
 					}
 					if retired, _ := a.client.IsRetired(p.User); retired {
@@ -532,7 +592,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 
 		case "ctrl+k":
-			a.quickSwitch.Show(a.sidebar.rooms, a.sidebar.conversations, a.sidebar.resolveName)
+			a.quickSwitch.Show(a.sidebar.rooms, a.sidebar.groups, a.sidebar.resolveName, a.sidebar.resolveRoomName)
 			return a, nil
 
 		case "tab":
@@ -568,11 +628,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 			// Check if sidebar selected a new room/conversation
-			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedConv() != a.messages.conversation {
-				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedConv())
+			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group {
+				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
+				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
-					a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
+					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
 					if a.messages.room != "" && a.client != nil {
 						a.client.RequestRoomMembers(a.messages.room)
 					}
@@ -603,8 +664,37 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return a, nil
 				}
 			}
+			// Block input on archived contexts (user has /leave'd a room or
+			// group). Allow navigation keys to move focus away. Slash
+			// commands like /delete still work because we explicitly let
+			// "enter" through and the input filters slash commands
+			// separately.
+			if a.messages.IsLeft() {
+				switch msg.String() {
+				case "tab", "shift+tab", "up", "down", "left", "right":
+					// fall through
+				case "enter":
+					// Only allow slash commands (start with /), block normal sends
+					text := strings.TrimSpace(a.input.Value())
+					if !strings.HasPrefix(text, "/") {
+						label := "context"
+						switch {
+						case a.messages.room != "":
+							label = "room"
+						case a.messages.group != "":
+							label = "group"
+						}
+						a.statusBar.SetError("You left this " + label + " — type /delete to remove from your view")
+						return a, nil
+					}
+					// fall through for slash commands
+				default:
+					// Allow typing so the user can compose /delete
+					// fall through
+				}
+			}
 			var cmd tea.Cmd
-			a.input, cmd = a.input.Update(msg, a.client, a.messages.room, a.messages.conversation)
+			a.input, cmd = a.input.Update(msg, a.client, a.messages.room, a.messages.group, a.messages.dm)
 			if cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -656,13 +746,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.memberMenu.Show(msg.User, a.resolveDisplayName(msg.User), 0, 0)
 		case "message":
 			if a.client != nil {
-				a.client.CreateDM([]string{msg.User}, "")
+				a.client.CreateGroup([]string{msg.User}, "")
 			}
 		case "create_group":
 			if a.client != nil {
 				var allMembers []string
 				a.client.ForEachProfile(func(p *protocol.Profile) {
-					if p.User == a.client.Username() {
+					if p.User == a.client.UserID() {
 						return
 					}
 					if retired, _ := a.client.IsRetired(p.User); retired {
@@ -772,6 +862,75 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, tea.Quit
 
+	case LeaveConfirmMsg:
+		// User confirmed /leave — send leave_group and wait for the server's
+		// "group_left" echo before touching local state. The confirmation
+		// handler (case "group_left" below) does the DB write, sidebar
+		// refresh, messages-view flip, and status bar update.
+		if a.client != nil && msg.Group != "" {
+			if err := a.client.Enc().Encode(map[string]string{
+				"type":  "leave_group",
+				"group": msg.Group,
+			}); err != nil {
+				a.statusBar.SetError("Leave failed: " + err.Error())
+			}
+		}
+		return a, nil
+
+	case LeaveRoomConfirmMsg:
+		// User confirmed /leave for a room — send leave_room and wait for
+		// the server's "room_left" echo (or "forbidden" error) before
+		// touching local state. Server is authoritative on the policy
+		// gate; if allow_self_leave_rooms is disabled the error path
+		// surfaces a status-bar message and nothing else changes.
+		if a.client != nil && msg.Room != "" {
+			if err := a.client.Enc().Encode(map[string]string{
+				"type": "leave_room",
+				"room": msg.Room,
+			}); err != nil {
+				a.statusBar.SetError("Leave failed: " + err.Error())
+			}
+		}
+		return a, nil
+
+	case DeleteDMConfirmMsg:
+		// User confirmed /delete on a 1:1 DM. Per dm_refactor.md, /delete
+		// is silent (the other party is never notified) and atomic in
+		// the sense that we wait for the server's dm_left echo before
+		// touching local state. The echo arrives via the dm_left case
+		// below, which calls into client.go to purge local messages and
+		// then drops the sidebar entry here.
+		//
+		// Server-busy retries are NOT auto-handled — if the server
+		// returns server_busy because a cleanup is in progress, the
+		// status bar will surface the error and the user can re-issue.
+		if a.client != nil && msg.DM != "" {
+			if err := a.client.Enc().Encode(map[string]string{
+				"type": "leave_dm",
+				"dm":   msg.DM,
+			}); err != nil {
+				a.statusBar.SetError("Delete failed: " + err.Error())
+			}
+		}
+		return a, nil
+
+	case DeleteGroupConfirmMsg:
+		// User confirmed /delete on a group DM. Send delete_group and
+		// wait for the server's group_deleted echo before touching local
+		// state. The echo arrives via the group_deleted case below,
+		// which is handled by both client.go (purge messages, mark left)
+		// and here (drop sidebar entry, reset active context).
+		//
+		// Idempotent: if the user has already left the group via /leave,
+		// the server still records the deletion intent and echoes back,
+		// so the same purge path runs.
+		if a.client != nil && msg.Group != "" {
+			if err := a.client.DeleteGroup(msg.Group); err != nil {
+				a.statusBar.SetError("Delete failed: " + err.Error())
+			}
+		}
+		return a, nil
+
 	case DeviceMgrRevokeMsg:
 		if a.client != nil {
 			if err := a.client.SendRevokeDevice(msg.DeviceID); err != nil {
@@ -832,15 +991,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// emoji on the target message (client-enforced de-dup; see
 			// PROTOCOL.md Reactions section — "Picking the same emoji
 			// twice in the emoji picker should be a no-op").
-			if msg.Target.UserHasReacted(a.client.Username(), msg.Emoji) {
+			if msg.Target.UserHasReacted(a.client.UserID(), msg.Emoji) {
 				a.statusBar.SetError("You already reacted with " + msg.Emoji)
 				return a, nil
 			}
 			var err error
 			if msg.Target.Room != "" {
 				err = a.client.SendRoomReaction(msg.Target.Room, msg.Target.ID, msg.Emoji)
-			} else if msg.Target.Conversation != "" {
-				err = a.client.SendDMReaction(msg.Target.Conversation, msg.Target.ID, msg.Emoji)
+			} else if msg.Target.Group != "" {
+				err = a.client.SendGroupReaction(msg.Target.Group, msg.Target.ID, msg.Emoji)
 			}
 			if err != nil {
 				a.statusBar.SetError("React failed: " + err.Error())
@@ -849,12 +1008,34 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case CreateConvMsg:
-		// DM created — the dm_created response will come via ServerMsg
-		// and the sidebar will update
+		// User picked a new DM or group target from the newconv dialog.
+		// We send the appropriate create message here (rather than in the
+		// dialog closure) so we can track pending create_dm state for the
+		// auto-retry path on server_busy.
+		if a.client != nil {
+			if len(msg.Members) == 1 && msg.Name == "" {
+				a.pendingCreateDM = pendingCreateDMState{
+					other:   msg.Members[0],
+					retries: maxCreateDMAutoRetries,
+				}
+				a.client.CreateDM(msg.Members[0])
+			} else if len(msg.Members) > 0 {
+				a.client.CreateGroup(msg.Members, msg.Name)
+			}
+		}
+		return a, nil
+
+	case retryCreateDMMsg:
+		// Fired by a delayed tea.Cmd after we received server_busy for a
+		// create_dm. Retry only if the pending target matches and the
+		// user hasn't started a different create in the meantime.
+		if a.client != nil && a.pendingCreateDM.other == msg.other && a.pendingCreateDM.retries > 0 {
+			a.client.CreateDM(msg.other)
+		}
 		return a, nil
 
 	case QuickSwitchMsg:
-		// Switch to the selected room or conversation
+		// Switch to the selected room or group DM
 		if msg.Room != "" {
 			for i, r := range a.sidebar.rooms {
 				if r == msg.Room {
@@ -862,9 +1043,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
-		} else if msg.Conversation != "" {
-			for i, c := range a.sidebar.conversations {
-				if c.ID == msg.Conversation {
+		} else if msg.Group != "" {
+			for i, g := range a.sidebar.groups {
+				if g.ID == msg.Group {
 					a.sidebar.cursor = len(a.sidebar.rooms) + i
 					break
 				}
@@ -879,10 +1060,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.search.Hide()
 		a.focus = FocusInput
 		if msg.Room != "" {
-			a.messages.SetContext(msg.Room, "")
-		} else {
-			a.messages.SetContext("", msg.Conversation)
+			a.messages.SetContext(msg.Room, "", "")
+		} else if msg.Group != "" {
+			a.messages.SetContext("", msg.Group, "")
+		} else if msg.DM != "" {
+			a.messages.SetContext("", "", msg.DM)
 		}
+		a.syncMessagesLeftState()
 		a.messages.LoadFromDB(a.client)
 		a.messages.ScrollToMessage(msg.MessageID)
 		return a, nil
@@ -894,7 +1078,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Try local DB first — avoids a server round-trip when messages
 		// are already cached from previous sync/history fetches
 		if st := a.client.Store(); st != nil {
-			localMsgs, err := st.GetMessagesBefore(msg.Room, msg.Conversation, msg.BeforeID, 100)
+			localMsgs, err := st.GetMessagesBefore(msg.Room, msg.Group, "", msg.BeforeID, 100)
 			if err == nil && len(localMsgs) > 0 {
 				// Load epoch keys for these messages so they can be decrypted
 				if msg.Room != "" {
@@ -919,15 +1103,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						from = a.client.DisplayName(m.Sender)
 					}
 					display = append(display, DisplayMessage{
-						ID:           m.ID,
-						FromID:       m.Sender,
-						From:         from,
-						Body:         m.Body,
-						TS:           m.TS,
-						Room:         m.Room,
-						Conversation: m.Conversation,
-						ReplyTo:      m.ReplyTo,
-						Mentions:     m.Mentions,
+						ID:       m.ID,
+						FromID:   m.Sender,
+						From:     from,
+						Body:     m.Body,
+						TS:       m.TS,
+						Room:     m.Room,
+						Group:    m.Group,
+						ReplyTo:  m.ReplyTo,
+						Mentions: m.Mentions,
 					})
 				}
 				hasMore := len(localMsgs) >= 100
@@ -952,13 +1136,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// If local DB had fewer than a full page, also hit server
 				// for any remaining that haven't been synced yet
 				if !hasMore {
-					a.client.RequestHistory(msg.Room, msg.Conversation, msg.BeforeID, 100)
+					a.client.RequestHistory(msg.Room, msg.Group, msg.BeforeID, 100)
 				}
 				return a, nil
 			}
 		}
 		// No local data — fall through to server
-		a.client.RequestHistory(msg.Room, msg.Conversation, msg.BeforeID, 100)
+		a.client.RequestHistory(msg.Room, msg.Group, msg.BeforeID, 100)
 		return a, nil
 
 	case MessageAction:
@@ -972,7 +1156,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.input.SetReply(msg.Msg.ID, msg.Msg.From+": "+preview)
 			a.focus = FocusInput
 		case "delete":
-			if a.client != nil && (msg.Msg.FromID == a.client.Username() || a.client.IsAdmin()) {
+			if a.client != nil && (msg.Msg.FromID == a.client.UserID() || a.client.IsAdmin()) {
 				a.client.SendDelete(msg.Msg.ID)
 			}
 		case "pin":
@@ -1034,12 +1218,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "open_menu":
 			// Keyboard-triggered context menu opener (Enter on selected message).
 			// Shows the same menu the mouse right-click produces, at screen origin.
-			isOwn := a.client != nil && msg.Msg.FromID == a.client.Username()
+			isOwn := a.client != nil && msg.Msg.FromID == a.client.UserID()
 			isAdmin := a.client != nil && a.client.IsAdmin()
 			isRoom := a.messages.room != ""
 			var myEmojis []string
 			if a.client != nil {
-				myEmojis = msg.Msg.UserEmojis(a.client.Username())
+				myEmojis = msg.Msg.UserEmojis(a.client.UserID())
 			}
 			a.contextMenu.Show(msg.Msg, 0, 0, isOwn, isAdmin, isRoom, a.pinnedBar.PinIDs(), myEmojis)
 		case "react":
@@ -1052,7 +1236,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.client == nil {
 				return a, nil
 			}
-			user := a.client.Username()
+			user := a.client.UserID()
 			emoji := msg.Data
 			if emoji == "" {
 				emojis := msg.Msg.UserEmojis(user)
@@ -1089,24 +1273,39 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Populate sidebar and messages
 		a.sidebar.SetRooms(a.client.Rooms())
-		a.messages.currentUser = a.client.DisplayName(a.client.Username())
-		a.messages.currentUserID = a.client.Username()
+		a.messages.currentUser = a.client.DisplayName(a.client.UserID())
+		a.messages.currentUserID = a.client.UserID()
 		a.messages.resolveName = a.client.DisplayName
+		a.messages.resolveRoomName = a.client.DisplayRoomName
 		a.search.resolveName = a.client.DisplayName
 		if st := a.client.Store(); st != nil {
 			a.search.SetFTS(st.HasFTS())
 		}
 		a.sidebar.resolveName = a.client.DisplayName
+		a.sidebar.resolveRoomName = a.client.DisplayRoomName
+		a.sidebar.resolveVerified = func(user string) bool {
+			if a.client == nil {
+				return false
+			}
+			st := a.client.Store()
+			if st == nil {
+				return false
+			}
+			_, verified, err := st.GetPinnedKey(user)
+			return err == nil && verified
+		}
 		a.newConv.resolveName = a.client.DisplayName
+		a.infoPanel.resolveRoomName = a.client.DisplayRoomName
 		if len(a.client.Rooms()) > 0 {
-			a.messages.SetContext(a.client.Rooms()[0], "")
+			a.messages.SetContext(a.client.Rooms()[0], "", "")
+			a.syncMessagesLeftState()
 			a.messages.LoadFromDB(a.client)
 			// Set up member list for @completion
 			a.memberPanel.Refresh(a.client.Rooms()[0], "", a.client, a.sidebar.online)
 			a.input.SetMembers(a.activeMemberEntries())
 		}
 
-		a.statusBar.SetUser(a.client.DisplayName(a.client.Username()), a.client.IsAdmin())
+		a.statusBar.SetUser(a.client.DisplayName(a.client.UserID()), a.client.IsAdmin())
 		a.statusBar.SetConnected(true)
 		a.updateTitle()
 
@@ -1117,7 +1316,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.sidebar.errCh = msg.errCh
 
 	case ServerMsg:
-		a.handleServerMessage(msg)
+		if cmd := a.handleServerMessage(msg); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		// Continue listening
 		if a.client != nil {
 			if a.sidebar.msgCh != nil {
@@ -1228,7 +1429,8 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if a.help.IsVisible() || a.search.IsVisible() || a.quickSwitch.IsVisible() || a.threadPanel.IsVisible() || a.newConv.IsVisible() ||
 		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.pendingPanel.IsVisible() ||
 		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
-		a.quitConfirm.IsVisible() ||
+		a.quitConfirm.IsVisible() || a.leaveConfirm.IsVisible() || a.leaveRoomConfirm.IsVisible() ||
+		a.deleteDMConfirm.IsVisible() || a.deleteGroupConfirm.IsVisible() ||
 		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
 		return a, nil
 	}
@@ -1292,11 +1494,12 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			a.sidebar.cursor = idx
 			a.sidebar.updateSelection()
 			// Switch to selected room/conversation
-			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedConv() != a.messages.conversation {
-				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedConv())
+			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group {
+				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
+				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
-					a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
+					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
 					if a.messages.room != "" && a.client != nil {
 						a.client.RequestRoomMembers(a.messages.room)
 					}
@@ -1339,12 +1542,12 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			a.messages.cursor = idx
 			msg := a.messages.messages[idx]
 			if !msg.IsSystem {
-				isOwn := a.client != nil && msg.FromID == a.client.Username()
+				isOwn := a.client != nil && msg.FromID == a.client.UserID()
 				isAdmin := a.client != nil && a.client.IsAdmin()
 				isRoom := a.messages.room != ""
 				var myEmojis []string
 				if a.client != nil {
-					myEmojis = msg.UserEmojis(a.client.Username())
+					myEmojis = msg.UserEmojis(a.client.UserID())
 				}
 				a.contextMenu.Show(msg, x, y, isOwn, isAdmin, isRoom, a.pinnedBar.PinIDs(), myEmojis)
 			}
@@ -1410,6 +1613,30 @@ func (a *App) setUnreadDividerAfter(lastReadID string) {
 	}
 }
 
+// syncMessagesLeftState updates the messages model's "left" flag based on
+// the current context (room or group DM). Called after any SetContext to
+// keep the read-only indicator in sync with whether the user has left.
+func (a *App) syncMessagesLeftState() {
+	if a.client == nil {
+		a.messages.SetLeft(false)
+		return
+	}
+	st := a.client.Store()
+	if st == nil {
+		a.messages.SetLeft(false)
+		return
+	}
+	if a.messages.group != "" {
+		a.messages.SetLeft(st.IsGroupLeft(a.messages.group))
+		return
+	}
+	if a.messages.room != "" {
+		a.messages.SetLeft(st.IsRoomLeft(a.messages.room))
+		return
+	}
+	a.messages.SetLeft(false)
+}
+
 // updateTitle updates the terminal title with the total unread count.
 func (a *App) updateTitle() {
 	total := 0
@@ -1433,6 +1660,13 @@ func (a *App) resolveDisplayName(username string) string {
 	return username
 }
 
+func (a *App) resolveRoomDisplayName(roomID string) string {
+	if a.client != nil {
+		return a.client.DisplayRoomName(roomID)
+	}
+	return roomID
+}
+
 func (a *App) sendReadReceipt() {
 	if a.client == nil {
 		return
@@ -1441,22 +1675,28 @@ func (a *App) sendReadReceipt() {
 	if lastID == "" {
 		return
 	}
-	a.client.SendRead(a.messages.room, a.messages.conversation, lastID)
-	// Persist locally so the unread divider survives restarts
+	a.client.SendRead(a.messages.room, a.messages.group, a.messages.dm, lastID)
+	// Persist locally so the unread divider survives restarts. Rooms and
+	// group DMs use the client-side read_positions table; 1:1 DMs do not
+	// (the server is authoritative for DM read state, multi-device sync
+	// comes via read broadcasts — see handleRead in sshkey-chat/session.go).
 	if st := a.client.Store(); st != nil {
 		target := a.messages.room
 		if target == "" {
-			target = a.messages.conversation
+			target = a.messages.group
 		}
 		if target != "" {
 			st.StoreReadPosition(target, lastID)
 		}
 	}
-	// Clear unread divider and sidebar badge — user has now seen everything
+	// Clear unread divider and sidebar badge — user has now seen everything.
 	a.messages.SetUnreadFrom("")
 	target := a.messages.room
 	if target == "" {
-		target = a.messages.conversation
+		target = a.messages.group
+	}
+	if target == "" {
+		target = a.messages.dm
 	}
 	if target != "" {
 		a.sidebar.SetUnread(target, 0)
@@ -1466,13 +1706,14 @@ func (a *App) sendReadReceipt() {
 // switchToSidebarSelection switches the messages context to whatever the
 // sidebar currently has selected. Used by Alt+Up/Down and quick switch.
 func (a *App) switchToSidebarSelection() {
-	if a.sidebar.SelectedRoom() == a.messages.room && a.sidebar.SelectedConv() == a.messages.conversation {
+	if a.sidebar.SelectedRoom() == a.messages.room && a.sidebar.SelectedGroup() == a.messages.group {
 		return
 	}
-	a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedConv())
+	a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
+	a.syncMessagesLeftState()
 	a.messages.LoadFromDB(a.client)
 	if a.memberPanel.IsVisible() {
-		a.memberPanel.Refresh(a.messages.room, a.messages.conversation, a.client, a.sidebar.online)
+		a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
 		if a.messages.room != "" && a.client != nil {
 			a.client.RequestRoomMembers(a.messages.room)
 		}
@@ -1492,7 +1733,7 @@ func (a *App) activeMemberEntries() []MemberEntry {
 	}
 	out := members[:0]
 	for _, m := range members {
-		if retired, _ := a.client.IsRetired(m.Username); retired {
+		if retired, _ := a.client.IsRetired(m.UserID); retired {
 			continue
 		}
 		out = append(out, m)
@@ -1500,29 +1741,23 @@ func (a *App) activeMemberEntries() []MemberEntry {
 	return out
 }
 
-// currentDMRetiredPartner reports whether the active conversation is a 1:1
-// DM whose other member has been retired. When true, sending should be
+// currentDMRetiredPartner reports whether the active context is a 1:1 DM
+// whose other member has been retired. When true, sending should be
 // disabled (the server rejects sends to retired members with user_retired
 // error) and a notice banner should replace the input.
 //
-// Returns (false, "") when the conversation is a room, a group DM with 3+
-// members, or a 1:1 DM with an active partner.
+// Returns (false, "") when the context is a room, a group DM, or a 1:1 DM
+// with an active partner.
 func (a *App) currentDMRetiredPartner() (bool, string) {
-	if a.client == nil || a.messages.conversation == "" {
+	if a.client == nil || a.messages.dm == "" {
 		return false, ""
 	}
-	members := a.client.ConvMembers(a.messages.conversation)
-	if len(members) != 2 {
+	other := a.client.DMOther(a.messages.dm)
+	if other == "" {
 		return false, ""
 	}
-	me := a.client.Username()
-	for _, m := range members {
-		if m == me {
-			continue
-		}
-		if retired, _ := a.client.IsRetired(m); retired {
-			return true, m
-		}
+	if retired, _ := a.client.IsRetired(other); retired {
+		return true, other
 	}
 	return false, ""
 }
@@ -1530,6 +1765,105 @@ func (a *App) currentDMRetiredPartner() (bool, string) {
 // handleSlashCommand processes slash commands that need app-level handling.
 func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 	switch sc.Command {
+	case "/leave":
+		// Branches on context. Group DM and room each get their own
+		// confirmation dialog. 1:1 DMs don't have a /leave path (see
+		// dm_refactor.md). Server enforces policy and returns errors;
+		// the client always opens the dialog and waits for the echo
+		// (or the error) before touching local state.
+		if sc.Group != "" {
+			// Group DM /leave — look up display name for the dialog
+			groupName := ""
+			for _, g := range a.sidebar.groups {
+				if g.ID == sc.Group {
+					groupName = g.Name
+					if groupName == "" {
+						// Build a fallback from member display names
+						var names []string
+						for _, m := range g.Members {
+							name := m
+							if a.client != nil {
+								name = a.client.DisplayName(m)
+							}
+							names = append(names, name)
+						}
+						groupName = strings.Join(names, ", ")
+					}
+					break
+				}
+			}
+			a.leaveConfirm.Show(sc.Group, groupName)
+			return
+		}
+		if sc.Room != "" {
+			// Room /leave — display name comes from the resolver
+			roomName := sc.Room
+			if a.client != nil {
+				roomName = a.client.DisplayRoomName(sc.Room)
+			}
+			a.leaveRoomConfirm.Show(sc.Room, roomName)
+			return
+		}
+	case "/leave_dm_rejected":
+		// 1:1 DMs don't expose /leave — the only client surface is
+		// /delete, which is fully wired for DMs. Surface a clear
+		// redirect so the user isn't confused about which command to use.
+		a.statusBar.SetError("/leave is not available for 1:1 DMs — use /delete")
+	case "/delete":
+		// /delete is context-aware. The 1:1 DM path is wired here; the
+		// room and group DM variants are still placeholder (Phase 12).
+		if sc.DM != "" {
+			// Resolve the other party's display name for the dialog.
+			other := ""
+			for _, dm := range a.sidebar.dms {
+				if dm.ID == sc.DM {
+					for _, m := range dm.Members {
+						if a.client != nil && m == a.client.UserID() {
+							continue
+						}
+						other = m
+						break
+					}
+					break
+				}
+			}
+			otherName := other
+			if a.client != nil && other != "" {
+				otherName = a.client.DisplayName(other)
+			}
+			a.deleteDMConfirm.Show(sc.DM, otherName)
+			return
+		}
+		if sc.Group != "" {
+			// Group DM /delete — look up display name for the dialog,
+			// fall back to a comma-joined member list when there's no
+			// explicit name.
+			groupName := ""
+			for _, g := range a.sidebar.groups {
+				if g.ID == sc.Group {
+					groupName = g.Name
+					if groupName == "" {
+						var names []string
+						for _, m := range g.Members {
+							name := m
+							if a.client != nil {
+								name = a.client.DisplayName(m)
+							}
+							names = append(names, name)
+						}
+						groupName = strings.Join(names, ", ")
+					}
+					break
+				}
+			}
+			a.deleteGroupConfirm.Show(sc.Group, groupName)
+			return
+		}
+		if sc.Room != "" {
+			a.statusBar.SetError("/delete for rooms is not yet implemented")
+			return
+		}
+		a.statusBar.SetError("/delete must be run inside a conversation")
 	case "/verify":
 		if sc.Arg != "" && a.client != nil {
 			a.verify.Show(sc.Arg, a.client)
@@ -1546,7 +1880,7 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 	case "/settings":
 		username := ""
 		if a.client != nil {
-			username = a.client.Username()
+			username = a.client.UserID()
 		}
 		a.settings.Show(a.appConfig, a.configDir, username, a.serverIdx)
 	case "/help":
@@ -1589,8 +1923,8 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			a.statusBar.SetError(msg)
 			return
 		}
-		// Upload + send as a message with attachment. Routes to room or DM
-		// sender based on the current conversation context.
+		// Upload + send as a message with attachment. Routes to room,
+		// group DM, or 1:1 DM sender based on the current context.
 		go func() {
 			if a.client == nil {
 				return
@@ -1600,10 +1934,12 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			var err error
 			if sc.Room != "" {
 				err = a.client.SendRoomMessageFile(sc.Room, body, path, "", nil)
-			} else if sc.Conv != "" {
-				err = a.client.SendDMMessageFile(sc.Conv, body, path, "", nil)
+			} else if sc.Group != "" {
+				err = a.client.SendGroupMessageFile(sc.Group, body, path, "", nil)
+			} else if sc.DM != "" {
+				err = a.client.SendDMMessageFile(sc.DM, body, path, "", nil)
 			} else {
-				a.statusBar.SetError("No active room or conversation")
+				a.statusBar.SetError("No active room or group")
 				return
 			}
 			if err != nil {
@@ -1616,7 +1952,9 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 }
 
 // handleServerMessage processes incoming server messages for the UI.
-func (a *App) handleServerMessage(msg ServerMsg) {
+// Returns an optional tea.Cmd when the handler needs to schedule follow-up
+// work (e.g. a delayed retry on server_busy).
+func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	switch msg.Type {
 	case "message":
 		var m protocol.Message
@@ -1628,14 +1966,14 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 			a.sidebar.IncrementUnread(m.Room)
 		}
 		// Notifications for messages not from self
-		if a.client != nil && m.From != a.client.Username() {
+		if a.client != nil && m.From != a.client.UserID() {
 			payload, err := a.client.DecryptRoomMessage(m.Room, m.Epoch, m.Payload)
 			body := "(encrypted)"
 			isMention := false
 			if err == nil {
 				body = payload.Body
 				for _, mention := range payload.Mentions {
-					if mention == a.client.Username() {
+					if mention == a.client.UserID() {
 						isMention = true
 						break
 					}
@@ -1643,52 +1981,169 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 			}
 			if !a.muted[m.Room] {
 				SendDesktopNotification(
-					fmt.Sprintf("%s in #%s", a.resolveDisplayName(m.From), m.Room),
+					fmt.Sprintf("%s in #%s", a.resolveDisplayName(m.From), a.resolveRoomDisplayName(m.Room)),
 					body,
 				)
 			}
-			if a.bell.ShouldBell(m.Room, "", m.From, a.client.Username(), isMention, a.muted) {
+			if a.bell.ShouldBell(m.Room, "", m.From, a.client.UserID(), isMention, a.muted) {
 				Ring()
 			}
 		}
-	case "dm":
-		var m protocol.DM
+	case "group_message":
+		var m protocol.GroupMessage
 		json.Unmarshal(msg.Raw, &m)
-		a.messages.AddDMMessage(m, a.client)
-		if m.Conversation == a.messages.conversation {
+		a.messages.AddGroupMessage(m, a.client)
+		if m.Group == a.messages.group {
 			a.sendReadReceipt()
 		} else {
-			a.sidebar.IncrementUnread(m.Conversation)
+			a.sidebar.IncrementUnread(m.Group)
 		}
-		if a.client != nil && m.From != a.client.Username() {
-			payload, err := a.client.DecryptDMMessage(m.WrappedKeys, m.Payload)
+		if a.client != nil && m.From != a.client.UserID() {
+			payload, err := a.client.DecryptGroupMessage(m.WrappedKeys, m.Payload)
 			body := "(encrypted)"
 			if err == nil {
 				body = payload.Body
 			}
-			if !a.muted[m.Conversation] {
+			if !a.muted[m.Group] {
 				SendDesktopNotification(a.resolveDisplayName(m.From), body)
 			}
-			if a.bell.ShouldBell("", m.Conversation, m.From, a.client.Username(), false, a.muted) {
+			if a.bell.ShouldBell("", m.Group, m.From, a.client.UserID(), false, a.muted) {
 				Ring()
 			}
 		}
 	case "typing":
 		var m protocol.Typing
 		json.Unmarshal(msg.Raw, &m)
-		a.messages.SetTyping(m.User, m.Room, m.Conversation)
+		a.messages.SetTyping(m.User, m.Room, m.Group, m.DM)
 	case "room_list":
+		// Reconcile the server's active-room list with any locally-archived
+		// rooms. The server drops a room from room_list as soon as the user
+		// leaves it, but the local DB keeps a row with left_at > 0 so the
+		// sidebar can render the archived entry as greyed/read-only until
+		// the user explicitly purges it. Same reconciliation pattern as
+		// group_list — server truth wins for active rooms, local DB fills
+		// in the archived ones the server no longer knows about.
+		//
+		// Room metadata for active rooms is persisted at the client layer
+		// (client.go handles room_list and calls UpsertRoom). For archived
+		// rooms the metadata in the local rooms table is whatever the last
+		// server sync had — fine for an entry the user has left.
 		var m protocol.RoomList
 		json.Unmarshal(msg.Raw, &m)
-		var names []string
+
+		var ids []string
 		for _, r := range m.Rooms {
-			names = append(names, r.Name)
+			ids = append(ids, r.ID)
 		}
-		a.sidebar.SetRooms(names)
-	case "conversation_list":
-		var m protocol.ConversationList
+
+		if a.client != nil {
+			if st := a.client.Store(); st != nil {
+				// Re-add case: if the server sends a room we had marked
+				// archived, the user must have been re-added to it via
+				// admin CLI. Clear the archive flag so the sidebar renders
+				// it as active.
+				for _, r := range m.Rooms {
+					if st.IsRoomLeft(r.ID) {
+						if err := st.MarkRoomRejoined(r.ID); err != nil {
+							a.statusBar.SetError("Failed to clear archived room flag: " + err.Error())
+						}
+					}
+				}
+
+				// Merge in any locally-archived rooms the server no longer
+				// sends. These persist (greyed, read-only) until /delete.
+				seen := make(map[string]bool, len(ids))
+				for _, id := range ids {
+					seen[id] = true
+				}
+				if archived, err := st.GetLeftRooms(); err == nil {
+					for _, ar := range archived {
+						if seen[ar.ID] {
+							continue
+						}
+						ids = append(ids, ar.ID)
+					}
+				}
+			}
+		}
+
+		a.sidebar.SetRooms(ids)
+
+		// Apply archived markers to the merged sidebar list based on the
+		// (post-rejoin-clear) local DB state.
+		if a.client != nil {
+			if st := a.client.Store(); st != nil {
+				for _, id := range ids {
+					if st.IsRoomLeft(id) {
+						a.sidebar.MarkRoomLeft(id)
+					}
+				}
+			}
+		}
+	case "group_list":
+		// Reconcile the server's active-group list with any locally-archived
+		// groups. The server drops groups from group_list as soon as the user
+		// leaves, but the local DB keeps a row with left_at > 0 so the sidebar
+		// can render the archived entry as greyed/read-only until the user
+		// explicitly purges it. This handler is the single reconciliation
+		// point: server truth wins for active groups, local DB fills in the
+		// archived ones the server no longer knows about.
+		var m protocol.GroupList
 		json.Unmarshal(msg.Raw, &m)
-		a.sidebar.SetConversations(m.Conversations)
+
+		groups := m.Groups
+
+		if a.client != nil {
+			if st := a.client.Store(); st != nil {
+				// Re-add case: if the server sends a group we had marked
+				// archived, the user must have been re-added to it. Clear
+				// the archive flag so the sidebar renders it as active.
+				for _, g := range m.Groups {
+					if st.IsGroupLeft(g.ID) {
+						if err := st.MarkGroupRejoined(g.ID); err != nil {
+							a.statusBar.SetError("Failed to clear archived flag: " + err.Error())
+						}
+					}
+				}
+
+				// Merge in any locally-archived groups the server no longer
+				// sends. These persist (greyed, read-only) until /delete.
+				seen := make(map[string]bool, len(groups))
+				for _, g := range groups {
+					seen[g.ID] = true
+				}
+				if archived, err := st.GetArchivedGroups(); err == nil {
+					for _, ag := range archived {
+						if seen[ag.ID] {
+							continue
+						}
+						var members []string
+						if ag.Members != "" {
+							members = strings.Split(ag.Members, ",")
+						}
+						groups = append(groups, protocol.GroupInfo{
+							ID:      ag.ID,
+							Name:    ag.Name,
+							Members: members,
+						})
+					}
+				}
+			}
+		}
+
+		a.sidebar.SetGroups(groups)
+
+		// Apply archived markers to the merged sidebar list based on the
+		// (post-rejoin-clear) local DB state.
+		if a.client != nil {
+			if st := a.client.Store(); st != nil {
+				for _, g := range groups {
+					if st.IsGroupLeft(g.ID) {
+						a.sidebar.MarkGroupLeft(g.ID)
+					}
+				}
+			}
+		}
 	case "presence":
 		var m protocol.Presence
 		json.Unmarshal(msg.Raw, &m)
@@ -1702,9 +2157,14 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 			if m.Room == a.messages.room && m.Count > 0 && m.LastRead != "" {
 				a.setUnreadDividerAfter(m.LastRead)
 			}
-		} else if m.Conversation != "" {
-			a.sidebar.SetUnreadConv(m.Conversation, m.Count)
-			if m.Conversation == a.messages.conversation && m.Count > 0 && m.LastRead != "" {
+		} else if m.Group != "" {
+			a.sidebar.SetUnreadGroup(m.Group, m.Count)
+			if m.Group == a.messages.group && m.Count > 0 && m.LastRead != "" {
+				a.setUnreadDividerAfter(m.LastRead)
+			}
+		} else if m.DM != "" {
+			a.sidebar.SetUnreadDM(m.DM, m.Count)
+			if m.DM == a.messages.dm && m.Count > 0 && m.LastRead != "" {
 				a.setUnreadDividerAfter(m.LastRead)
 			}
 		}
@@ -1718,13 +2178,20 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			a.messages.MarkRetired(m.User)
 			a.sidebar.MarkRetired(m.User)
-			// If the retired user is in the active conversation, show a notice
-			if a.client != nil && a.messages.conversation != "" {
-				for _, member := range a.client.ConvMembers(a.messages.conversation) {
+			// If the retired user is in the active group, show a notice
+			if a.client != nil && a.messages.group != "" {
+				for _, member := range a.client.GroupMembers(a.messages.group) {
 					if member == m.User {
 						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + "'s account was retired")
 						break
 					}
+				}
+			}
+			// If the retired user is the other party in the active 1:1 DM
+			if a.client != nil && a.messages.dm != "" {
+				other := a.client.DMOther(a.messages.dm)
+				if other == m.User {
+					a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + "'s account was retired")
 				}
 			}
 		}
@@ -1789,37 +2256,111 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 				a.deviceMgr.SetStatus("Error: " + m.Error)
 			}
 		}
-	case "conversation_event":
-		var m protocol.ConversationEvent
+	case "group_event":
+		var m protocol.GroupEvent
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			if m.Event == "leave" {
-				// Show system message in the active conversation stream
-				if m.Conversation == a.messages.conversation {
-					if m.Reason == "retirement" {
+				// Show system message in the active group stream when
+				// SOMEONE ELSE leaves. The leaver themselves is not in the
+				// broadcast set (they were removed from members already), so
+				// this branch only fires for other users — no self check needed.
+				//
+				// Reason distinguishes the trigger so the system message
+				// matches what actually happened:
+				//   - "retirement": the leaver's account was retired
+				//   - "admin": an admin removed the leaver via sshkey-ctl
+				//   - "" (empty): the leaver ran /leave themselves
+				if m.Group == a.messages.group {
+					switch m.Reason {
+					case "retirement":
 						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + "'s account was retired")
-					} else {
-						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " left the conversation")
-					}
-				}
-				// If WE left, remove from sidebar and switch away
-				if a.client != nil && m.User == a.client.Username() {
-					a.sidebar.RemoveConversation(m.Conversation)
-					if a.messages.conversation == m.Conversation {
-						a.messages.SetContext("", "")
-						if len(a.sidebar.rooms) > 0 {
-							a.sidebar.selectedRoom = a.sidebar.rooms[0]
-							a.messages.SetContext(a.sidebar.rooms[0], "")
-						}
+					case "admin":
+						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " was removed from the group by an admin")
+					default:
+						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " left the group")
 					}
 				}
 			}
 		}
-	case "conversation_renamed":
-		var m protocol.ConversationRenamed
+	case "group_left":
+		// Server confirmed a group leave. Reason distinguishes the
+		// trigger:
+		//   - "" (empty): self-leave via /leave command on this or
+		//     another device
+		//   - "admin": an admin removed us via sshkey-ctl
+		//     remove-from-group (the moderation escape hatch)
+		//
+		// In both cases the client layer has already marked the group
+		// archived in the local DB and dropped it from the in-memory
+		// member map. Here we just update the sidebar greying, set the
+		// active message view to read-only if the affected group is
+		// currently focused, and surface a status message that tells
+		// the user what happened.
+		var m protocol.GroupLeft
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
-			a.sidebar.RenameConversation(m.Conversation, m.Name)
-			if m.Conversation == a.messages.conversation {
-				a.messages.AddSystemMessage(a.resolveDisplayName(m.RenamedBy) + " renamed the conversation to " + m.Name)
+			a.sidebar.MarkGroupLeft(m.Group)
+			if a.messages.group == m.Group {
+				a.messages.SetLeft(true)
+			}
+			if m.Reason == "admin" {
+				groupName := m.Group
+				for _, g := range a.sidebar.groups {
+					if g.ID == m.Group && g.Name != "" {
+						groupName = g.Name
+						break
+					}
+				}
+				a.statusBar.SetError("You were removed from " + groupName + " by an admin")
+			} else {
+				a.statusBar.SetError("Left group")
+			}
+		}
+	case "group_deleted":
+		// Server confirmed /delete (this device or another). The client
+		// layer has already purged local messages and marked left; here
+		// we drop the sidebar entry entirely and reset the active
+		// message context if the deleted group was being viewed. Setting
+		// an empty context also clears the message buffer.
+		var m protocol.GroupDeleted
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.sidebar.RemoveGroup(m.Group)
+			if a.messages.group == m.Group {
+				a.messages.SetContext("", "", "")
+			}
+		}
+	case "deleted_groups":
+		// Sync catchup. Each entry was /delete'd from another device
+		// while this one was offline. The client layer has already
+		// applied MarkGroupLeft + PurgeGroupMessages for each. Here we
+		// drop them from the sidebar and reset the active context if
+		// any of them was the currently-viewed group.
+		var m protocol.DeletedGroupsList
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			for _, groupID := range m.Groups {
+				a.sidebar.RemoveGroup(groupID)
+				if a.messages.group == groupID {
+					a.messages.SetContext("", "", "")
+				}
+			}
+		}
+	case "room_left":
+		// Server confirmed our leave_room. The client layer has already
+		// marked the room archived in the local DB; flip the sidebar
+		// + messages view + status bar to match.
+		var m protocol.RoomLeft
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.sidebar.MarkRoomLeft(m.Room)
+			if a.messages.room == m.Room {
+				a.messages.SetLeft(true)
+			}
+			a.statusBar.SetError("Left room")
+		}
+	case "group_renamed":
+		var m protocol.GroupRenamed
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.sidebar.RenameGroup(m.Group, m.Name)
+			if m.Group == a.messages.group {
+				a.messages.AddSystemMessage(a.resolveDisplayName(m.RenamedBy) + " renamed the group to " + m.Name)
 			}
 		}
 	case "room_event":
@@ -1834,14 +2375,112 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 				}
 			}
 		}
-	case "dm_created":
-		var m protocol.DMCreated
+	case "group_created":
+		var m protocol.GroupCreated
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
-			a.sidebar.AddConversation(protocol.ConversationInfo{
-				ID:      m.Conversation,
+			a.sidebar.AddGroup(protocol.GroupInfo{
+				ID:      m.Group,
 				Members: m.Members,
 				Name:    m.Name,
 			})
+		}
+	case "dm_list":
+		var m protocol.DMList
+		json.Unmarshal(msg.Raw, &m)
+		// Filter out DMs the caller has already left — those are tombstones
+		// from /delete on another device. The client layer has already
+		// purged any local messages and flipped the local left_at flag in
+		// the dm_list handler in client.go; here we just refuse to surface
+		// them in the sidebar.
+		active := make([]protocol.DMInfo, 0, len(m.DMs))
+		for _, dm := range m.DMs {
+			if dm.LeftAtForCaller == 0 {
+				active = append(active, dm)
+			}
+		}
+		a.sidebar.SetDMs(active)
+		// Set the sidebar's selfUserID so it knows which party is "other" in each DM
+		if a.client != nil {
+			a.sidebar.selfUserID = a.client.UserID()
+		}
+	case "dm_created":
+		var m protocol.DMCreated
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.sidebar.AddDM(protocol.DMInfo{
+				ID:      m.DM,
+				Members: m.Members,
+			})
+			// Successful create — clear any pending auto-retry state for
+			// this target so stale retries scheduled before the success
+			// are ignored when they fire.
+			for _, member := range m.Members {
+				if a.client != nil && member == a.client.UserID() {
+					continue
+				}
+				if member == a.pendingCreateDM.other {
+					a.pendingCreateDM = pendingCreateDMState{}
+				}
+			}
+		}
+	case "dm":
+		var m protocol.DM
+		json.Unmarshal(msg.Raw, &m)
+		// Add to messages view if the active context is this DM
+		if m.DM == a.messages.dm {
+			// DM messages are decrypted + displayed inline (same as group_message)
+			// For now, messages view needs an AddDMMessage — we'll use the same
+			// DisplayMessage path as groups since DMs use the same wrapped-key model.
+			if a.client != nil {
+				payload, err := a.client.DecryptDMMessage(m.WrappedKeys, m.Payload)
+				body := "(encrypted)"
+				replyTo := ""
+				var mentions []string
+				if err == nil {
+					body = payload.Body
+					replyTo = payload.ReplyTo
+					mentions = payload.Mentions
+				}
+				from := m.From
+				from = a.client.DisplayName(m.From)
+				a.messages.messages = append(a.messages.messages, DisplayMessage{
+					ID:       m.ID,
+					FromID:   m.From,
+					From:     from,
+					Body:     body,
+					TS:       m.TS,
+					DM:       m.DM,
+					ReplyTo:  replyTo,
+					Mentions: mentions,
+				})
+			}
+			a.sendReadReceipt()
+		} else {
+			a.sidebar.IncrementUnread(m.DM)
+		}
+		// Desktop notification
+		if a.client != nil && m.From != a.client.UserID() {
+			payload, err := a.client.DecryptDMMessage(m.WrappedKeys, m.Payload)
+			body := "(encrypted)"
+			if err == nil {
+				body = payload.Body
+			}
+			SendDesktopNotification(a.resolveDisplayName(m.From), body)
+			if a.bell.ShouldBell("", "", m.From, a.client.UserID(), false, a.muted) {
+				Ring()
+			}
+		}
+	case "dm_left":
+		// Server confirmed /delete (this device or another). The client
+		// layer has already purged local messages and flipped left_at;
+		// here we just need to drop the sidebar entry and reset the
+		// message view if the deleted DM was currently active. Setting
+		// an empty context also clears the message buffer.
+		var dl protocol.DMLeft
+		if err := json.Unmarshal(msg.Raw, &dl); err == nil {
+			a.sidebar.RemoveDM(dl.DM)
+			if a.messages.dm == dl.DM {
+				a.messages.SetContext("", "", "")
+			}
 		}
 	case "reaction":
 		var m protocol.Reaction
@@ -1869,7 +2508,7 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 
 		// Build display messages and prepend (history arrives oldest-first).
 		// Epoch keys are already unwrapped by the client layer (handleHistoryKeys),
-		// and messages are persisted there too (storeRoomMessage/storeDMMessage).
+		// and messages are persisted there too (storeRoomMessage/storeGroupMessage).
 		var histMsgs []DisplayMessage
 		for _, raw := range result.Messages {
 			histType, _ := protocol.TypeOf(raw)
@@ -1879,10 +2518,40 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 				if json.Unmarshal(raw, &pm) == nil {
 					histMsgs = append(histMsgs, a.messages.buildDisplayMsg(pm, a.client))
 				}
+			case "group_message":
+				var gm protocol.GroupMessage
+				if json.Unmarshal(raw, &gm) == nil {
+					histMsgs = append(histMsgs, a.messages.buildDisplayGroup(gm, a.client))
+				}
 			case "dm":
 				var dm protocol.DM
 				if json.Unmarshal(raw, &dm) == nil {
-					histMsgs = append(histMsgs, a.messages.buildDisplayDM(dm, a.client))
+					// Reuse buildDisplayGroup-style logic for DM history
+					body := "(encrypted)"
+					replyTo := ""
+					var mentions []string
+					if a.client != nil {
+						payload, err := a.client.DecryptDMMessage(dm.WrappedKeys, dm.Payload)
+						if err == nil {
+							body = payload.Body
+							replyTo = payload.ReplyTo
+							mentions = payload.Mentions
+						}
+					}
+					from := dm.From
+					if a.client != nil {
+						from = a.client.DisplayName(dm.From)
+					}
+					histMsgs = append(histMsgs, DisplayMessage{
+						ID:       dm.ID,
+						FromID:   dm.From,
+						From:     from,
+						Body:     body,
+						TS:       dm.TS,
+						DM:       dm.DM,
+						ReplyTo:  replyTo,
+						Mentions: mentions,
+					})
 				}
 			}
 		}
@@ -1941,6 +2610,25 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 	case "error":
 		var m protocol.Error
 		json.Unmarshal(msg.Raw, &m)
+
+		// server_busy on an in-flight create_dm → transparently retry
+		// with a short backoff. The user never sees the server's busy
+		// message; either the retry succeeds and a dm_created arrives,
+		// or all retries are exhausted and we surface a generic "please
+		// try again" in the status bar without explaining the reason.
+		if m.Code == "server_busy" && a.pendingCreateDM.other != "" {
+			if a.pendingCreateDM.retries > 0 {
+				a.pendingCreateDM.retries--
+				other := a.pendingCreateDM.other
+				return tea.Tick(createDMRetryDelay*time.Millisecond, func(time.Time) tea.Msg {
+					return retryCreateDMMsg{other: other}
+				})
+			}
+			a.pendingCreateDM = pendingCreateDMState{}
+			a.statusBar.SetError("Could not start conversation — please try again.")
+			return nil
+		}
+
 		a.statusBar.SetError(m.Message)
 		// If this is a username_taken error and settings is open, show it
 		// prominently so the user knows their name change failed
@@ -1953,6 +2641,7 @@ func (a *App) handleServerMessage(msg ServerMsg) {
 		a.statusBar.SetError(fmt.Sprintf("Server shutting down: %s", m.Message))
 		a.statusBar.SetConnected(false)
 	}
+	return nil
 }
 
 func (a App) View() string {
@@ -2029,7 +2718,7 @@ func (a App) View() string {
 		}
 		var input string
 		if retired, other := a.currentDMRetiredPartner(); retired {
-			input = helpDescStyle.Render("  " + other + "'s account has been retired — this conversation is read-only. Verify their new account (if any) out of band before starting a new DM.")
+			input = helpDescStyle.Render("  " + a.resolveDisplayName(other) + "'s account has been retired — this DM is read-only. Verify their new account (if any) out of band before starting a new DM.")
 		} else {
 			input = a.input.View(mainWidth, a.focus == FocusInput)
 		}
@@ -2089,6 +2778,18 @@ func (a App) View() string {
 	}
 	if a.retireConfirm.IsVisible() {
 		return a.retireConfirm.View(a.width)
+	}
+	if a.leaveConfirm.IsVisible() {
+		return a.leaveConfirm.View(a.width)
+	}
+	if a.leaveRoomConfirm.IsVisible() {
+		return a.leaveRoomConfirm.View(a.width)
+	}
+	if a.deleteDMConfirm.IsVisible() {
+		return a.deleteDMConfirm.View(a.width)
+	}
+	if a.deleteGroupConfirm.IsVisible() {
+		return a.deleteGroupConfirm.View(a.width)
 	}
 	if a.deviceRevoked.IsVisible() {
 		return a.deviceRevoked.View(a.width)

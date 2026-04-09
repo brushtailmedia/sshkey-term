@@ -54,15 +54,16 @@ var (
 
 // DisplayMessage is a message ready for rendering.
 type DisplayMessage struct {
-	ID           string
-	FromID       string // raw username (nanoid) for logic/comparison
-	From         string // display name for rendering
-	Body         string // decrypted body (or "(encrypted)" if not decryptable)
-	TS           int64
-	Room         string
-	Conversation string
-	ReplyTo      string
-	Mentions     []string
+	ID       string
+	FromID   string // raw username (nanoid) for logic/comparison
+	From     string // display name for rendering
+	Body     string // decrypted body (or "(encrypted)" if not decryptable)
+	TS       int64
+	Room     string
+	Group    string
+	DM       string
+	ReplyTo  string
+	Mentions []string
 	// ReactionsByUser tracks all reaction_ids per (user, emoji) on this message.
 	// user -> emoji -> []reaction_id. Display count = distinct users per emoji.
 	// The current user's own entries are used for the "Remove my reaction" UX.
@@ -139,17 +140,20 @@ type DisplayAttachment struct {
 type MessagesModel struct {
 	messages       []DisplayMessage
 	room           string
-	conversation   string
+	group          string
+	dm             string
 	cursor         int  // selected message index (-1 = none)
 	scrollOffset   int
 	typingUsers    map[string]time.Time // user -> last typing time
 	currentUser    string               // display name — for @mention highlighting in body
 	currentUserID  string               // nanoid — for mention detection in payload
-	resolveName    func(string) string  // nanoid → display name (set by App)
+	resolveName     func(string) string // user nanoid → display name (set by App)
+	resolveRoomName func(string) string // room nanoid → display name (set by App)
 	loadingHistory bool
 	hasMore        bool              // server indicated more history available
 	unreadFromID   string            // first unread message ID (for divider)
-	retired        map[string]bool   // username -> account retired
+	retired        map[string]bool   // userID -> account retired
+	left           bool              // current context is archived (read-only, user has left)
 }
 
 func NewMessages() MessagesModel {
@@ -191,15 +195,39 @@ func (m *MessagesModel) MarkRetired(user string) {
 	m.retired[user] = true
 }
 
-func (m *MessagesModel) SetContext(room, conversation string) {
+func (m *MessagesModel) SetContext(room, group, dm string) {
 	m.room = room
-	m.conversation = conversation
+	m.group = group
+	m.dm = dm
 	m.messages = nil
 	m.cursor = -1
 	m.scrollOffset = 0
 	m.unreadFromID = ""
 	m.hasMore = true
 	m.loadingHistory = false
+	m.left = false // caller should call SetLeft after if the new context is archived
+	// Clear typing indicators on context switch. SetTyping only inserts
+	// entries that match the current context, but stale entries from the
+	// previous context can linger (entries time out via the 5-second
+	// cutoff at render time, not on context switch). Without this clear,
+	// switching from group_X to group_Y while carol's typing entry is
+	// still recent would briefly display "carol is typing" in group_Y
+	// where carol is not typing — the per-context typing namespace bug.
+	for k := range m.typingUsers {
+		delete(m.typingUsers, k)
+	}
+}
+
+// SetLeft marks the current context as archived (read-only). When true,
+// the messages view renders a "you left this group" indicator and the
+// input bar should be disabled by the caller.
+func (m *MessagesModel) SetLeft(left bool) {
+	m.left = left
+}
+
+// IsLeft returns true if the current messages context is archived.
+func (m *MessagesModel) IsLeft() bool {
+	return m.left
 }
 
 // SetUnreadFrom sets the first unread message ID for the divider.
@@ -219,8 +247,10 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 
 	if m.room != "" {
 		stored, err = loadRoom(c, m.room)
-	} else if m.conversation != "" {
-		stored, err = loadConv(c, m.conversation)
+	} else if m.group != "" {
+		stored, err = loadGroup(c, m.group)
+	} else if m.dm != "" {
+		stored, err = loadDM(c, m.dm)
 	}
 
 	if err != nil || len(stored) == 0 {
@@ -248,18 +278,19 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 		}
 
 		m.messages = append(m.messages, DisplayMessage{
-			ID:           s.ID,
-			FromID:       s.Sender,
-			From:         from,
-			Body:         s.Body,
-			TS:           s.TS,
-			Room:         s.Room,
-			Conversation: s.Conversation,
-			ReplyTo:      s.ReplyTo,
-			Mentions:     s.Mentions,
-			Deleted:      s.Deleted,
-			DeletedBy:    s.DeletedBy,
-			Attachments:  attachments,
+			ID:          s.ID,
+			FromID:      s.Sender,
+			From:        from,
+			Body:        s.Body,
+			TS:          s.TS,
+			Room:        s.Room,
+			Group:       s.Group,
+			DM:          s.DM,
+			ReplyTo:     s.ReplyTo,
+			Mentions:    s.Mentions,
+			Deleted:     s.Deleted,
+			DeletedBy:   s.DeletedBy,
+			Attachments: attachments,
 		})
 		if s.ID != "" {
 			msgIDs = append(msgIDs, s.ID)
@@ -280,7 +311,10 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 	if st := c.Store(); st != nil {
 		target := m.room
 		if target == "" {
-			target = m.conversation
+			target = m.group
+		}
+		if target == "" {
+			target = m.dm
 		}
 		if target != "" {
 			if lastRead, err := st.GetReadPosition(target); err == nil && lastRead != "" {
@@ -306,8 +340,12 @@ func loadRoom(c *client.Client, room string) ([]store.StoredMessage, error) {
 	return c.LoadRoomMessages(room, 200)
 }
 
-func loadConv(c *client.Client, conv string) ([]store.StoredMessage, error) {
-	return c.LoadConvMessages(conv, 200)
+func loadGroup(c *client.Client, group string) ([]store.StoredMessage, error) {
+	return c.LoadGroupMessages(group, 200)
+}
+
+func loadDM(c *client.Client, dm string) ([]store.StoredMessage, error) {
+	return c.LoadDMMessages(dm, 200)
 }
 
 // requestHistory sends a history request for older messages.
@@ -318,16 +356,18 @@ func (m *MessagesModel) requestHistory() tea.Cmd {
 
 	firstMsg := m.messages[0]
 	room := m.room
-	conv := m.conversation
+	group := m.group
+	dm := m.dm
 	beforeID := firstMsg.ID
 
 	m.loadingHistory = true
 
 	return func() tea.Msg {
 		return HistoryRequestMsg{
-			Room:         room,
-			Conversation: conv,
-			BeforeID:     beforeID,
+			Room:     room,
+			Group:    group,
+			DM:       dm,
+			BeforeID: beforeID,
 		}
 	}
 }
@@ -408,8 +448,8 @@ func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
 	})
 }
 
-func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
-	if msg.Conversation != m.conversation {
+func (m *MessagesModel) AddGroupMessage(msg protocol.GroupMessage, c *client.Client) {
+	if msg.Group != m.group {
 		return
 	}
 
@@ -419,7 +459,7 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 	var attachments []DisplayAttachment
 
 	if c != nil {
-		payload, err := c.DecryptDMMessage(msg.WrappedKeys, msg.Payload)
+		payload, err := c.DecryptGroupMessage(msg.WrappedKeys, msg.Payload)
 		if err == nil {
 			body = payload.Body
 			replyTo = payload.ReplyTo
@@ -445,15 +485,15 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 	}
 
 	m.messages = append(m.messages, DisplayMessage{
-		ID:           msg.ID,
-		FromID:       msg.From,
-		From:         from,
-		Body:         body,
-		TS:           msg.TS,
-		Conversation: msg.Conversation,
-		ReplyTo:      replyTo,
-		Mentions:     mentions,
-		Attachments:  attachments,
+		ID:          msg.ID,
+		FromID:      msg.From,
+		From:        from,
+		Body:        body,
+		TS:          msg.TS,
+		Group:       msg.Group,
+		ReplyTo:     replyTo,
+		Mentions:    mentions,
+		Attachments: attachments,
 	})
 }
 
@@ -506,15 +546,15 @@ func (m *MessagesModel) buildDisplayMsg(msg protocol.Message, c *client.Client) 
 	}
 }
 
-// buildDisplayDM creates a DisplayMessage from a DM protocol message without appending it.
-func (m *MessagesModel) buildDisplayDM(msg protocol.DM, c *client.Client) DisplayMessage {
+// buildDisplayGroup creates a DisplayMessage from a group DM protocol message without appending it.
+func (m *MessagesModel) buildDisplayGroup(msg protocol.GroupMessage, c *client.Client) DisplayMessage {
 	body := "(encrypted)"
 	replyTo := ""
 	var mentions []string
 	var attachments []DisplayAttachment
 
 	if c != nil {
-		payload, err := c.DecryptDMMessage(msg.WrappedKeys, msg.Payload)
+		payload, err := c.DecryptGroupMessage(msg.WrappedKeys, msg.Payload)
 		if err == nil {
 			body = payload.Body
 			replyTo = payload.ReplyTo
@@ -539,15 +579,15 @@ func (m *MessagesModel) buildDisplayDM(msg protocol.DM, c *client.Client) Displa
 	}
 
 	return DisplayMessage{
-		ID:           msg.ID,
-		FromID:       msg.From,
-		From:         from,
-		Body:         body,
-		TS:           msg.TS,
-		Conversation: msg.Conversation,
-		ReplyTo:      replyTo,
-		Mentions:     mentions,
-		Attachments:  attachments,
+		ID:          msg.ID,
+		FromID:      msg.From,
+		From:        from,
+		Body:        body,
+		TS:          msg.TS,
+		Group:       msg.Group,
+		ReplyTo:     replyTo,
+		Mentions:    mentions,
+		Attachments: attachments,
 	}
 }
 
@@ -618,8 +658,17 @@ func (m *MessagesModel) AddReactionDecrypted(r protocol.Reaction, c *client.Clie
 				return // server tampering — reaction re-targeted
 			}
 		}
-	} else if r.Conversation != "" {
-		// DM reaction — decrypt with per-message key
+	} else if r.Group != "" {
+		// Group DM reaction — decrypt with per-message key
+		dr, err := c.DecryptGroupReaction(r.WrappedKeys, r.Payload)
+		if err == nil {
+			emoji = dr.Emoji
+			if dr.Target != r.ID {
+				return
+			}
+		}
+	} else if r.DM != "" {
+		// 1:1 DM reaction — decrypt with per-message key
 		dr, err := c.DecryptDMReaction(r.WrappedKeys, r.Payload)
 		if err == nil {
 			emoji = dr.Emoji
@@ -703,8 +752,8 @@ func (m *MessagesModel) RemoveReaction(reactionID string) {
 	}
 }
 
-func (m *MessagesModel) SetTyping(user, room, conversation string) {
-	if room == m.room || conversation == m.conversation {
+func (m *MessagesModel) SetTyping(user, room, group, dm string) {
+	if (room != "" && room == m.room) || (group != "" && group == m.group) || (dm != "" && dm == m.dm) {
 		m.typingUsers[user] = time.Now()
 	}
 }
@@ -733,9 +782,10 @@ type MessageAction struct {
 
 // HistoryRequestMsg is sent when the user scrolls to the top and needs older messages.
 type HistoryRequestMsg struct {
-	Room         string
-	Conversation string
-	BeforeID     string
+	Room     string
+	Group    string
+	DM       string
+	BeforeID string
 }
 
 func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
@@ -845,8 +895,16 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 
 	// Header
 	title := m.room
+	if title != "" && m.resolveRoomName != nil {
+		title = m.resolveRoomName(title)
+	}
 	if title == "" {
-		title = m.conversation
+		title = m.group
+	}
+	if title == "" && m.dm != "" {
+		// For 1:1 DMs, use the DM ID as the title — the app layer will
+		// resolve it to the other party's display name via resolveName.
+		title = m.dm
 	}
 	if title == "" {
 		title = "no room selected"
@@ -1015,6 +1073,25 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 			typing = fmt.Sprintf("%d people are typing...", len(typingNames))
 		}
 		b.WriteString(systemMsgStyle.Render(" ── " + typing + " ──"))
+		b.WriteString("\n")
+	}
+
+	// Read-only / archived indicator. Shown when the user has left the
+	// current context. Messages above remain readable, but the input bar
+	// is disabled. Use /delete to remove the entry from your view.
+	if m.left {
+		var label string
+		switch {
+		case m.room != "":
+			label = "room"
+		case m.group != "":
+			label = "group"
+		case m.dm != "":
+			label = "DM"
+		default:
+			label = "context"
+		}
+		b.WriteString(systemMsgStyle.Render(" ── you left this " + label + " — read-only — type /delete to remove from your view ──"))
 		b.WriteString("\n")
 	}
 

@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"database/sql"
 	"fmt"
 	"net"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	_ "github.com/mutecomm/go-sqlcipher/v4"
 )
 
 // StartTestServer builds and starts sshkey-server with test config.
@@ -44,8 +47,6 @@ func StartTestServer(t testing.TB) (port int, cleanup func()) {
 	serverToml, _ := os.ReadFile(filepath.Join(testdataDir, "server.toml"))
 	overridden := strings.Replace(string(serverToml), "port = 2222", fmt.Sprintf("port = %d", port), 1)
 	overridden = strings.Replace(overridden, `bind = "0.0.0.0"`, `bind = "127.0.0.1"`, 1)
-	// Replace admin placeholder with the real generated nanoid
-	overridden = strings.Replace(overridden, `admins = ["usr_alice_test"]`, fmt.Sprintf(`admins = ["%s"]`, AdminUsername()), 1)
 	os.WriteFile(filepath.Join(overrideConfig, "server.toml"), []byte(overridden), 0644)
 
 	// Build and run server
@@ -65,6 +66,9 @@ func StartTestServer(t testing.TB) (port int, cleanup func()) {
 	}
 
 	time.Sleep(500 * time.Millisecond)
+
+	// Promote alice to admin in users.db (server reads from DB on demand)
+	promoteAdmin(t, dataDir, AdminUserID())
 
 	return port, func() {
 		cmd.Process.Kill()
@@ -104,4 +108,20 @@ func findTestdataDir() string {
 	}
 	// Fallback: sshkey-chat's testdata
 	return filepath.Join(findServerDir(), "testdata", "config")
+}
+
+// promoteAdmin sets the admin flag directly in users.db.
+// Called after the server starts and seeds users.db.
+func promoteAdmin(t testing.TB, dataDir, userID string) {
+	t.Helper()
+	dbPath := filepath.Join(dataDir, "data", "users.db")
+	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open users.db for admin promote: %v", err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`UPDATE users SET admin = 1 WHERE id = ?`, userID)
+	if err != nil {
+		t.Fatalf("promote admin: %v", err)
+	}
 }

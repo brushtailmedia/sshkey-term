@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -21,10 +22,10 @@ type NotificationConfig struct {
 	Desktop          string   `toml:"desktop"`            // "all", "mentions", "off" (default: "all")
 	Bell             string   `toml:"bell"`               // "all", "mentions", "dms", "off" (default: "mentions")
 	BellMuteRooms    []string `toml:"bell_mute_rooms"`    // room names where bell is silenced
-	BellMuteDMs      bool     `toml:"bell_mute_dms"`      // silence bell for all DMs
+	BellMuteDMs      bool     `toml:"bell_mute_dms"`      // silence bell for all group DMs
 	BellMuteMentions bool     `toml:"bell_mute_mentions"` // silence bell for @mentions
 	MutedRooms       []string `toml:"muted_rooms"`        // rooms muted via info panel
-	MutedConversations []string `toml:"muted_conversations"` // conversations muted via info panel
+	MutedGroups      []string `toml:"muted_groups"`       // group DMs muted via info panel
 	HelpShown        bool     `toml:"help_shown"`         // true after first-time help hint dismissed
 }
 
@@ -164,31 +165,35 @@ func ClearServerData(configDir string, server ServerConfig) error {
 	return nil
 }
 
-// LoadMutedMap returns a map of muted rooms/conversations from config.
+// LoadMutedMap returns a map of muted rooms and group DMs from config.
 func LoadMutedMap(cfg *Config) map[string]bool {
 	muted := make(map[string]bool)
 	for _, r := range cfg.Notifications.MutedRooms {
 		muted[r] = true
 	}
-	for _, c := range cfg.Notifications.MutedConversations {
-		muted[c] = true
+	for _, g := range cfg.Notifications.MutedGroups {
+		muted[g] = true
 	}
 	return muted
 }
 
-// SaveMutedMap writes the mute state back to config.
+// SaveMutedMap writes the mute state back to config. Targets are bucketed
+// by ID prefix: room_xxx → MutedRooms, group_xxx → MutedGroups. 1:1 DMs
+// (Phase C) will get their own bucket when they land.
 func SaveMutedMap(dir string, cfg *Config, muted map[string]bool) error {
 	cfg.Notifications.MutedRooms = nil
-	cfg.Notifications.MutedConversations = nil
+	cfg.Notifications.MutedGroups = nil
 	for target, isMuted := range muted {
 		if !isMuted {
 			continue
 		}
-		// Convention: rooms don't have underscores after prefix, conversations start with conv_
-		if len(target) > 5 && target[:5] == "conv_" {
-			cfg.Notifications.MutedConversations = append(cfg.Notifications.MutedConversations, target)
-		} else {
+		switch {
+		case strings.HasPrefix(target, "group_"):
+			cfg.Notifications.MutedGroups = append(cfg.Notifications.MutedGroups, target)
+		case strings.HasPrefix(target, "room_"):
 			cfg.Notifications.MutedRooms = append(cfg.Notifications.MutedRooms, target)
+		default:
+			// Unknown prefix — drop it. Better than misclassifying.
 		}
 	}
 	return Save(dir, cfg)

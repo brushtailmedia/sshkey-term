@@ -30,7 +30,7 @@ type Welcome struct {
 	DisplayName        string   `json:"display_name"`
 	Admin              bool     `json:"admin"`
 	Rooms              []string `json:"rooms"`
-	Conversations      []string `json:"conversations"`
+	Groups             []string `json:"groups"`
 	PendingSync        bool     `json:"pending_sync"`
 	ActiveCapabilities []string `json:"active_capabilities"`
 }
@@ -80,66 +80,187 @@ type Message struct {
 	Signature string   `json:"signature"`
 }
 
-// DMs
+// Group DMs
+//
+// 1:1 DMs are NOT supported in this protocol version — they will land in
+// chunk C of the Phase 11 refactor with their own type set (`create_dm`,
+// `dm`, `dm_left`, etc.). Until then, "DM" in client code always refers
+// to a multi-party group DM.
 
-type CreateDM struct {
+type CreateGroup struct {
 	Type    string   `json:"type"`
 	Members []string `json:"members"`
 	Name    string   `json:"name,omitempty"`
 }
 
+type GroupCreated struct {
+	Type    string   `json:"type"`
+	Group   string   `json:"group"`
+	Members []string `json:"members"`
+	Name    string   `json:"name,omitempty"`
+}
+
+type SendGroup struct {
+	Type        string            `json:"type"`
+	Group       string            `json:"group"`
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	FileIDs     []string          `json:"file_ids,omitempty"`
+	Signature   string            `json:"signature"`
+}
+
+type GroupMessage struct {
+	Type        string            `json:"type"`
+	ID          string            `json:"id"`
+	From        string            `json:"from"`
+	Group       string            `json:"group"`
+	TS          int64             `json:"ts"`
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	FileIDs     []string          `json:"file_ids,omitempty"`
+	Signature   string            `json:"signature"`
+}
+
+type LeaveGroup struct {
+	Type  string `json:"type"`
+	Group string `json:"group"`
+}
+
+// DeleteGroup is the client request to remove a group DM from every
+// device on the user's account. Distinct from leave_group: leave keeps
+// local history (read-only); delete purges local history on every
+// device. See sshkey-chat/internal/protocol/messages.go for the full
+// design notes.
+type DeleteGroup struct {
+	Type  string `json:"type"`
+	Group string `json:"group"`
+}
+
+// GroupDeleted is the canonical echo for delete_group. The server sends
+// it to every connected session of the deleting user. Receiving this
+// always triggers a local purge regardless of which device initiated
+// the delete.
+type GroupDeleted struct {
+	Type  string `json:"type"`
+	Group string `json:"group"`
+}
+
+// DeletedGroupsList is the offline-catchup payload sent during the
+// connect handshake (BEFORE group_list) listing every group ID this
+// user has previously /delete'd. Clients run the same purge path as
+// group_deleted for each entry.
+type DeletedGroupsList struct {
+	Type   string   `json:"type"`
+	Groups []string `json:"groups"`
+}
+
+type RenameGroup struct {
+	Type  string `json:"type"`
+	Group string `json:"group"`
+	Name  string `json:"name"`
+}
+
+type GroupRenamed struct {
+	Type      string `json:"type"`
+	Group     string `json:"group"`
+	Name      string `json:"name"`
+	RenamedBy string `json:"renamed_by"`
+}
+
+type GroupEvent struct {
+	Type   string `json:"type"`
+	Group  string `json:"group"`
+	Event  string `json:"event"`
+	User   string `json:"user"`
+	Reason string `json:"reason,omitempty"` // "retirement" when leave was caused by account retirement
+}
+
+// GroupLeft is the server's confirmation that a leave_group request
+// succeeded. Sent only to the leaving user (across all of their active
+// sessions). The leaver is not included in group_event broadcasts because
+// they have already been removed from member lists.
+type GroupLeft struct {
+	Type   string `json:"type"`
+	Group  string `json:"group"`
+	Reason string `json:"reason,omitempty"` // "" | "admin" | "retirement"
+}
+
+// LeaveRoom requests that the server remove the caller from a room. Gated
+// by the server's allow_self_leave_rooms config flag — when disabled, the
+// server returns an "forbidden" error and does not touch state.
+type LeaveRoom struct {
+	Type string `json:"type"` // "leave_room"
+	Room string `json:"room"`
+}
+
+// RoomLeft is the server's confirmation that a leave_room request
+// succeeded. Sent to every active session of the leaving user. The leaver
+// is not included in room_event broadcasts because they have already been
+// removed from room_members.
+type RoomLeft struct {
+	Type   string `json:"type"` // "room_left"
+	Room   string `json:"room"`
+	Reason string `json:"reason,omitempty"` // "" | "admin" | "retirement" | "user_retired"
+}
+
+// 1:1 DM messages
+
+type CreateDM struct {
+	Type  string `json:"type"`  // "create_dm"
+	Other string `json:"other"` // single other user ID
+}
+
 type DMCreated struct {
-	Type         string   `json:"type"`
-	Conversation string   `json:"conversation"`
-	Members      []string `json:"members"`
-	Name         string   `json:"name,omitempty"`
+	Type    string   `json:"type"`    // "dm_created"
+	DM      string   `json:"dm"`
+	Members []string `json:"members"` // always [user_a, user_b]
 }
 
 type SendDM struct {
-	Type         string            `json:"type"`
-	Conversation string            `json:"conversation"`
-	WrappedKeys  map[string]string `json:"wrapped_keys"`
-	Payload      string            `json:"payload"`
-	FileIDs      []string          `json:"file_ids,omitempty"`
-	Signature    string            `json:"signature"`
+	Type        string            `json:"type"` // "send_dm"
+	DM          string            `json:"dm"`
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	FileIDs     []string          `json:"file_ids,omitempty"`
+	Signature   string            `json:"signature"`
 }
 
 type DM struct {
-	Type         string            `json:"type"`
-	ID           string            `json:"id"`
-	From         string            `json:"from"`
-	Conversation string            `json:"conversation"`
-	TS           int64             `json:"ts"`
-	WrappedKeys  map[string]string `json:"wrapped_keys"`
-	Payload      string            `json:"payload"`
-	FileIDs      []string          `json:"file_ids,omitempty"`
-	Signature    string            `json:"signature"`
+	Type        string            `json:"type"` // "dm"
+	ID          string            `json:"id"`
+	From        string            `json:"from"`
+	DM          string            `json:"dm"`
+	TS          int64             `json:"ts"`
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	FileIDs     []string          `json:"file_ids,omitempty"`
+	Signature   string            `json:"signature"`
 }
 
-type LeaveConversation struct {
-	Type         string `json:"type"`
-	Conversation string `json:"conversation"`
+type LeaveDM struct {
+	Type string `json:"type"` // "leave_dm"
+	DM   string `json:"dm"`
 }
 
-type RenameConversation struct {
-	Type         string `json:"type"`
-	Conversation string `json:"conversation"`
-	Name         string `json:"name"`
+type DMLeft struct {
+	Type string `json:"type"` // "dm_left"
+	DM   string `json:"dm"`
 }
 
-type ConversationRenamed struct {
-	Type         string `json:"type"`
-	Conversation string `json:"conversation"`
-	Name         string `json:"name"`
-	RenamedBy    string `json:"renamed_by"`
+type DMList struct {
+	Type string   `json:"type"` // "dm_list"
+	DMs  []DMInfo `json:"dms"`
 }
 
-type ConversationEvent struct {
-	Type         string `json:"type"`
-	Conversation string `json:"conversation"`
-	Event        string `json:"event"`
-	User         string `json:"user"`
-	Reason       string `json:"reason,omitempty"` // "retirement" when leave was caused by account retirement
+type DMInfo struct {
+	ID      string   `json:"id"`
+	Members []string `json:"members"` // always [user_a, user_b]
+	// LeftAtForCaller is the per-user history cutoff for the recipient of
+	// this dm_list. 0 = the caller is an active party. >0 = the caller has
+	// previously left this DM and the unix timestamp tells the client when.
+	// Used by sync to propagate /delete state to other devices that were
+	// offline when the leave happened.
+	LeftAtForCaller int64 `json:"left_at_for_caller,omitempty"`
 }
 
 // Deletion
@@ -150,66 +271,72 @@ type Delete struct {
 }
 
 type Deleted struct {
-	Type         string `json:"type"`
-	ID           string `json:"id"`
-	DeletedBy    string `json:"deleted_by"`
-	TS           int64  `json:"ts"`
-	Room         string `json:"room,omitempty"`
-	Conversation string `json:"conversation,omitempty"`
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	DeletedBy string `json:"deleted_by"`
+	TS        int64  `json:"ts"`
+	Room      string `json:"room,omitempty"`
+	Group     string `json:"group,omitempty"`
+	DM        string `json:"dm,omitempty"`
 }
 
 // Typing
 
 type Typing struct {
-	Type         string `json:"type"`
-	Room         string `json:"room,omitempty"`
-	Conversation string `json:"conversation,omitempty"`
-	User         string `json:"user,omitempty"`
+	Type  string `json:"type"`
+	Room  string `json:"room,omitempty"`
+	Group string `json:"group,omitempty"`
+	DM    string `json:"dm,omitempty"`
+	User  string `json:"user,omitempty"`
 }
 
 // Read receipts
 
 type Read struct {
-	Type         string `json:"type"`
-	Room         string `json:"room,omitempty"`
-	Conversation string `json:"conversation,omitempty"`
-	User         string `json:"user,omitempty"`
-	LastRead     string `json:"last_read"`
+	Type     string `json:"type"`
+	Room     string `json:"room,omitempty"`
+	Group    string `json:"group,omitempty"`
+	DM       string `json:"dm,omitempty"`
+	User     string `json:"user,omitempty"`
+	LastRead string `json:"last_read"`
 }
 
 type Unread struct {
-	Type         string `json:"type"`
-	Room         string `json:"room,omitempty"`
-	Conversation string `json:"conversation,omitempty"`
-	Count        int    `json:"count"`
-	LastRead     string `json:"last_read"`
+	Type     string `json:"type"`
+	Room     string `json:"room,omitempty"`
+	Group    string `json:"group,omitempty"`
+	DM       string `json:"dm,omitempty"`
+	Count    int    `json:"count"`
+	LastRead string `json:"last_read"`
 }
 
 // Reactions
 
 type React struct {
-	Type         string            `json:"type"`
-	ID           string            `json:"id"`
-	Room         string            `json:"room,omitempty"`
-	Conversation string            `json:"conversation,omitempty"`
-	Epoch        int64             `json:"epoch,omitempty"`
-	WrappedKeys  map[string]string `json:"wrapped_keys,omitempty"`
-	Payload      string            `json:"payload"`
-	Signature    string            `json:"signature"`
+	Type        string            `json:"type"`
+	ID          string            `json:"id"`
+	Room        string            `json:"room,omitempty"`
+	Group       string            `json:"group,omitempty"`
+	DM          string            `json:"dm,omitempty"`
+	Epoch       int64             `json:"epoch,omitempty"`
+	WrappedKeys map[string]string `json:"wrapped_keys,omitempty"`
+	Payload     string            `json:"payload"`
+	Signature   string            `json:"signature"`
 }
 
 type Reaction struct {
-	Type         string            `json:"type"`
-	ReactionID   string            `json:"reaction_id"`
-	ID           string            `json:"id"`
-	Room         string            `json:"room,omitempty"`
-	Conversation string            `json:"conversation,omitempty"`
-	User         string            `json:"user"`
-	TS           int64             `json:"ts"`
-	Epoch        int64             `json:"epoch,omitempty"`
-	WrappedKeys  map[string]string `json:"wrapped_keys,omitempty"`
-	Payload      string            `json:"payload"`
-	Signature    string            `json:"signature"`
+	Type        string            `json:"type"`
+	ReactionID  string            `json:"reaction_id"`
+	ID          string            `json:"id"`
+	Room        string            `json:"room,omitempty"`
+	Group       string            `json:"group,omitempty"`
+	DM          string            `json:"dm,omitempty"`
+	User        string            `json:"user"`
+	TS          int64             `json:"ts"`
+	Epoch       int64             `json:"epoch,omitempty"`
+	WrappedKeys map[string]string `json:"wrapped_keys,omitempty"`
+	Payload     string            `json:"payload"`
+	Signature   string            `json:"signature"`
 }
 
 type Unreact struct {
@@ -218,12 +345,13 @@ type Unreact struct {
 }
 
 type ReactionRemoved struct {
-	Type         string `json:"type"`
-	ReactionID   string `json:"reaction_id"`
-	ID           string `json:"id"`
-	Room         string `json:"room,omitempty"`
-	Conversation string `json:"conversation,omitempty"`
-	User         string `json:"user"`
+	Type       string `json:"type"`
+	ReactionID string `json:"reaction_id"`
+	ID         string `json:"id"`
+	Room       string `json:"room,omitempty"`
+	Group      string `json:"group,omitempty"`
+	DM         string `json:"dm,omitempty"`
+	User       string `json:"user"`
 }
 
 // Pins
@@ -298,7 +426,7 @@ type Presence struct {
 	LastSeen    string `json:"last_seen,omitempty"`
 }
 
-// Room/conversation lists
+// Room and group DM lists
 
 type RoomList struct {
 	Type  string     `json:"type"`
@@ -306,24 +434,26 @@ type RoomList struct {
 }
 
 type RoomInfo struct {
+	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Topic   string `json:"topic"`
 	Members int    `json:"members"`
 }
 
 type RoomEvent struct {
-	Type  string `json:"type"`
-	Room  string `json:"room"`
-	Event string `json:"event"`
-	User  string `json:"user"`
+	Type   string `json:"type"`
+	Room   string `json:"room"`
+	Event  string `json:"event"`
+	User   string `json:"user"`
+	Reason string `json:"reason,omitempty"` // "" | "admin" | "retirement" | "user_retired"
 }
 
-type ConversationList struct {
-	Type          string             `json:"type"`
-	Conversations []ConversationInfo `json:"conversations"`
+type GroupList struct {
+	Type   string      `json:"type"`
+	Groups []GroupInfo `json:"groups"`
 }
 
-type ConversationInfo struct {
+type GroupInfo struct {
 	ID      string   `json:"id"`
 	Members []string `json:"members"`
 	Name    string   `json:"name,omitempty"`
@@ -332,21 +462,23 @@ type ConversationInfo struct {
 // History
 
 type History struct {
-	Type         string `json:"type"`
-	Room         string `json:"room,omitempty"`
-	Conversation string `json:"conversation,omitempty"`
-	Before       string `json:"before"`
-	Limit        int    `json:"limit"`
+	Type   string `json:"type"`
+	Room   string `json:"room,omitempty"`
+	Group  string `json:"group,omitempty"`
+	DM     string `json:"dm,omitempty"`
+	Before string `json:"before"`
+	Limit  int    `json:"limit"`
 }
 
 type HistoryResult struct {
-	Type         string         `json:"type"`
-	Room         string         `json:"room,omitempty"`
-	Conversation string         `json:"conversation,omitempty"`
-	Messages     []RawMessage   `json:"messages"`
-	Reactions    []RawMessage   `json:"reactions,omitempty"`
-	EpochKeys    []SyncEpochKey `json:"epoch_keys,omitempty"`
-	HasMore      bool           `json:"has_more"`
+	Type      string         `json:"type"`
+	Room      string         `json:"room,omitempty"`
+	Group     string         `json:"group,omitempty"`
+	DM        string         `json:"dm,omitempty"`
+	Messages  []RawMessage   `json:"messages"`
+	Reactions []RawMessage   `json:"reactions,omitempty"`
+	EpochKeys []SyncEpochKey `json:"epoch_keys,omitempty"`
+	HasMore   bool           `json:"has_more"`
 }
 
 // Epoch keys
@@ -387,12 +519,13 @@ type EpochConfirmed struct {
 // File transfer
 
 type UploadStart struct {
-	Type         string `json:"type"`
-	UploadID     string `json:"upload_id"`
-	Size         int64  `json:"size"`
-	ContentHash  string `json:"content_hash"` // "blake2b-256:<hex>" of encrypted bytes
-	Room         string `json:"room,omitempty"`
-	Conversation string `json:"conversation,omitempty"`
+	Type        string `json:"type"`
+	UploadID    string `json:"upload_id"`
+	Size        int64  `json:"size"`
+	ContentHash string `json:"content_hash"` // "blake2b-256:<hex>" of encrypted bytes
+	Room        string `json:"room,omitempty"`
+	Group       string `json:"group,omitempty"`
+	DM          string `json:"dm,omitempty"`
 }
 
 type UploadReady struct {

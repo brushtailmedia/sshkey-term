@@ -55,15 +55,17 @@ func TestFileTransferComprehensive(t *testing.T) {
 	// Wait for epoch rotation so file uploads have a key
 	time.Sleep(time.Second)
 
+	generalID := roomIDByName(t, alice, "general")
+
 	// Create a 1:1 DM (alice <-> bob) and a group DM (alice, bob, carol)
-	alice.CreateDM([]string{testutil.Bob.Username}, "")
+	alice.CreateDM([]string{testutil.Bob.UserID}, "")
 	raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 	var oneToOne protocol.DMCreated
 	json.Unmarshal(raw, &oneToOne)
 	dmConvID := oneToOne.Conversation
 	waitForType(t, bobMessages, "dm_created", 5*time.Second)
 
-	alice.CreateDM([]string{testutil.Bob.Username, testutil.Carol.Username}, "Group")
+	alice.CreateDM([]string{testutil.Bob.UserID, testutil.Carol.UserID}, "Group")
 	raw = waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 	var group protocol.DMCreated
 	json.Unmarshal(raw, &group)
@@ -106,7 +108,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		content := "room attachment v1 — hello from alice"
 		path := mkTempFile("room-single", content)
 
-		err := alice.SendRoomMessageFile("general", "here's a file", path, "", nil)
+		err := alice.SendRoomMessageFile(generalID, "here's a file", path, "", nil)
 		if err != nil {
 			t.Fatalf("alice send: %v", err)
 		}
@@ -161,7 +163,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		// Upload each file separately, then send ONE message referencing all
 		attachments := make([]protocol.Attachment, len(paths))
 		for i, p := range paths {
-			fileID, _, err := alice.UploadFile(p, "general", "")
+			fileID, _, err := alice.UploadFile(p, generalID, "")
 			if err != nil {
 				t.Fatalf("upload %d: %v", i, err)
 			}
@@ -174,7 +176,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 			}
 		}
 
-		err := alice.SendRoomMessageFull("general", "3 attachments", "", nil, attachments)
+		err := alice.SendRoomMessageFull(generalID, "3 attachments", "", nil, attachments)
 		if err != nil {
 			t.Fatalf("send: %v", err)
 		}
@@ -421,7 +423,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				fileIDs[i], _, errs[i] = alice.UploadFile(paths[i], "general", "")
+				fileIDs[i], _, errs[i] = alice.UploadFile(paths[i], generalID, "")
 			}(i)
 		}
 		wg.Wait()
@@ -447,7 +449,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		// Bob downloads each and verifies content maps to the right file
 		// We know the mapping: fileIDs[i] contains contents[i]
 		for i := 0; i < N; i++ {
-			key := alice.RoomEpochKey("general", alice.CurrentEpoch("general"))
+			key := alice.RoomEpochKey(generalID, alice.CurrentEpoch(generalID))
 			localPath, err := bob.DownloadFile(fileIDs[i], key)
 			if err != nil {
 				t.Fatalf("download %d: %v", i, err)
@@ -473,7 +475,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		// Alice uploads them sequentially (we're testing downloads, not uploads)
 		fileIDs := make([]string, N)
 		for i := 0; i < N; i++ {
-			id, _, err := alice.UploadFile(paths[i], "general", "")
+			id, _, err := alice.UploadFile(paths[i], generalID, "")
 			if err != nil {
 				t.Fatalf("upload %d: %v", i, err)
 			}
@@ -482,7 +484,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 
 		// Bob downloads all in parallel — this is the real stress test
 		// for the downloadChanMu serialization
-		epochKey := bob.RoomEpochKey("general", bob.CurrentEpoch("general"))
+		epochKey := bob.RoomEpochKey(generalID, bob.CurrentEpoch(generalID))
 		if epochKey == nil {
 			t.Fatalf("bob has no epoch key")
 		}
@@ -516,7 +518,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		// Pre-upload a file for bob to download
 		dlContent := "file for download while upload is happening"
 		dlPath := mkTempFile("mixed-dl", dlContent)
-		dlFileID, _, err := alice.UploadFile(dlPath, "general", "")
+		dlFileID, _, err := alice.UploadFile(dlPath, generalID, "")
 		if err != nil {
 			t.Fatalf("pre-upload: %v", err)
 		}
@@ -525,7 +527,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		ulContent := "upload happening during download"
 		ulPath := mkTempFile("mixed-ul", ulContent)
 
-		epochKey := bob.RoomEpochKey("general", bob.CurrentEpoch("general"))
+		epochKey := bob.RoomEpochKey(generalID, bob.CurrentEpoch(generalID))
 
 		// Run both operations in parallel goroutines
 		var wg sync.WaitGroup
@@ -539,7 +541,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			ulFileID, _, ulErr = alice.UploadFile(ulPath, "general", "")
+			ulFileID, _, ulErr = alice.UploadFile(ulPath, generalID, "")
 		}()
 		wg.Wait()
 
@@ -566,7 +568,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 	// Download error: server rejects request, client fails fast (not hang)
 	// =========================================================================
 	t.Run("download_not_found", func(t *testing.T) {
-		epochKey := bob.RoomEpochKey("general", bob.CurrentEpoch("general"))
+		epochKey := bob.RoomEpochKey(generalID, bob.CurrentEpoch(generalID))
 		if epochKey == nil {
 			t.Fatalf("bob has no epoch key")
 		}
@@ -593,7 +595,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		// residual state)
 		content := "post-error download works"
 		path := mkTempFile("post-error", content)
-		fileID, _, err := alice.UploadFile(path, "general", "")
+		fileID, _, err := alice.UploadFile(path, generalID, "")
 		if err != nil {
 			t.Fatalf("upload: %v", err)
 		}
@@ -613,7 +615,7 @@ func TestFileTransferComprehensive(t *testing.T) {
 		content := "content hash verification — BLAKE2b-256"
 		path := mkTempFile("hash-test", content)
 
-		err := alice.SendRoomMessageFile("general", "hash test", path, "", nil)
+		err := alice.SendRoomMessageFile(generalID, "hash test", path, "", nil)
 		if err != nil {
 			t.Fatalf("upload: %v", err)
 		}

@@ -19,18 +19,19 @@ type StoredAttachment struct {
 
 // StoredMessage represents a message in the local DB.
 type StoredMessage struct {
-	ID           string
-	Sender       string
-	Body         string
-	TS           int64
-	Room         string
-	Conversation string
-	Epoch        int64
-	ReplyTo      string
-	Mentions     []string
-	Deleted      bool
-	DeletedBy    string
-	Attachments  []StoredAttachment
+	ID          string
+	Sender      string
+	Body        string
+	TS          int64
+	Room        string
+	Group       string
+	DM          string
+	Epoch       int64
+	ReplyTo     string
+	Mentions    []string
+	Deleted     bool
+	DeletedBy   string
+	Attachments []StoredAttachment
 }
 
 // InsertMessage stores a decrypted message.
@@ -45,9 +46,9 @@ func (s *Store) InsertMessage(msg StoredMessage) error {
 		}
 	}
 	_, err := s.db.Exec(`
-		INSERT OR IGNORE INTO messages (id, sender, body, ts, room, conversation, epoch, reply_to, mentions, has_attachments, attachments)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, msg.Sender, msg.Body, msg.TS, msg.Room, msg.Conversation, msg.Epoch, msg.ReplyTo, mentions, hasAttach, attachJSON,
+		INSERT OR IGNORE INTO messages (id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, has_attachments, attachments)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, msg.Sender, msg.Body, msg.TS, msg.Room, msg.Group, msg.DM, msg.Epoch, msg.ReplyTo, mentions, hasAttach, attachJSON,
 	)
 	return err
 }
@@ -55,7 +56,7 @@ func (s *Store) InsertMessage(msg StoredMessage) error {
 // GetRoomMessages returns messages for a room, ordered by timestamp ascending.
 func (s *Store) GetRoomMessages(room string, limit int) ([]StoredMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions, deleted, deleted_by, attachments
+		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments
 		FROM messages WHERE room = ? ORDER BY rowid DESC LIMIT ?`,
 		room, limit,
 	)
@@ -76,12 +77,35 @@ func (s *Store) GetRoomMessages(room string, limit int) ([]StoredMessage, error)
 	return msgs, nil
 }
 
-// GetConvMessages returns messages for a conversation, ordered by timestamp ascending.
-func (s *Store) GetConvMessages(convID string, limit int) ([]StoredMessage, error) {
+// GetGroupMessages returns messages for a group DM, ordered by timestamp ascending.
+func (s *Store) GetGroupMessages(groupID string, limit int) ([]StoredMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions, deleted, deleted_by, attachments
-		FROM messages WHERE conversation = ? ORDER BY rowid DESC LIMIT ?`,
-		convID, limit,
+		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments
+		FROM messages WHERE group_id = ? ORDER BY rowid DESC LIMIT ?`,
+		groupID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	msgs, err := scanMessages(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
+}
+
+// GetDMMessages returns messages for a 1:1 DM, ordered by timestamp ascending.
+func (s *Store) GetDMMessages(dmID string, limit int) ([]StoredMessage, error) {
+	rows, err := s.db.Query(`
+		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments
+		FROM messages WHERE dm_id = ? ORDER BY rowid DESC LIMIT ?`,
+		dmID, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -100,25 +124,28 @@ func (s *Store) GetConvMessages(convID string, limit int) ([]StoredMessage, erro
 }
 
 // GetMessagesBefore returns messages before a given ID for scroll-back.
-func (s *Store) GetMessagesBefore(room, convID, beforeID string, limit int) ([]StoredMessage, error) {
+func (s *Store) GetMessagesBefore(room, groupID, dmID, beforeID string, limit int) ([]StoredMessage, error) {
 	var rows *sql.Rows
 	var err error
 
-	if room != "" {
-		rows, err = s.db.Query(`
-			SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions, deleted, deleted_by, attachments
-			FROM messages WHERE room = ? AND rowid < (SELECT rowid FROM messages WHERE id = ?)
-			ORDER BY rowid DESC LIMIT ?`,
-			room, beforeID, limit,
-		)
-	} else {
-		rows, err = s.db.Query(`
-			SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions, deleted, deleted_by, attachments
-			FROM messages WHERE conversation = ? AND rowid < (SELECT rowid FROM messages WHERE id = ?)
-			ORDER BY rowid DESC LIMIT ?`,
-			convID, beforeID, limit,
-		)
+	var col, val string
+	switch {
+	case room != "":
+		col, val = "room", room
+	case groupID != "":
+		col, val = "group_id", groupID
+	case dmID != "":
+		col, val = "dm_id", dmID
+	default:
+		return nil, nil
 	}
+
+	rows, err = s.db.Query(`
+		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments
+		FROM messages WHERE `+col+` = ? AND rowid < (SELECT rowid FROM messages WHERE id = ?)
+		ORDER BY rowid DESC LIMIT ?`,
+		val, beforeID, limit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +245,7 @@ func (s *Store) GetReactionsForMessages(messageIDs []string) ([]StoredReaction, 
 func (s *Store) SearchMessages(query string, limit int) ([]StoredMessage, error) {
 	// Try FTS5 first
 	rows, err := s.db.Query(`
-		SELECT m.id, m.sender, m.body, m.ts, m.room, m.conversation, m.epoch, m.reply_to, m.mentions, m.deleted, m.deleted_by, m.attachments
+		SELECT m.id, m.sender, m.body, m.ts, m.room, m.group_id, m.dm_id, m.epoch, m.reply_to, m.mentions, m.deleted, m.deleted_by, m.attachments
 		FROM messages_fts f
 		JOIN messages m ON f.rowid = m.rowid
 		WHERE messages_fts MATCH ? AND m.deleted = 0
@@ -233,7 +260,7 @@ func (s *Store) SearchMessages(query string, limit int) ([]StoredMessage, error)
 	// FTS5 not available — fall back to LIKE
 	likeQuery := "%" + query + "%"
 	rows, err = s.db.Query(`
-		SELECT id, sender, body, ts, room, conversation, epoch, reply_to, mentions, deleted, deleted_by, attachments
+		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments
 		FROM messages
 		WHERE deleted = 0 AND (body LIKE ? OR sender LIKE ?)
 		ORDER BY ts DESC LIMIT ?`,
@@ -253,7 +280,7 @@ func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 		var mentionsStr string
 		var deleted int
 		var attachJSON string
-		err := rows.Scan(&m.ID, &m.Sender, &m.Body, &m.TS, &m.Room, &m.Conversation, &m.Epoch, &m.ReplyTo, &mentionsStr, &deleted, &m.DeletedBy, &attachJSON)
+		err := rows.Scan(&m.ID, &m.Sender, &m.Body, &m.TS, &m.Room, &m.Group, &m.DM, &m.Epoch, &m.ReplyTo, &mentionsStr, &deleted, &m.DeletedBy, &attachJSON)
 		if err != nil {
 			return nil, err
 		}

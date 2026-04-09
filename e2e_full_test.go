@@ -126,8 +126,8 @@ func TestFullE2E(t *testing.T) {
 			t.Fatal("alice sync timeout")
 		}
 
-		if alice.Username() != testutil.Alice.Username {
-			t.Errorf("alice username = %q", alice.Username())
+		if alice.UserID() != testutil.Alice.UserID {
+			t.Errorf("alice username = %q", alice.UserID())
 		}
 		if !alice.IsAdmin() {
 			t.Error("alice should be admin")
@@ -171,8 +171,8 @@ func TestFullE2E(t *testing.T) {
 			t.Fatal("bob sync timeout")
 		}
 
-		if bob.Username() != testutil.Bob.Username {
-			t.Errorf("bob username = %q", bob.Username())
+		if bob.UserID() != testutil.Bob.UserID {
+			t.Errorf("bob username = %q", bob.UserID())
 		}
 
 		carol = client.New(client.Config{
@@ -203,9 +203,10 @@ func TestFullE2E(t *testing.T) {
 
 		time.Sleep(500 * time.Millisecond)
 
-		t.Logf("alice: user=%s admin=%v rooms=%v epoch=%d", alice.Username(), alice.IsAdmin(), alice.Rooms(), alice.CurrentEpoch("general"))
-		t.Logf("bob: user=%s rooms=%v epoch=%d", bob.Username(), bob.Rooms(), bob.CurrentEpoch("general"))
-		t.Logf("carol: user=%s rooms=%v epoch=%d", carol.Username(), carol.Rooms(), carol.CurrentEpoch("general"))
+		genID := roomIDByName(t, alice, "general")
+		t.Logf("alice: user=%s admin=%v rooms=%v epoch=%d", alice.UserID(), alice.IsAdmin(), alice.Rooms(), alice.CurrentEpoch(genID))
+		t.Logf("bob: user=%s rooms=%v epoch=%d", bob.UserID(), bob.Rooms(), bob.CurrentEpoch(genID))
+		t.Logf("carol: user=%s rooms=%v epoch=%d", carol.UserID(), carol.Rooms(), carol.CurrentEpoch(genID))
 		t.Log("connect: PASSED")
 	})
 
@@ -213,12 +214,14 @@ func TestFullE2E(t *testing.T) {
 	defer bob.Close()
 	defer carol.Close()
 
+	generalID := roomIDByName(t, alice, "general")
+
 	// =========================================================================
 	// 4. Profile delivery and key pinning
 	// =========================================================================
 	t.Run("profiles_and_pinning", func(t *testing.T) {
-		aliceProfile := alice.Profile(testutil.Alice.Username)
-		bobProfile := alice.Profile(testutil.Bob.Username)
+		aliceProfile := alice.Profile(testutil.Alice.UserID)
+		bobProfile := alice.Profile(testutil.Bob.UserID)
 
 		if aliceProfile == nil || bobProfile == nil {
 			t.Fatal("profiles not received")
@@ -232,7 +235,7 @@ func TestFullE2E(t *testing.T) {
 
 		// Check key pinning in local DB
 		if alice.Store() != nil {
-			fp, verified, err := alice.Store().GetPinnedKey(testutil.Bob.Username)
+			fp, verified, err := alice.Store().GetPinnedKey(testutil.Bob.UserID)
 			if err != nil {
 				t.Fatalf("get pinned key: %v", err)
 			}
@@ -250,8 +253,8 @@ func TestFullE2E(t *testing.T) {
 	// 5. Safety numbers
 	// =========================================================================
 	t.Run("safety_numbers", func(t *testing.T) {
-		aliceProfile := alice.Profile(testutil.Alice.Username)
-		bobProfile := alice.Profile(testutil.Bob.Username)
+		aliceProfile := alice.Profile(testutil.Alice.UserID)
+		bobProfile := alice.Profile(testutil.Bob.UserID)
 
 		alicePub, err := crypto.ParseSSHPubKey(aliceProfile.PubKey)
 		if err != nil {
@@ -279,11 +282,11 @@ func TestFullE2E(t *testing.T) {
 	// 6. Encrypted room messaging
 	// =========================================================================
 	t.Run("room_messaging", func(t *testing.T) {
-		if alice.CurrentEpoch("general") == 0 {
+		if alice.CurrentEpoch(generalID) == 0 {
 			t.Skip("no epoch key")
 		}
 
-		err := alice.SendRoomMessage("general", "Hello from full test!", "", nil)
+		err := alice.SendRoomMessage(generalID, "Hello from full test!", "", nil)
 		if err != nil {
 			t.Fatalf("alice send: %v", err)
 		}
@@ -317,11 +320,11 @@ func TestFullE2E(t *testing.T) {
 	// 7. Room message with @mention
 	// =========================================================================
 	t.Run("mentions", func(t *testing.T) {
-		if alice.CurrentEpoch("general") == 0 {
+		if alice.CurrentEpoch(generalID) == 0 {
 			t.Skip("no epoch key")
 		}
 
-		err := alice.SendRoomMessage("general", "Hey @bob check this", "", []string{testutil.Bob.Username})
+		err := alice.SendRoomMessage(generalID, "Hey @bob check this", "", []string{testutil.Bob.UserID})
 		if err != nil {
 			t.Fatalf("send: %v", err)
 		}
@@ -334,7 +337,7 @@ func TestFullE2E(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decrypt: %v", err)
 		}
-		if len(payload.Mentions) == 0 || payload.Mentions[0] != testutil.Bob.Username {
+		if len(payload.Mentions) == 0 || payload.Mentions[0] != testutil.Bob.UserID {
 			t.Errorf("mentions = %v, want [bob]", payload.Mentions)
 		}
 
@@ -346,18 +349,18 @@ func TestFullE2E(t *testing.T) {
 	// 8. Room message with reply
 	// =========================================================================
 	t.Run("reply", func(t *testing.T) {
-		if alice.CurrentEpoch("general") == 0 {
+		if alice.CurrentEpoch(generalID) == 0 {
 			t.Skip("no epoch key")
 		}
 
 		// Bob sends a message, alice replies
-		bob.SendRoomMessage("general", "original message", "", nil)
+		bob.SendRoomMessage(generalID, "original message", "", nil)
 		raw := waitForType(t, aliceMessages, "message", 5*time.Second)
 		var orig protocol.Message
 		json.Unmarshal(raw, &orig)
 		waitForType(t, bobMessages, "message", 5*time.Second) // bob's echo
 
-		alice.SendRoomMessage("general", "my reply", orig.ID, nil)
+		alice.SendRoomMessage(generalID, "my reply", orig.ID, nil)
 		raw = waitForType(t, bobMessages, "message", 5*time.Second)
 		var reply protocol.Message
 		json.Unmarshal(raw, &reply)
@@ -376,7 +379,7 @@ func TestFullE2E(t *testing.T) {
 	// =========================================================================
 	var dmConvID string
 	t.Run("dm_create", func(t *testing.T) {
-		alice.CreateDM([]string{testutil.Bob.Username}, "")
+		alice.CreateDM([]string{testutil.Bob.UserID}, "")
 
 		raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 		var created protocol.DMCreated
@@ -406,7 +409,7 @@ func TestFullE2E(t *testing.T) {
 	// 10. DM deduplication
 	// =========================================================================
 	t.Run("dm_dedup", func(t *testing.T) {
-		alice.CreateDM([]string{testutil.Bob.Username}, "")
+		alice.CreateDM([]string{testutil.Bob.UserID}, "")
 
 		raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 		var created protocol.DMCreated
@@ -533,7 +536,7 @@ func TestFullE2E(t *testing.T) {
 	var groupConvID string
 	t.Run("group_dm_create", func(t *testing.T) {
 		// Group DM with alice, bob, carol — named "Test Group"
-		alice.CreateDM([]string{testutil.Bob.Username, testutil.Carol.Username}, "Test Group")
+		alice.CreateDM([]string{testutil.Bob.UserID, testutil.Carol.UserID}, "Test Group")
 
 		raw := waitForType(t, aliceMessages, "dm_created", 5*time.Second)
 		var created protocol.DMCreated
@@ -627,7 +630,7 @@ func TestFullE2E(t *testing.T) {
 		var event protocol.ConversationEvent
 		json.Unmarshal(raw, &event)
 
-		if event.Event != "leave" || event.User != testutil.Carol.Username {
+		if event.Event != "leave" || event.User != testutil.Carol.UserID {
 			t.Errorf("event = %+v, want leave by carol", event)
 		}
 
@@ -691,11 +694,11 @@ func TestFullE2E(t *testing.T) {
 	// 12d. Three-user room messaging
 	// =========================================================================
 	t.Run("three_user_room", func(t *testing.T) {
-		if alice.CurrentEpoch("general") == 0 {
+		if alice.CurrentEpoch(generalID) == 0 {
 			t.Skip("no epoch key")
 		}
 
-		alice.SendRoomMessage("general", "hello all three of you", "", nil)
+		alice.SendRoomMessage(generalID, "hello all three of you", "", nil)
 
 		// Both bob and carol receive
 		bobRaw := waitForType(t, bobMessages, "message", 5*time.Second)
@@ -729,11 +732,11 @@ func TestFullE2E(t *testing.T) {
 	// 13. Message deletion
 	// =========================================================================
 	t.Run("delete_own_message", func(t *testing.T) {
-		if alice.CurrentEpoch("general") == 0 {
+		if alice.CurrentEpoch(generalID) == 0 {
 			t.Skip("no epoch key")
 		}
 
-		alice.SendRoomMessage("general", "delete me", "", nil)
+		alice.SendRoomMessage(generalID, "delete me", "", nil)
 		raw := waitForType(t, aliceMessages, "message", 5*time.Second)
 		var msg protocol.Message
 		json.Unmarshal(raw, &msg)
@@ -748,7 +751,7 @@ func TestFullE2E(t *testing.T) {
 		if del.ID != msg.ID {
 			t.Errorf("deleted ID = %q, want %q", del.ID, msg.ID)
 		}
-		if del.DeletedBy != testutil.Alice.Username {
+		if del.DeletedBy != testutil.Alice.UserID {
 			t.Errorf("deleted_by = %q", del.DeletedBy)
 		}
 
@@ -760,16 +763,16 @@ func TestFullE2E(t *testing.T) {
 	// 14. Typing indicators
 	// =========================================================================
 	t.Run("typing", func(t *testing.T) {
-		alice.SendTyping("general", "")
+		alice.SendTyping(generalID, "")
 
 		raw := waitForType(t, bobMessages, "typing", 3*time.Second)
 		var typ protocol.Typing
 		json.Unmarshal(raw, &typ)
 
-		if typ.User != testutil.Alice.Username {
+		if typ.User != testutil.Alice.UserID {
 			t.Errorf("typing user = %q", typ.User)
 		}
-		if typ.Room != "general" {
+		if typ.Room != generalID {
 			t.Errorf("typing room = %q", typ.Room)
 		}
 		t.Log("typing: PASSED")
@@ -779,13 +782,13 @@ func TestFullE2E(t *testing.T) {
 	// 15. Read receipts
 	// =========================================================================
 	t.Run("read_receipts", func(t *testing.T) {
-		alice.SendRead("general", "", "msg_test_123")
+		alice.SendRead(generalID, "", "msg_test_123")
 
 		raw := waitForType(t, bobMessages, "read", 3*time.Second)
 		var read protocol.Read
 		json.Unmarshal(raw, &read)
 
-		if read.User != testutil.Alice.Username {
+		if read.User != testutil.Alice.UserID {
 			t.Errorf("read user = %q", read.User)
 		}
 		if read.LastRead != "msg_test_123" {
@@ -804,7 +807,7 @@ func TestFullE2E(t *testing.T) {
 		}
 
 		// Messages should be stored
-		msgs, err := st.GetRoomMessages("general", 100)
+		msgs, err := st.GetRoomMessages(generalID, 100)
 		if err != nil {
 			t.Fatalf("get room messages: %v", err)
 		}
@@ -814,7 +817,7 @@ func TestFullE2E(t *testing.T) {
 		t.Logf("local DB has %d messages for general", len(msgs))
 
 		// Epoch keys should be stored
-		key, err := st.GetEpochKey("general", 1)
+		key, err := st.GetEpochKey(generalID, 1)
 		if err != nil {
 			t.Logf("epoch key not in local DB: %v", err)
 		} else if len(key) == 0 {
@@ -847,15 +850,15 @@ func TestFullE2E(t *testing.T) {
 	// 18. Seq counter increment (replay detection)
 	// =========================================================================
 	t.Run("seq_counters", func(t *testing.T) {
-		if alice.CurrentEpoch("general") == 0 {
+		if alice.CurrentEpoch(generalID) == 0 {
 			t.Skip("no epoch key")
 		}
 
-		alice.SendRoomMessage("general", "seq test 1", "", nil)
+		alice.SendRoomMessage(generalID, "seq test 1", "", nil)
 		raw1 := waitForType(t, bobMessages, "message", 5*time.Second)
 		waitForType(t, aliceMessages, "message", 5*time.Second)
 
-		alice.SendRoomMessage("general", "seq test 2", "", nil)
+		alice.SendRoomMessage(generalID, "seq test 2", "", nil)
 		raw2 := waitForType(t, bobMessages, "message", 5*time.Second)
 		waitForType(t, aliceMessages, "message", 5*time.Second)
 
@@ -877,8 +880,8 @@ func TestFullE2E(t *testing.T) {
 	// 19. Member hash computation
 	// =========================================================================
 	t.Run("member_hash", func(t *testing.T) {
-		h1 := crypto.MemberHash([]string{testutil.Alice.Username, testutil.Bob.Username})
-		h2 := crypto.MemberHash([]string{testutil.Bob.Username, testutil.Alice.Username})
+		h1 := crypto.MemberHash([]string{testutil.Alice.UserID, testutil.Bob.UserID})
+		h2 := crypto.MemberHash([]string{testutil.Bob.UserID, testutil.Alice.UserID})
 		if h1 != h2 {
 			t.Error("member hash not order-independent")
 		}
@@ -892,13 +895,13 @@ func TestFullE2E(t *testing.T) {
 	t.Run("mute_persistence", func(t *testing.T) {
 		cfg, _ := config.Load(aliceDir)
 
-		muted := map[string]bool{"general": true, dmConvID: true}
+		muted := map[string]bool{generalID: true, dmConvID: true}
 		config.SaveMutedMap(aliceDir, cfg, muted)
 
 		cfg2, _ := config.Load(aliceDir)
 		loaded := config.LoadMutedMap(cfg2)
 
-		if !loaded["general"] {
+		if !loaded[generalID] {
 			t.Error("general not muted after reload")
 		}
 		if !loaded[dmConvID] {
@@ -949,7 +952,7 @@ func TestFullE2E(t *testing.T) {
 	// 23. Key wrap/unwrap cross-user
 	// =========================================================================
 	t.Run("key_wrap_crossuser", func(t *testing.T) {
-		bobProfile := alice.Profile(testutil.Bob.Username)
+		bobProfile := alice.Profile(testutil.Bob.UserID)
 		if bobProfile == nil {
 			t.Skip("no bob profile")
 		}
@@ -1029,7 +1032,7 @@ func TestFullE2E(t *testing.T) {
 		bobMu.Lock()
 		found := false
 		for _, p := range bobProfiles {
-			if p.User == testutil.Alice.Username && p.DisplayName == "Alice Updated" {
+			if p.User == testutil.Alice.UserID && p.DisplayName == "Alice Updated" {
 				found = true
 				break
 			}
@@ -1063,12 +1066,12 @@ func TestFullE2E(t *testing.T) {
 	// 27. Encrypted reaction send + receive
 	// =========================================================================
 	t.Run("reaction_send_receive", func(t *testing.T) {
-		if alice.CurrentEpoch("general") == 0 {
+		if alice.CurrentEpoch(generalID) == 0 {
 			t.Skip("no epoch key")
 		}
 
 		// Alice sends a message
-		alice.SendRoomMessage("general", "react to this!", "", nil)
+		alice.SendRoomMessage(generalID, "react to this!", "", nil)
 		raw := waitForType(t, bobMessages, "message", 5*time.Second)
 		var msg protocol.Message
 		json.Unmarshal(raw, &msg)
@@ -1076,7 +1079,7 @@ func TestFullE2E(t *testing.T) {
 		waitForType(t, carolMessages, "message", 5*time.Second) // carol receives
 
 		// Bob reacts with 👍
-		err := bob.SendRoomReaction("general", msg.ID, "👍")
+		err := bob.SendRoomReaction(generalID, msg.ID, "👍")
 		if err != nil {
 			t.Fatalf("bob react: %v", err)
 		}
@@ -1094,7 +1097,7 @@ func TestFullE2E(t *testing.T) {
 		}
 
 		// Alice decrypts the reaction
-		dr, err := alice.DecryptRoomReaction("general", reaction.Epoch, reaction.Payload)
+		dr, err := alice.DecryptRoomReaction(generalID, reaction.Epoch, reaction.Payload)
 		if err != nil {
 			t.Fatalf("decrypt reaction: %v", err)
 		}
@@ -1151,19 +1154,19 @@ func TestFullE2E(t *testing.T) {
 	// 29. Unread divider logic
 	// =========================================================================
 	t.Run("unread_divider", func(t *testing.T) {
-		if alice.CurrentEpoch("general") == 0 {
+		if alice.CurrentEpoch(generalID) == 0 {
 			t.Skip("no epoch key")
 		}
 
 		// Send a few messages to establish IDs
-		alice.SendRoomMessage("general", "msg before read", "", nil)
+		alice.SendRoomMessage(generalID, "msg before read", "", nil)
 		raw := waitForType(t, aliceMessages, "message", 5*time.Second)
 		var beforeMsg protocol.Message
 		json.Unmarshal(raw, &beforeMsg)
 		waitForType(t, bobMessages, "message", 5*time.Second)
 		waitForType(t, carolMessages, "message", 5*time.Second)
 
-		alice.SendRoomMessage("general", "msg after read", "", nil)
+		alice.SendRoomMessage(generalID, "msg after read", "", nil)
 		raw = waitForType(t, aliceMessages, "message", 5*time.Second)
 		var afterMsg protocol.Message
 		json.Unmarshal(raw, &afterMsg)
@@ -1229,12 +1232,12 @@ func TestFullE2E(t *testing.T) {
 	// 31. Pin with preview data
 	// =========================================================================
 	t.Run("pin_with_preview", func(t *testing.T) {
-		if alice.CurrentEpoch("general") == 0 {
+		if alice.CurrentEpoch(generalID) == 0 {
 			t.Skip("no epoch key")
 		}
 
 		// Alice sends a message and pins it
-		alice.SendRoomMessage("general", "pin this important message", "", nil)
+		alice.SendRoomMessage(generalID, "pin this important message", "", nil)
 		raw := waitForType(t, aliceMessages, "message", 5*time.Second)
 		var msg protocol.Message
 		json.Unmarshal(raw, &msg)
@@ -1242,7 +1245,7 @@ func TestFullE2E(t *testing.T) {
 		waitForType(t, carolMessages, "message", 5*time.Second)
 
 		// Pin it
-		alice.Enc().Encode(protocol.Pin{Type: "pin", Room: "general", ID: msg.ID})
+		alice.Enc().Encode(protocol.Pin{Type: "pin", Room: generalID, ID: msg.ID})
 
 		// All users receive pinned event
 		waitForType(t, aliceMessages, "pinned", 5*time.Second)

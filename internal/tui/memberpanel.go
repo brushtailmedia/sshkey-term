@@ -51,8 +51,8 @@ func (m *MemberPanelModel) SetFocused(focused bool) {
 	m.focused = focused
 }
 
-// Refresh updates the member list for the current room or conversation.
-func (m *MemberPanelModel) Refresh(room, conversation string, c *client.Client, online map[string]bool) {
+// Refresh updates the member list for the current room or group DM.
+func (m *MemberPanelModel) Refresh(room, group string, c *client.Client, online map[string]bool) {
 	m.members = nil
 	m.cursor = 0
 
@@ -60,9 +60,9 @@ func (m *MemberPanelModel) Refresh(room, conversation string, c *client.Client, 
 		return
 	}
 
-	if conversation != "" {
-		// DM/group members
-		members := c.ConvMembers(conversation)
+	if group != "" {
+		// Group DM members
+		members := c.GroupMembers(group)
 		for _, user := range members {
 			p := c.Profile(user)
 			displayName := user
@@ -142,7 +142,7 @@ func (m *MemberPanelModel) MemberNames() []string {
 func (m *MemberPanelModel) MemberEntries() []MemberEntry {
 	entries := make([]MemberEntry, len(m.members))
 	for i, mem := range m.members {
-		entries[i] = MemberEntry{Username: mem.User, DisplayName: mem.DisplayName}
+		entries[i] = MemberEntry{UserID: mem.User, DisplayName: mem.DisplayName}
 	}
 	return entries
 }

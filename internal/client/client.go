@@ -56,18 +56,19 @@ type Client struct {
 	store          *store.Store
 
 	mu          sync.RWMutex
-	username    string
+	userID      string // nanoid (usr_ prefix) — immutable identity
 	displayName string
 	admin       bool
 	rooms       []string
-	convs       []string
+	groups      []string
 	capabilities []string
 	profiles     map[string]*protocol.Profile
-	convMembers  map[string][]string         // conversation ID -> member usernames
-	retired      map[string]string           // retired username -> retired_at timestamp
+	groupMembers map[string][]string         // group DM ID -> member userIDs
+	dms          map[string][2]string        // 1:1 DM ID -> [userA, userB]
+	retired      map[string]string           // retired userID -> retired_at timestamp
 	epochKeys      map[string]map[int64][]byte // room -> epoch -> unwrapped key
 	currentEpoch   map[string]int64            // room -> current epoch number
-	seqCounters    map[string]int64            // "room:x" or "conv:x" -> next seq
+	seqCounters    map[string]int64            // "room:x" or "group:x" or "dm:x" -> next seq
 	hasPendingKeys  bool                        // true when admin_notify arrived (cleared on list refresh)
 	pendingKeys     []protocol.PendingKeyEntry  // populated by pending_keys_list
 	roomMembersRoom string                      // room for latest room_members_list
@@ -88,7 +89,8 @@ func New(cfg Config) *Client {
 		cfg:          cfg,
 		logger:       cfg.Logger,
 		profiles:     make(map[string]*protocol.Profile),
-		convMembers:  make(map[string][]string),
+		groupMembers: make(map[string][]string),
+		dms:          make(map[string][2]string),
 		retired:      make(map[string]string),
 		epochKeys:    make(map[string]map[int64][]byte),
 		currentEpoch: make(map[string]int64),
@@ -184,13 +186,24 @@ func (c *Client) Connect() error {
 				c.lastSynced = synced
 			}
 
-			// Load cached conversations so sidebar is populated
-			// before the server sends a fresh conversation_list
-			if convs, err := st.GetAllConversations(); err == nil {
+			// Load cached groups so sidebar is populated
+			// before the server sends a fresh group_list
+			if groups, err := st.GetAllGroups(); err == nil {
 				c.mu.Lock()
-				for id, info := range convs {
-					if _, ok := c.convMembers[id]; !ok {
-						c.convMembers[id] = strings.Split(info[1], ",")
+				for id, info := range groups {
+					if _, ok := c.groupMembers[id]; !ok {
+						c.groupMembers[id] = strings.Split(info[1], ",")
+					}
+				}
+				c.mu.Unlock()
+			}
+
+			// Load cached 1:1 DMs
+			if dms, err := st.GetAllDMs(); err == nil {
+				c.mu.Lock()
+				for _, dm := range dms {
+					if _, ok := c.dms[dm.ID]; !ok {
+						c.dms[dm.ID] = [2]string{dm.UserA, dm.UserB}
 					}
 				}
 				c.mu.Unlock()
@@ -282,11 +295,11 @@ func (c *Client) handshake() error {
 	}
 
 	c.mu.Lock()
-	c.username = welcome.User
+	c.userID = welcome.User
 	c.displayName = welcome.DisplayName
 	c.admin = welcome.Admin
 	c.rooms = welcome.Rooms
-	c.convs = welcome.Conversations
+	c.groups = welcome.Groups
 	c.capabilities = welcome.ActiveCapabilities
 	c.mu.Unlock()
 
@@ -371,46 +384,276 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		}
 	case "message":
 		c.storeRoomMessage(raw)
-	case "dm":
-		c.storeDMMessage(raw)
-	case "dm_created":
-		var dm protocol.DMCreated
-		if err := json.Unmarshal(raw, &dm); err == nil {
+	case "group_message":
+		c.storeGroupMessage(raw)
+	case "group_created":
+		var g protocol.GroupCreated
+		if err := json.Unmarshal(raw, &g); err == nil {
 			c.mu.Lock()
-			c.convMembers[dm.Conversation] = dm.Members
+			c.groupMembers[g.Group] = g.Members
 			c.mu.Unlock()
 			if c.store != nil {
-				c.store.StoreConversation(dm.Conversation, dm.Name, strings.Join(dm.Members, ","))
+				c.store.StoreGroup(g.Group, g.Name, strings.Join(g.Members, ","))
 			}
 		}
-	case "conversation_list":
-		var cl protocol.ConversationList
-		if err := json.Unmarshal(raw, &cl); err == nil {
-			c.mu.Lock()
-			for _, conv := range cl.Conversations {
-				c.convMembers[conv.ID] = conv.Members
+	case "room_list":
+		var rl protocol.RoomList
+		if err := json.Unmarshal(raw, &rl); err == nil && c.store != nil {
+			for _, r := range rl.Rooms {
+				if err := c.store.UpsertRoom(r.ID, r.Name, r.Topic, r.Members); err != nil {
+					c.logger.Warn("failed to cache room", "room_id", r.ID, "error", err)
+				}
 			}
-			c.mu.Unlock()
-			if c.store != nil {
-				for _, conv := range cl.Conversations {
-					c.store.StoreConversation(conv.ID, conv.Name, strings.Join(conv.Members, ","))
+
+			// Multi-device offline catchup for room /leave (and admin
+			// removal — rooms only): any locally-active room not in the
+			// server's authoritative list means we either left it on
+			// another device while this one was offline, or an admin
+			// removed us. Mark it as left so the sidebar treats it
+			// consistently with the device that initiated the leave.
+			// Same pattern as the group_list reconciliation.
+			serverIDs := make(map[string]bool, len(rl.Rooms))
+			for _, r := range rl.Rooms {
+				serverIDs[r.ID] = true
+			}
+			if activeIDs, err := c.store.GetActiveRoomIDs(); err == nil {
+				now := time.Now().Unix()
+				for _, id := range activeIDs {
+					if !serverIDs[id] {
+						if err := c.store.MarkRoomLeft(id, now); err != nil {
+							c.logger.Warn("MarkRoomLeft on room_list reconciliation",
+								"room", id, "error", err)
+						}
+					}
 				}
 			}
 		}
-	case "conversation_event":
-		var ce protocol.ConversationEvent
-		if err := json.Unmarshal(raw, &ce); err == nil && ce.Event == "leave" {
+	case "group_list":
+		var gl protocol.GroupList
+		if err := json.Unmarshal(raw, &gl); err == nil {
 			c.mu.Lock()
-			if members, ok := c.convMembers[ce.Conversation]; ok {
+			for _, g := range gl.Groups {
+				c.groupMembers[g.ID] = g.Members
+			}
+			c.mu.Unlock()
+			if c.store != nil {
+				for _, g := range gl.Groups {
+					c.store.StoreGroup(g.ID, g.Name, strings.Join(g.Members, ","))
+				}
+
+				// Multi-device offline catchup for /leave: any locally-
+				// active group (left_at == 0) that's not in the server's
+				// authoritative response means we left it on another
+				// device while this one was offline. Mark it as left so
+				// the sidebar treats it consistently with the device
+				// that initiated the leave (greyed/read-only).
+				//
+				// 1:1 DMs handle this via LeftAtForCaller in dm_list
+				// because the server keeps the row alive after leave;
+				// groups can't use that pattern because /leave actually
+				// removes the user from group_members. The reconciliation
+				// is the client-side analog.
+				//
+				// Composes correctly with the deleted_groups handler:
+				// deleted_groups arrives BEFORE group_list in the
+				// handshake, so by the time we reach this point, any
+				// /delete'd groups have already been marked as left
+				// AND purged. The reconciliation only fires on local
+				// rows that are still active — the genuine /leave-on-
+				// other-device cases.
+				serverIDs := make(map[string]bool, len(gl.Groups))
+				for _, g := range gl.Groups {
+					serverIDs[g.ID] = true
+				}
+				if activeIDs, err := c.store.GetActiveGroupIDs(); err == nil {
+					now := time.Now().Unix()
+					for _, id := range activeIDs {
+						if !serverIDs[id] {
+							if err := c.store.MarkGroupLeft(id, now); err != nil {
+								c.logger.Warn("MarkGroupLeft on group_list reconciliation",
+									"group", id, "error", err)
+							}
+							c.mu.Lock()
+							delete(c.groupMembers, id)
+							c.mu.Unlock()
+						}
+					}
+				}
+			}
+		}
+	case "group_event":
+		var ge protocol.GroupEvent
+		if err := json.Unmarshal(raw, &ge); err == nil && ge.Event == "leave" {
+			c.mu.Lock()
+			if members, ok := c.groupMembers[ge.Group]; ok {
 				filtered := members[:0]
 				for _, m := range members {
-					if m != ce.User {
+					if m != ge.User {
 						filtered = append(filtered, m)
 					}
 				}
-				c.convMembers[ce.Conversation] = filtered
+				c.groupMembers[ge.Group] = filtered
 			}
 			c.mu.Unlock()
+			// Note: the leaver never receives this event — they have already
+			// been removed from group_members, so they are not in the broadcast
+			// set. Self-leave is handled by "group_left".
+		}
+	case "group_renamed":
+		// Update the cached name in the local store so subsequent
+		// reconnects render the new name even if the live group_renamed
+		// event arrives before group_list. The TUI handler at app.go
+		// already updates the in-memory sidebar entry; this case is the
+		// data-layer counterpart so the persistent state stays in sync.
+		var gr protocol.GroupRenamed
+		if err := json.Unmarshal(raw, &gr); err == nil && c.store != nil {
+			// Read existing members so StoreGroup can preserve them.
+			// (StoreGroup is an upsert keyed by id, but it overwrites
+			// the members column too — we have to read-modify-write.)
+			var members string
+			if all, err := c.store.GetAllGroups(); err == nil {
+				if entry, ok := all[gr.Group]; ok {
+					members = entry[1]
+				}
+			}
+			if err := c.store.StoreGroup(gr.Group, gr.Name, members); err != nil {
+				c.logger.Warn("failed to update cached group name", "group", gr.Group, "error", err)
+			}
+		}
+	case "group_left":
+		var gl protocol.GroupLeft
+		if err := json.Unmarshal(raw, &gl); err == nil {
+			// Server confirmed our leave_group — drop the group from in-memory
+			// members and mark it archived in the local DB.
+			c.mu.Lock()
+			delete(c.groupMembers, gl.Group)
+			c.mu.Unlock()
+			if c.store != nil {
+				if err := c.store.MarkGroupLeft(gl.Group, time.Now().Unix()); err != nil {
+					c.logger.Warn("failed to mark group left", "group", gl.Group, "error", err)
+				}
+			}
+		}
+	case "group_deleted":
+		var gd protocol.GroupDeleted
+		if err := json.Unmarshal(raw, &gd); err == nil {
+			// Server confirmed a delete_group from this account, possibly
+			// from another device. Apply the local /delete effects on
+			// THIS device too: drop in-memory members, mark left, and
+			// purge every locally-stored message for the group.
+			//
+			// Idempotent — receiving group_deleted on a device that has
+			// already purged just runs the no-op DELETE statements again.
+			c.mu.Lock()
+			delete(c.groupMembers, gd.Group)
+			c.mu.Unlock()
+			if c.store != nil {
+				if err := c.store.MarkGroupLeft(gd.Group, time.Now().Unix()); err != nil {
+					c.logger.Warn("MarkGroupLeft on group_deleted", "group", gd.Group, "error", err)
+				}
+				if err := c.store.PurgeGroupMessages(gd.Group); err != nil {
+					c.logger.Warn("PurgeGroupMessages on group_deleted", "group", gd.Group, "error", err)
+				}
+			}
+			c.logger.Info("group deleted", "group", gd.Group)
+		}
+	case "deleted_groups":
+		var dgl protocol.DeletedGroupsList
+		if err := json.Unmarshal(raw, &dgl); err == nil {
+			// Sync catchup. The handshake delivered every group ID this
+			// user has previously /delete'd that hasn't been pruned. Run
+			// the same purge path for each entry as if a live group_deleted
+			// echo had arrived. Idempotent on already-purged entries.
+			if c.store != nil {
+				for _, groupID := range dgl.Groups {
+					if err := c.store.MarkGroupLeft(groupID, time.Now().Unix()); err != nil {
+						c.logger.Warn("MarkGroupLeft on deleted_groups", "group", groupID, "error", err)
+					}
+					if err := c.store.PurgeGroupMessages(groupID); err != nil {
+						c.logger.Warn("PurgeGroupMessages on deleted_groups", "group", groupID, "error", err)
+					}
+				}
+				c.mu.Lock()
+				for _, groupID := range dgl.Groups {
+					delete(c.groupMembers, groupID)
+				}
+				c.mu.Unlock()
+			}
+		}
+	case "room_left":
+		var rl protocol.RoomLeft
+		if err := json.Unmarshal(raw, &rl); err == nil {
+			// Server confirmed our leave_room — mark the room archived in the
+			// local DB. The room metadata row stays so the sidebar can render
+			// the entry as greyed/read-only on this and subsequent reconnects.
+			if c.store != nil {
+				if err := c.store.MarkRoomLeft(rl.Room, time.Now().Unix()); err != nil {
+					c.logger.Warn("failed to mark room left", "room", rl.Room, "error", err)
+				}
+			}
+		}
+	case "dm_list":
+		var dl protocol.DMList
+		if err := json.Unmarshal(raw, &dl); err == nil {
+			c.mu.Lock()
+			for _, dm := range dl.DMs {
+				c.dms[dm.ID] = [2]string{dm.Members[0], dm.Members[1]}
+			}
+			c.mu.Unlock()
+			if c.store != nil {
+				for _, dm := range dl.DMs {
+					c.store.StoreDM(dm.ID, dm.Members[0], dm.Members[1])
+					// Catch-up: if the server reports we have already left
+					// this DM (from a /delete on another device, or as a
+					// side effect of retirement), apply the same local
+					// effects we would have applied if dm_left had reached
+					// us live. Idempotent — MarkDMLeft / PurgeDMMessages
+					// can be called repeatedly without harm.
+					if dm.LeftAtForCaller > 0 && c.store.GetDMLeftAt(dm.ID) == 0 {
+						if err := c.store.MarkDMLeft(dm.ID, dm.LeftAtForCaller); err != nil {
+							c.logger.Warn("MarkDMLeft on sync", "dm", dm.ID, "error", err)
+						}
+						if err := c.store.PurgeDMMessages(dm.ID); err != nil {
+							c.logger.Warn("PurgeDMMessages on sync", "dm", dm.ID, "error", err)
+						}
+					}
+				}
+			}
+		}
+	case "dm_created":
+		var dc protocol.DMCreated
+		if err := json.Unmarshal(raw, &dc); err == nil {
+			c.mu.Lock()
+			c.dms[dc.DM] = [2]string{dc.Members[0], dc.Members[1]}
+			c.mu.Unlock()
+			if c.store != nil {
+				c.store.StoreDM(dc.DM, dc.Members[0], dc.Members[1])
+			}
+		}
+	case "dm":
+		c.storeDMMessage(raw)
+	case "dm_left":
+		var dl protocol.DMLeft
+		if err := json.Unmarshal(raw, &dl); err == nil {
+			// Server confirmed leave_dm. Apply the local /delete effects:
+			// flip the local left_at flag and purge every message we've
+			// stored for this dm_id (plus the reactions hanging off them).
+			// The direct_messages row stays so multi-device sync from a
+			// different device can recognise the leave on next reconnect.
+			//
+			// Echoes from another of this user's devices land here too —
+			// the local effect is identical regardless of which session
+			// initiated the leave, which is exactly the multi-device
+			// behaviour we want.
+			if c.store != nil {
+				if err := c.store.MarkDMLeft(dl.DM, time.Now().Unix()); err != nil {
+					c.logger.Error("MarkDMLeft", "dm", dl.DM, "error", err)
+				}
+				if err := c.store.PurgeDMMessages(dl.DM); err != nil {
+					c.logger.Error("PurgeDMMessages", "dm", dl.DM, "error", err)
+				}
+			}
+			c.logger.Info("DM left (silent)", "dm", dl.DM)
 		}
 	case "upload_ready":
 		var ur protocol.UploadReady
@@ -590,11 +833,11 @@ func (c *Client) keepalive() {
 	}
 }
 
-// Username returns the authenticated username.
-func (c *Client) Username() string {
+// UserID returns the authenticated user's nanoid.
+func (c *Client) UserID() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.username
+	return c.userID
 }
 
 // IsAdmin returns whether the user is a server admin.
@@ -671,11 +914,50 @@ func (c *Client) DisplayName(username string) string {
 	return username // fallback: show raw ID until profile arrives
 }
 
-// ConvMembers returns the member list for a conversation.
-func (c *Client) ConvMembers(convID string) []string {
+// DisplayRoomName returns the display name for a room nanoid ID. Reads from
+// the local DB (persisted from server room_list). Falls back to the raw ID
+// if the room isn't cached yet.
+func (c *Client) DisplayRoomName(roomID string) string {
+	if c.store != nil {
+		return c.store.GetRoomName(roomID)
+	}
+	return roomID
+}
+
+// GroupMembers returns the member list for a group DM.
+func (c *Client) GroupMembers(groupID string) []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.convMembers[convID]
+	return c.groupMembers[groupID]
+}
+
+// DMMembers returns the member pair for a 1:1 DM.
+func (c *Client) DMMembers(dmID string) [2]string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.dms[dmID]
+}
+
+// DMOther returns the other party in a 1:1 DM (not the current user).
+func (c *Client) DMOther(dmID string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	pair := c.dms[dmID]
+	if pair[0] == c.userID {
+		return pair[1]
+	}
+	return pair[0]
+}
+
+// DMs returns the list of 1:1 DM IDs the client knows about.
+func (c *Client) DMs() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ids := make([]string, 0, len(c.dms))
+	for id := range c.dms {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // ForEachProfile calls fn for each known user profile.

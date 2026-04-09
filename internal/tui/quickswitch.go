@@ -9,27 +9,28 @@ import (
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
-// QuickSwitchMsg is emitted when the user selects a room or conversation.
+// QuickSwitchMsg is emitted when the user selects a room or group DM.
 type QuickSwitchMsg struct {
-	Room         string
-	Conversation string
+	Room  string
+	Group string
 }
 
-// QuickSwitchModel is a fuzzy-search overlay for switching rooms/conversations.
+// QuickSwitchModel is a fuzzy-search overlay for switching rooms/group DMs.
 type QuickSwitchModel struct {
-	visible       bool
-	input         textinput.Model
-	rooms         []string
-	conversations []protocol.ConversationInfo
-	resolveName   func(string) string
-	filtered      []switchItem
-	cursor        int
+	visible         bool
+	input           textinput.Model
+	rooms           []string
+	groups          []protocol.GroupInfo
+	resolveName     func(string) string // user nanoid → display name
+	resolveRoomName func(string) string // room nanoid → display name
+	filtered        []switchItem
+	cursor          int
 }
 
 type switchItem struct {
-	label        string // display text
-	room         string // non-empty for rooms
-	conversation string // non-empty for conversations
+	label string // display text
+	room  string // non-empty for rooms
+	group string // non-empty for group DMs
 }
 
 func NewQuickSwitch() QuickSwitchModel {
@@ -39,11 +40,12 @@ func NewQuickSwitch() QuickSwitchModel {
 	return QuickSwitchModel{input: ti}
 }
 
-func (q *QuickSwitchModel) Show(rooms []string, convs []protocol.ConversationInfo, resolve func(string) string) {
+func (q *QuickSwitchModel) Show(rooms []string, groups []protocol.GroupInfo, resolve, resolveRoom func(string) string) {
 	q.visible = true
 	q.rooms = rooms
-	q.conversations = convs
+	q.groups = groups
 	q.resolveName = resolve
+	q.resolveRoomName = resolveRoom
 	q.input.SetValue("")
 	q.input.Focus()
 	q.cursor = 0
@@ -64,18 +66,22 @@ func (q *QuickSwitchModel) updateFiltered() {
 	q.filtered = nil
 
 	for _, r := range q.rooms {
-		label := "#" + r
+		displayName := r
+		if q.resolveRoomName != nil {
+			displayName = q.resolveRoomName(r)
+		}
+		label := "#" + displayName
 		if query == "" || strings.Contains(strings.ToLower(label), query) {
 			q.filtered = append(q.filtered, switchItem{label: label, room: r})
 		}
 	}
 
-	for _, c := range q.conversations {
-		label := c.Name
+	for _, g := range q.groups {
+		label := g.Name
 		if label == "" {
-			// Unnamed conv — show member names
+			// Unnamed group — show member names
 			var names []string
-			for _, m := range c.Members {
+			for _, m := range g.Members {
 				name := m
 				if q.resolveName != nil {
 					name = q.resolveName(m)
@@ -85,7 +91,7 @@ func (q *QuickSwitchModel) updateFiltered() {
 			label = strings.Join(names, ", ")
 		}
 		if query == "" || strings.Contains(strings.ToLower(label), query) {
-			q.filtered = append(q.filtered, switchItem{label: label, conversation: c.ID})
+			q.filtered = append(q.filtered, switchItem{label: label, group: g.ID})
 		}
 	}
 
@@ -104,7 +110,7 @@ func (q QuickSwitchModel) Update(msg tea.KeyMsg) (QuickSwitchModel, tea.Cmd) {
 			item := q.filtered[q.cursor]
 			q.Hide()
 			return q, func() tea.Msg {
-				return QuickSwitchMsg{Room: item.room, Conversation: item.conversation}
+				return QuickSwitchMsg{Room: item.room, Group: item.group}
 			}
 		}
 		return q, nil

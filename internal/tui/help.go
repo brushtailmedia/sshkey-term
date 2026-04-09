@@ -48,7 +48,7 @@ func (h HelpModel) View(width, height int) string {
 	col1 := []struct{ key, desc string }{
 		{"Tab", "toggle sidebar focus"},
 		{"Ctrl+K", "quick switch"},
-		{"Ctrl+N", "new conversation"},
+		{"Ctrl+N", "new group DM"},
 		{"Ctrl+M", "member panel"},
 		{"Ctrl+P", "pinned messages"},
 		{"Ctrl+I", "room/group info"},
@@ -120,7 +120,8 @@ func (h HelpModel) View(width, height int) string {
 		{"/upload <path>", "upload a file"},
 		{"/verify <user>", "verify safety number"},
 		{"/rename <name>", "rename group DM"},
-		{"/leave", "leave group DM"},
+		{"/leave", "leave room or group DM"},
+		{"/delete", "remove archived from view (placeholder)"},
 		{"/mute", "toggle mute"},
 		{"/settings", "open settings"},
 		{"/unverify <user>", "remove verification"},

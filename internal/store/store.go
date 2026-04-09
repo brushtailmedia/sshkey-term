@@ -124,7 +124,8 @@ func (s *Store) init() error {
 			body            TEXT NOT NULL,
 			ts              INTEGER NOT NULL,
 			room            TEXT NOT NULL DEFAULT '',
-			conversation    TEXT NOT NULL DEFAULT '',
+			group_id        TEXT NOT NULL DEFAULT '',
+			dm_id           TEXT NOT NULL DEFAULT '',
 			epoch           INTEGER NOT NULL DEFAULT 0,
 			reply_to        TEXT NOT NULL DEFAULT '',
 			mentions        TEXT NOT NULL DEFAULT '',
@@ -136,7 +137,8 @@ func (s *Store) init() error {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room, ts) WHERE room != '';
-		CREATE INDEX IF NOT EXISTS idx_messages_conv_ts ON messages(conversation, ts) WHERE conversation != '';
+		CREATE INDEX IF NOT EXISTS idx_messages_group_ts ON messages(group_id, ts) WHERE group_id != '';
+		CREATE INDEX IF NOT EXISTS idx_messages_dm_ts ON messages(dm_id, ts) WHERE dm_id != '';
 
 		-- Reactions (decrypted emoji stored locally)
 		CREATE TABLE IF NOT EXISTS reactions (
@@ -180,11 +182,41 @@ func (s *Store) init() error {
 			seq INTEGER NOT NULL
 		);
 
-		-- Conversations (local cache of DM member lists + names)
-		CREATE TABLE IF NOT EXISTS conversations (
+		-- Rooms (persisted from server room_list).
+		-- left_at = 0 means active member; >0 means the user has left this
+		-- room (archived: greyed in sidebar, input disabled, history still
+		-- scrollable until /delete).
+		CREATE TABLE IF NOT EXISTS rooms (
+			id         TEXT PRIMARY KEY,
+			name       TEXT NOT NULL DEFAULT '',
+			topic      TEXT NOT NULL DEFAULT '',
+			members    INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0,
+			left_at    INTEGER NOT NULL DEFAULT 0
+		);
+
+		-- Group DMs (local cache of group member lists + names).
+		-- left_at = 0 means active member; >0 means the user has left this
+		-- group (archived: greyed in sidebar, input disabled, history still
+		-- scrollable until /delete).
+		CREATE TABLE IF NOT EXISTS groups (
 			id      TEXT PRIMARY KEY,
 			name    TEXT NOT NULL DEFAULT '',
-			members TEXT NOT NULL DEFAULT ''
+			members TEXT NOT NULL DEFAULT '',
+			left_at INTEGER NOT NULL DEFAULT 0
+		);
+
+		-- 1:1 DMs (local cache of DM partner info).
+		-- left_at = 0 means active; >0 means the user has /delete'd this
+		-- DM (server-side cutoff is set, local message rows for this dm_id
+		-- have been purged). The row itself stays so sync from another
+		-- device can find it and confirm the local state matches.
+		CREATE TABLE IF NOT EXISTS direct_messages (
+			id         TEXT PRIMARY KEY,
+			user_a     TEXT NOT NULL,
+			user_b     TEXT NOT NULL,
+			created_at INTEGER NOT NULL DEFAULT 0,
+			left_at    INTEGER NOT NULL DEFAULT 0
 		);
 
 		-- Client state
@@ -215,11 +247,6 @@ func (s *Store) init() error {
 		END`)
 	}
 	// If FTS5 isn't available, search falls back to LIKE queries
-
-	// Migrations for existing DBs (no-op if columns already present)
-	s.db.Exec(`ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0`)
-	s.db.Exec(`ALTER TABLE messages ADD COLUMN deleted_by TEXT NOT NULL DEFAULT ''`)
-	s.db.Exec(`ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT ''`)
 
 	return nil
 }

@@ -61,7 +61,54 @@ func (c *Client) storeRoomMessage(raw json.RawMessage) {
 	})
 }
 
-// storeDMMessage decrypts and stores a DM message in the local DB.
+// storeGroupMessage decrypts and stores a group DM message in the local DB.
+func (c *Client) storeGroupMessage(raw json.RawMessage) {
+	if c.store == nil {
+		return
+	}
+
+	var msg protocol.GroupMessage
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	body := ""
+	replyTo := ""
+	var mentions []string
+
+	var attachments []store.StoredAttachment
+
+	payload, err := c.DecryptGroupMessage(msg.WrappedKeys, msg.Payload)
+	if err == nil {
+		body = payload.Body
+		replyTo = payload.ReplyTo
+		mentions = payload.Mentions
+		c.checkReplay(msg.From, payload.DeviceID, "", msg.Group, payload.Seq)
+
+		for _, a := range payload.Attachments {
+			attachments = append(attachments, store.StoredAttachment{
+				FileID:     a.FileID,
+				Name:       a.Name,
+				Size:       a.Size,
+				Mime:       a.Mime,
+				DecryptKey: a.FileKey, // group DMs: already base64-encoded per-file K_file
+			})
+		}
+	}
+
+	c.store.InsertMessage(store.StoredMessage{
+		ID:          msg.ID,
+		Sender:      msg.From,
+		Body:        body,
+		TS:          msg.TS,
+		Group:       msg.Group,
+		ReplyTo:     replyTo,
+		Mentions:    mentions,
+		Attachments: attachments,
+	})
+}
+
+// storeDMMessage decrypts and stores a 1:1 DM message in the local DB.
 func (c *Client) storeDMMessage(raw json.RawMessage) {
 	if c.store == nil {
 		return
@@ -83,7 +130,7 @@ func (c *Client) storeDMMessage(raw json.RawMessage) {
 		body = payload.Body
 		replyTo = payload.ReplyTo
 		mentions = payload.Mentions
-		c.checkReplay(msg.From, payload.DeviceID, "", msg.Conversation, payload.Seq)
+		c.checkReplay(msg.From, payload.DeviceID, "", msg.DM, payload.Seq)
 
 		for _, a := range payload.Attachments {
 			attachments = append(attachments, store.StoredAttachment{
@@ -91,20 +138,20 @@ func (c *Client) storeDMMessage(raw json.RawMessage) {
 				Name:       a.Name,
 				Size:       a.Size,
 				Mime:       a.Mime,
-				DecryptKey: a.FileKey, // DMs: already base64-encoded per-file K_file
+				DecryptKey: a.FileKey, // 1:1 DMs: already base64-encoded per-file K_file
 			})
 		}
 	}
 
 	c.store.InsertMessage(store.StoredMessage{
-		ID:           msg.ID,
-		Sender:       msg.From,
-		Body:         body,
-		TS:           msg.TS,
-		Conversation: msg.Conversation,
-		ReplyTo:      replyTo,
-		Mentions:     mentions,
-		Attachments:  attachments,
+		ID:          msg.ID,
+		Sender:      msg.From,
+		Body:        body,
+		TS:          msg.TS,
+		DM:          msg.DM,
+		ReplyTo:     replyTo,
+		Mentions:    mentions,
+		Attachments: attachments,
 	})
 }
 
@@ -126,7 +173,12 @@ func (c *Client) storeReaction(raw json.RawMessage) {
 		if err == nil {
 			emoji = dr.Emoji
 		}
-	} else if r.Conversation != "" {
+	} else if r.Group != "" {
+		dr, err := c.DecryptGroupReaction(r.WrappedKeys, r.Payload)
+		if err == nil {
+			emoji = dr.Emoji
+		}
+	} else if r.DM != "" {
 		dr, err := c.DecryptDMReaction(r.WrappedKeys, r.Payload)
 		if err == nil {
 			emoji = dr.Emoji
@@ -147,14 +199,14 @@ func (c *Client) storeReaction(raw json.RawMessage) {
 }
 
 // checkReplay checks for replay attacks using seq high-water marks.
-func (c *Client) checkReplay(sender, deviceID, room, conv string, seq int64) {
+func (c *Client) checkReplay(sender, deviceID, room, group string, seq int64) {
 	if c.store == nil || seq == 0 {
 		return
 	}
 
 	target := room
 	if target == "" {
-		target = conv
+		target = group
 	}
 	key := sender + ":" + deviceID + ":" + target
 
@@ -199,12 +251,20 @@ func (c *Client) LoadRoomMessages(room string, limit int) ([]store.StoredMessage
 	return c.store.GetRoomMessages(room, limit)
 }
 
-// LoadConvMessages loads messages from local DB for a conversation.
-func (c *Client) LoadConvMessages(convID string, limit int) ([]store.StoredMessage, error) {
+// LoadGroupMessages loads messages from local DB for a group DM.
+func (c *Client) LoadGroupMessages(groupID string, limit int) ([]store.StoredMessage, error) {
 	if c.store == nil {
 		return nil, nil
 	}
-	return c.store.GetConvMessages(convID, limit)
+	return c.store.GetGroupMessages(groupID, limit)
+}
+
+// LoadDMMessages loads messages from local DB for a 1:1 DM.
+func (c *Client) LoadDMMessages(dmID string, limit int) ([]store.StoredMessage, error) {
+	if c.store == nil {
+		return nil, nil
+	}
+	return c.store.GetDMMessages(dmID, limit)
 }
 
 // SearchMessages searches local DB.

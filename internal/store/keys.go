@@ -143,7 +143,7 @@ func (s *Store) GetSeqMark(key string) (int64, error) {
 	return seq, err
 }
 
-// StoreReadPosition saves the read position for a room or conversation.
+// StoreReadPosition saves the read position for a room or group DM.
 func (s *Store) StoreReadPosition(target, lastRead string) error {
 	now := time.Now().Unix()
 	_, err := s.db.Exec(`
@@ -165,20 +165,20 @@ func (s *Store) GetReadPosition(target string) (string, error) {
 	return lastRead, err
 }
 
-// StoreConversation caches a conversation's members and name.
-func (s *Store) StoreConversation(id, name, members string) error {
+// StoreGroup caches a group DM's members and name.
+func (s *Store) StoreGroup(id, name, members string) error {
 	_, err := s.db.Exec(`
-		INSERT INTO conversations (id, name, members) VALUES (?, ?, ?)
+		INSERT INTO groups (id, name, members) VALUES (?, ?, ?)
 		ON CONFLICT (id) DO UPDATE SET name = excluded.name, members = excluded.members`,
 		id, name, members,
 	)
 	return err
 }
 
-// GetAllConversations loads all cached conversations. Returns a map of
-// conversation ID → {name, members (comma-separated)}.
-func (s *Store) GetAllConversations() (map[string][2]string, error) {
-	rows, err := s.db.Query(`SELECT id, name, members FROM conversations`)
+// GetAllGroups loads all cached group DMs. Returns a map of group ID →
+// {name, members (comma-separated)}.
+func (s *Store) GetAllGroups() (map[string][2]string, error) {
+	rows, err := s.db.Query(`SELECT id, name, members FROM groups`)
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +193,367 @@ func (s *Store) GetAllConversations() (map[string][2]string, error) {
 		result[id] = [2]string{name, members}
 	}
 	return result, rows.Err()
+}
+
+// GetActiveGroupIDs returns the IDs of every locally-cached group that
+// the user is still considered an active member of (left_at == 0). Used
+// by the group_list dispatch handler to reconcile against the server's
+// authoritative list — any local active group missing from the server's
+// response means we left it on another device while this one was offline.
+//
+// 1:1 DMs handle the same situation differently: they keep the row alive
+// server-side and carry LeftAtForCaller in dm_list. Groups can't use that
+// pattern because /leave actually removes the user from group_members,
+// so the server has nothing to attach state to. The catchup is a
+// client-side diff against the local cache instead.
+func (s *Store) GetActiveGroupIDs() ([]string, error) {
+	rows, err := s.db.Query(`SELECT id FROM groups WHERE left_at = 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// GetActiveRoomIDs is the room equivalent of GetActiveGroupIDs. Used by
+// the room_list dispatch handler for the same multi-device offline
+// catchup of /leave (and admin removal — for rooms only). Same pattern,
+// same failure mode if not wired.
+func (s *Store) GetActiveRoomIDs() ([]string, error) {
+	rows, err := s.db.Query(`SELECT id FROM rooms WHERE left_at = 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ArchivedGroup is a group DM the user has left. Returned by
+// GetArchivedGroups so the sidebar can render the entry as read-only even
+// after the server stops sending it in group_list.
+type ArchivedGroup struct {
+	ID      string
+	Name    string
+	Members string // comma-separated member IDs
+	LeftAt  int64
+}
+
+// GetArchivedGroups returns every group DM the user has left (left_at > 0).
+// Used by the TUI to merge archived entries back into the sidebar on
+// connect/reconnect — the server only sends active groups in group_list,
+// so without this the archived history would vanish the moment the client
+// restarts or reconnects. Ordered by id for stable sidebar rendering.
+func (s *Store) GetArchivedGroups() ([]ArchivedGroup, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, members, left_at FROM groups WHERE left_at > 0 ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ArchivedGroup
+	for rows.Next() {
+		var g ArchivedGroup
+		if err := rows.Scan(&g.ID, &g.Name, &g.Members, &g.LeftAt); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// MarkGroupLeft marks a group DM as "left" (archived) on the client.
+// The group stays in the local DB and sidebar but is rendered read-only.
+// Call when the server confirms the user has left (via group_left).
+func (s *Store) MarkGroupLeft(groupID string, leftAt int64) error {
+	_, err := s.db.Exec(
+		`UPDATE groups SET left_at = ? WHERE id = ?`,
+		leftAt, groupID,
+	)
+	return err
+}
+
+// MarkGroupRejoined clears the left_at flag on a group DM, returning it to
+// active state. Called when the user is re-added to a group.
+func (s *Store) MarkGroupRejoined(groupID string) error {
+	_, err := s.db.Exec(
+		`UPDATE groups SET left_at = 0 WHERE id = ?`,
+		groupID,
+	)
+	return err
+}
+
+// IsGroupLeft returns true if the user has left this group DM (archived state,
+// read-only in the TUI).
+func (s *Store) IsGroupLeft(groupID string) bool {
+	var leftAt int64
+	err := s.db.QueryRow(
+		`SELECT left_at FROM groups WHERE id = ?`,
+		groupID,
+	).Scan(&leftAt)
+	if err != nil {
+		return false
+	}
+	return leftAt > 0
+}
+
+// GetGroupLeftAt returns the unix timestamp when the user left this group DM,
+// or 0 if they are still an active member (or the group does not exist).
+func (s *Store) GetGroupLeftAt(groupID string) int64 {
+	var leftAt int64
+	s.db.QueryRow(
+		`SELECT left_at FROM groups WHERE id = ?`,
+		groupID,
+	).Scan(&leftAt)
+	return leftAt
+}
+
+// UpsertRoom persists room metadata from the server's room_list message.
+func (s *Store) UpsertRoom(id, name, topic string, members int) error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(`
+		INSERT INTO rooms (id, name, topic, members, updated_at) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET name = excluded.name, topic = excluded.topic,
+			members = excluded.members, updated_at = excluded.updated_at`,
+		id, name, topic, members, now,
+	)
+	return err
+}
+
+// GetRoomName returns the display name for a room nanoid ID.
+// Returns the raw ID if not found (graceful fallback).
+func (s *Store) GetRoomName(id string) string {
+	var name string
+	err := s.db.QueryRow(`SELECT name FROM rooms WHERE id = ?`, id).Scan(&name)
+	if err != nil || name == "" {
+		return id
+	}
+	return name
+}
+
+// MarkRoomLeft marks a room as "left" (archived) on the client. The room
+// stays in the local DB and sidebar but is rendered read-only. Called when
+// the server confirms the user has left (via room_left echo).
+func (s *Store) MarkRoomLeft(roomID string, leftAt int64) error {
+	_, err := s.db.Exec(
+		`UPDATE rooms SET left_at = ? WHERE id = ?`,
+		leftAt, roomID,
+	)
+	return err
+}
+
+// MarkRoomRejoined clears the left_at flag on a room, returning it to
+// active state. Called when the server's room_list re-includes a room we
+// had marked left (the user was added back via admin CLI).
+func (s *Store) MarkRoomRejoined(roomID string) error {
+	_, err := s.db.Exec(
+		`UPDATE rooms SET left_at = 0 WHERE id = ?`,
+		roomID,
+	)
+	return err
+}
+
+// IsRoomLeft returns true if the user has left this room (archived state,
+// read-only in the TUI).
+func (s *Store) IsRoomLeft(roomID string) bool {
+	var leftAt int64
+	err := s.db.QueryRow(
+		`SELECT left_at FROM rooms WHERE id = ?`,
+		roomID,
+	).Scan(&leftAt)
+	if err != nil {
+		return false
+	}
+	return leftAt > 0
+}
+
+// GetRoomLeftAt returns the unix timestamp when the user left this room,
+// or 0 if they are still an active member (or the room does not exist).
+func (s *Store) GetRoomLeftAt(roomID string) int64 {
+	var leftAt int64
+	s.db.QueryRow(
+		`SELECT left_at FROM rooms WHERE id = ?`,
+		roomID,
+	).Scan(&leftAt)
+	return leftAt
+}
+
+// LeftRoom is a room the user has left. Returned by GetLeftRooms so the
+// sidebar can render the entry as read-only even after the server stops
+// sending it in room_list. Mirrors ArchivedGroup for the group flow.
+type LeftRoom struct {
+	ID      string
+	Name    string
+	Topic   string
+	Members int
+	LeftAt  int64
+}
+
+// GetLeftRooms returns every room the user has left (left_at > 0). Used
+// by the TUI to merge archived entries back into the sidebar on
+// connect/reconnect — the server only sends active rooms in room_list,
+// so without this the archived history would vanish the moment the client
+// restarts or reconnects. Ordered by id for stable sidebar rendering.
+func (s *Store) GetLeftRooms() ([]LeftRoom, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, topic, members, left_at FROM rooms WHERE left_at > 0 ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []LeftRoom
+	for rows.Next() {
+		var r LeftRoom
+		if err := rows.Scan(&r.ID, &r.Name, &r.Topic, &r.Members, &r.LeftAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// StoreDM caches a 1:1 DM's member pair.
+func (s *Store) StoreDM(id, userA, userB string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO direct_messages (id, user_a, user_b) VALUES (?, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET user_a = excluded.user_a, user_b = excluded.user_b`,
+		id, userA, userB,
+	)
+	return err
+}
+
+// StoredDM holds a cached 1:1 DM entry.
+type StoredDM struct {
+	ID     string
+	UserA  string
+	UserB  string
+	LeftAt int64
+}
+
+// GetAllDMs loads all cached 1:1 DMs (active AND left). Callers that want
+// to filter by active status should check LeftAt themselves.
+func (s *Store) GetAllDMs() ([]StoredDM, error) {
+	rows, err := s.db.Query(`SELECT id, user_a, user_b, left_at FROM direct_messages`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var dms []StoredDM
+	for rows.Next() {
+		var dm StoredDM
+		if err := rows.Scan(&dm.ID, &dm.UserA, &dm.UserB, &dm.LeftAt); err != nil {
+			return nil, err
+		}
+		dms = append(dms, dm)
+	}
+	return dms, rows.Err()
+}
+
+// MarkDMLeft sets the local left_at flag on a 1:1 DM. Mirrors the
+// room/group helpers — called when the user runs /delete on this device,
+// when a dm_left echo arrives from another of the user's devices, or when
+// sync's dm_list reports a left_at_for_caller > 0 we didn't already know
+// about.
+func (s *Store) MarkDMLeft(dmID string, leftAt int64) error {
+	_, err := s.db.Exec(
+		`UPDATE direct_messages SET left_at = ? WHERE id = ?`,
+		leftAt, dmID,
+	)
+	return err
+}
+
+// MarkDMRejoined clears the local left_at flag on a 1:1 DM. There is no
+// server-side path that retreats the cutoff (cutoffs are one-way), but
+// the client uses this when it locally re-creates a DM after the row was
+// purged (the "fresh on re-contact" path) and needs to drop the leave
+// flag if it was somehow still set.
+func (s *Store) MarkDMRejoined(dmID string) error {
+	_, err := s.db.Exec(
+		`UPDATE direct_messages SET left_at = 0 WHERE id = ?`,
+		dmID,
+	)
+	return err
+}
+
+// GetDMLeftAt returns the unix timestamp at which the user left this DM,
+// or 0 if they have not left (or the row does not exist locally).
+func (s *Store) GetDMLeftAt(dmID string) int64 {
+	var leftAt int64
+	s.db.QueryRow(
+		`SELECT left_at FROM direct_messages WHERE id = ?`,
+		dmID,
+	).Scan(&leftAt)
+	return leftAt
+}
+
+// PurgeDMMessages deletes every locally-stored message row for a 1:1 DM
+// and the reactions hanging off those messages. Used by the dm_left
+// handler to wipe local history when /delete is run on any device.
+//
+// The direct_messages row itself is preserved (with left_at set) so that
+// multi-device sync on a different device can recognise the leave state
+// on its next reconnect. Read positions and seq marks are not touched —
+// 1:1 DMs do not currently use read_positions, and seq_marks are scoped
+// to the server-side dm_id which is still valid until both parties leave.
+func (s *Store) PurgeDMMessages(dmID string) error {
+	// Delete reactions first via a subquery on messages, before the
+	// messages themselves are gone. The reactions table is keyed by
+	// message_id so we have to look up which messages belonged to the
+	// DM before we drop them.
+	if _, err := s.db.Exec(
+		`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE dm_id = ?)`,
+		dmID,
+	); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`DELETE FROM messages WHERE dm_id = ?`, dmID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// PurgeGroupMessages deletes every locally-stored message row for a
+// group DM and the reactions hanging off those messages. Mirrors
+// PurgeDMMessages — used by the group_deleted handler to wipe local
+// history when /delete is run on any device.
+//
+// The local groups row is preserved (with left_at set) so that multi-
+// device sync on a different device can recognise the leave state on
+// next reconnect, and so the sidebar's archived rendering can stay if
+// the user later wants to /delete again.
+func (s *Store) PurgeGroupMessages(groupID string) error {
+	if _, err := s.db.Exec(
+		`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE group_id = ?)`,
+		groupID,
+	); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`DELETE FROM messages WHERE group_id = ?`, groupID); err != nil {
+		return err
+	}
+	return nil
 }
 
 // SetState stores a client state value.

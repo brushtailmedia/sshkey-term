@@ -30,7 +30,7 @@ type InputModel struct {
 	replyText      string           // preview of the message being replied to
 	lastTypingSent time.Time        // throttle typing indicators
 	completion     *CompletionModel  // active completion popup
-	members        []MemberEntry    // current room/conv members for @completion
+	members        []MemberEntry    // current room/group members for @completion
 	pendingCmd     *SlashCommandMsg // slash command needing app-level handling
 	didSend        bool             // true after a message was sent (cleared by DidSend)
 }
@@ -51,7 +51,7 @@ func (i InputModel) Init() tea.Cmd {
 	return textinput.Blink
 }
 
-func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, conversation string) (InputModel, tea.Cmd) {
+func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm string) (InputModel, tea.Cmd) {
 	// Handle completion popup if active
 	if i.completion != nil && i.completion.visible {
 		switch msg.String() {
@@ -97,7 +97,7 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, conversation 
 
 		// Handle slash commands
 		if strings.HasPrefix(text, "/") {
-			i.handleCommand(text, c, room, conversation)
+			i.handleCommand(text, c, room, group, dm)
 			i.textInput.Reset()
 			i.clearReply()
 			i.didSend = true
@@ -109,8 +109,10 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, conversation 
 			mentions := i.ExtractMentions(text)
 			if room != "" {
 				c.SendRoomMessage(room, text, i.replyTo, mentions)
-			} else if conversation != "" {
-				c.SendDMMessage(conversation, text, i.replyTo, mentions)
+			} else if group != "" {
+				c.SendGroupMessage(group, text, i.replyTo, mentions)
+			} else if dm != "" {
+				c.SendDMMessage(dm, text, i.replyTo, mentions)
 			}
 			i.didSend = true
 		}
@@ -124,7 +126,7 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, conversation 
 	if c != nil && time.Since(i.lastTypingSent) > time.Second {
 		text := i.textInput.Value()
 		if len(text) > 0 && !strings.HasPrefix(text, "/") {
-			c.SendTyping(room, conversation)
+			c.SendTyping(room, group, dm)
 			i.lastTypingSent = time.Now()
 		}
 	}
@@ -139,6 +141,12 @@ func (i *InputModel) SetReply(msgID, previewText string) {
 	i.replyText = previewText
 }
 
+// Value returns the current input text. Used by the app to inspect input
+// (e.g., to check if a slash command is pending before allowing send).
+func (i InputModel) Value() string {
+	return i.textInput.Value()
+}
+
 func (i *InputModel) clearReply() {
 	i.replyTo = ""
 	i.replyText = ""
@@ -149,10 +157,11 @@ type SlashCommandMsg struct {
 	Command string
 	Arg     string
 	Room    string
-	Conv    string
+	Group   string
+	DM      string
 }
 
-func (i *InputModel) handleCommand(text string, c *client.Client, room, conversation string) {
+func (i *InputModel) handleCommand(text string, c *client.Client, room, group, dm string) {
 	parts := strings.SplitN(text, " ", 2)
 	cmd := parts[0]
 	arg := ""
@@ -163,29 +172,43 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, conversa
 	switch cmd {
 	case "/typing":
 		if c != nil {
-			c.SendTyping(room, conversation)
+			c.SendTyping(room, group, dm)
 		}
 	case "/leave":
-		if c != nil && conversation != "" {
-			c.Enc().Encode(map[string]string{
-				"type": "leave_conversation", "conversation": conversation,
-			})
+		// Route to the app — it will show the confirmation dialog and
+		// send the leave_group / leave_room message on confirm. /leave
+		// is valid in group DM and room contexts. 1:1 DMs reject with a
+		// status bar message pointing the user at /delete.
+		if group != "" {
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group}
+		} else if room != "" {
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room}
+		} else if dm != "" {
+			// 1:1 DMs don't have /leave — route to app for the rejection message
+			i.pendingCmd = &SlashCommandMsg{Command: "/leave_dm_rejected", DM: dm}
 		}
+	case "/delete":
+		// Context-aware delete. 1:1 DMs are wired end-to-end: the app
+		// layer opens a confirmation dialog and, on confirm, sends
+		// leave_dm and waits for the dm_left echo before touching local
+		// state. Room and group DM variants are still placeholders at
+		// the app layer — /delete routes to them the same way, but they
+		// surface a "not yet implemented" status bar message for now.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	case "/rename":
-		if c != nil && conversation != "" && arg != "" {
+		if c != nil && group != "" && arg != "" {
 			c.Enc().Encode(map[string]string{
-				"type": "rename_conversation", "conversation": conversation, "name": arg,
+				"type": "rename_group", "group": group, "name": arg,
 			})
 		}
 	case "/mute":
 		// Handled via info panel toggle — just set a flag
 	case "/verify", "/unverify", "/search", "/settings", "/help", "/pending", "/mykey":
 		// These need to be handled at the app level
-		// Store the command for the app to pick up
-		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Conv: conversation}
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	case "/upload":
 		if arg != "" {
-			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Conv: conversation}
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 		}
 	}
 }
@@ -205,9 +228,9 @@ func (i *InputModel) DidSend() bool {
 	return sent
 }
 
-// MemberEntry holds a username (nanoid) and display name for @completion.
+// MemberEntry holds a user ID (nanoid) and display name for @completion.
 type MemberEntry struct {
-	Username    string // nanoid — sent in protocol mentions array
+	UserID      string // nanoid — sent in protocol mentions array
 	DisplayName string // human-visible — shown in completion popup + body
 }
 
@@ -223,13 +246,13 @@ func (i *InputModel) ExtractMentions(body string) []string {
 	var mentions []string
 	seen := make(map[string]bool)
 	for _, m := range i.members {
-		if seen[m.Username] {
+		if seen[m.UserID] {
 			continue
 		}
 		target := "@" + m.DisplayName
 		if containsMention(body, target) {
-			mentions = append(mentions, m.Username)
-			seen[m.Username] = true
+			mentions = append(mentions, m.UserID)
+			seen[m.UserID] = true
 		}
 	}
 	return mentions

@@ -170,9 +170,9 @@ func TestBellConfig(t *testing.T) {
 
 func TestTabCompletion(t *testing.T) {
 	members := []MemberEntry{
-		{Username: "usr_alice", DisplayName: "alice"},
-		{Username: "usr_bob", DisplayName: "bob"},
-		{Username: "usr_carol", DisplayName: "carol"},
+		{UserID: "usr_alice", DisplayName: "alice"},
+		{UserID: "usr_bob", DisplayName: "bob"},
+		{UserID: "usr_carol", DisplayName: "carol"},
 	}
 
 	comp := Complete("hey @bo", 7, members)

@@ -24,6 +24,18 @@ func waitForType(t *testing.T, ch chan json.RawMessage, msgType string, timeout 
 	return testutil.WaitForType(t, ch, msgType, timeout)
 }
 
+// roomIDByName finds the nanoid room ID for a display name using the client's DB.
+func roomIDByName(t *testing.T, c *client.Client, displayName string) string {
+	t.Helper()
+	for _, id := range c.Rooms() {
+		if c.DisplayRoomName(id) == displayName {
+			return id
+		}
+	}
+	t.Fatalf("room %q not found in %v", displayName, c.Rooms())
+	return ""
+}
+
 func TestClientConnect(t *testing.T) {
 	port, cleanup := testutil.StartTestServer(t)
 	defer cleanup()
@@ -60,8 +72,8 @@ func TestClientConnect(t *testing.T) {
 		t.Fatal("timeout waiting for sync_complete")
 	}
 
-	if c.Username() != testutil.Alice.Username {
-		t.Errorf("username = %q, want %s", c.Username(), testutil.Alice.Username)
+	if c.UserID() != testutil.Alice.UserID {
+		t.Errorf("username = %q, want %s", c.UserID(), testutil.Alice.UserID)
 	}
 	if !c.IsAdmin() {
 		t.Error("expected admin=true")
@@ -81,7 +93,7 @@ func TestClientConnect(t *testing.T) {
 		}
 	}
 
-	t.Logf("connected as %s, rooms=%v, types=%v", c.Username(), rooms, receivedTypes)
+	t.Logf("connected as %s, rooms=%v, types=%v", c.UserID(), rooms, receivedTypes)
 }
 
 func TestClientSendReceive(t *testing.T) {
@@ -96,6 +108,7 @@ func TestClientSendReceive(t *testing.T) {
 		Port:     port,
 		KeyPath:  testutil.Alice.KeyPath,
 		DeviceID: "dev_alice_term",
+		DataDir:  t.TempDir(),
 		Logger:   slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn})),
 		OnMessage: func(msgType string, raw json.RawMessage) {
 			if msgType == "sync_complete" {
@@ -120,11 +133,12 @@ func TestClientSendReceive(t *testing.T) {
 		t.Fatal("alice sync timeout")
 	}
 
-	err := alice.SendRoomMessage("general", "hello from terminal client", "", nil)
+	generalID := roomIDByName(t, alice, "general")
+	err := alice.SendRoomMessage(generalID, "hello from terminal client", "", nil)
 	if err != nil {
 		t.Logf("send failed (expected without epoch key): %v", err)
 	}
 
-	t.Logf("alice connected as %s, admin=%v", alice.Username(), alice.IsAdmin())
+	t.Logf("alice connected as %s, admin=%v", alice.UserID(), alice.IsAdmin())
 	t.Log("client send/receive test complete")
 }

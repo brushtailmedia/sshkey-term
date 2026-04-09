@@ -40,6 +40,15 @@ type CreateConvMsg struct {
 	Name    string
 }
 
+// retryCreateDMMsg is emitted by a delayed tea.Cmd when the app needs to
+// transparently retry a create_dm that was rejected with server_busy.
+// The retry counter lives on the App struct, not on the message, so a
+// stale retry fired after the user moved on to a different target is a
+// harmless no-op.
+type retryCreateDMMsg struct {
+	other string
+}
+
 func NewNewConv() NewConvModel {
 	mi := textinput.New()
 	mi.Placeholder = "Type to add members..."
@@ -188,10 +197,10 @@ func (n *NewConvModel) create(c *client.Client) tea.Cmd {
 
 	n.Hide()
 
+	// The app layer actually sends the create_dm / create_group — this
+	// lets it track pending-create-DM state for the server_busy auto-retry
+	// path. The closure just emits the intent as a CreateConvMsg.
 	return func() tea.Msg {
-		if c != nil {
-			c.CreateDM(members, name)
-		}
 		return CreateConvMsg{Members: members, Name: name}
 	}
 }
@@ -211,7 +220,7 @@ func (n NewConvModel) View(width int) string {
 
 	var b strings.Builder
 
-	b.WriteString(searchHeaderStyle.Render("New Conversation"))
+	b.WriteString(searchHeaderStyle.Render("New Group DM"))
 	b.WriteString("\n\n")
 
 	// Selected members

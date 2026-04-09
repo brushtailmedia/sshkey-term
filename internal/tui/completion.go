@@ -103,7 +103,7 @@ func completeCommands(prefix string) *CompletionModel {
 		{Text: "/unverify ", Display: "/unverify", Description: "remove verification"},
 		{Text: "/mute", Display: "/mute", Description: "toggle mute"},
 		{Text: "/search ", Display: "/search", Description: "search messages"},
-		{Text: "/leave", Display: "/leave", Description: "leave conversation"},
+		{Text: "/leave", Display: "/leave", Description: "leave room or group"},
 		{Text: "/settings", Display: "/settings", Description: "open settings"},
 		{Text: "/pending", Display: "/pending", Description: "pending keys (admin)"},
 		{Text: "/mykey", Display: "/mykey", Description: "copy public key"},

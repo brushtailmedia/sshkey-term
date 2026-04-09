@@ -52,30 +52,32 @@ func TestFullLifecycle(t *testing.T) {
 	<-bobSynced
 	time.Sleep(time.Second) // epoch rotation
 
+	generalID := roomIDByName(t, alice, "general")
+
 	// Verify usernames are real nanoids (not hardcoded)
-	if len(alice.Username()) < 10 || alice.Username()[:4] != "usr_" {
-		t.Fatalf("alice username doesn't look like a nanoid: %q", alice.Username())
+	if len(alice.UserID()) < 10 || alice.UserID()[:4] != "usr_" {
+		t.Fatalf("alice username doesn't look like a nanoid: %q", alice.UserID())
 	}
-	if alice.Username() == bob.Username() {
+	if alice.UserID() == bob.UserID() {
 		t.Fatal("alice and bob have the same username")
 	}
-	t.Logf("alice: %s, bob: %s", alice.Username(), bob.Username())
+	t.Logf("alice: %s, bob: %s", alice.UserID(), bob.UserID())
 
 	// Verify display names resolve correctly
-	aliceDisplay := alice.DisplayName(alice.Username())
-	if aliceDisplay == alice.Username() {
+	aliceDisplay := alice.DisplayName(alice.UserID())
+	if aliceDisplay == alice.UserID() {
 		t.Errorf("alice display name is the raw nanoid: %q", aliceDisplay)
 	}
 	t.Logf("alice display: %q, bob display: %q",
-		alice.DisplayName(alice.Username()),
-		alice.DisplayName(bob.Username()))
+		alice.DisplayName(alice.UserID()),
+		alice.DisplayName(bob.UserID()))
 
 	// ---- Phase 3: Populate data ----
 
 	// Room messages
 	t.Run("populate_room_messages", func(t *testing.T) {
 		for i := 0; i < 5; i++ {
-			err := alice.SendRoomMessage("general", "lifecycle test msg", "", nil)
+			err := alice.SendRoomMessage(generalID, "lifecycle test msg", "", nil)
 			if err != nil {
 				t.Fatalf("send %d: %v", i, err)
 			}
@@ -88,7 +90,7 @@ func TestFullLifecycle(t *testing.T) {
 	// DM
 	var dmConvID string
 	t.Run("populate_dm", func(t *testing.T) {
-		alice.CreateDM([]string{bob.Username()}, "")
+		alice.CreateDM([]string{bob.UserID()}, "")
 		raw := waitForType(t, aliceMsgs, "dm_created", 5*time.Second)
 		var created protocol.DMCreated
 		json.Unmarshal(raw, &created)
@@ -103,13 +105,13 @@ func TestFullLifecycle(t *testing.T) {
 
 	// Reaction
 	t.Run("populate_reaction", func(t *testing.T) {
-		alice.SendRoomMessage("general", "react to this", "", nil)
+		alice.SendRoomMessage(generalID, "react to this", "", nil)
 		raw := waitForType(t, bobMsgs, "message", 5*time.Second)
 		var msg protocol.Message
 		json.Unmarshal(raw, &msg)
 		waitForType(t, aliceMsgs, "message", 5*time.Second)
 
-		bob.SendRoomReaction("general", msg.ID, "👍")
+		bob.SendRoomReaction(generalID, msg.ID, "👍")
 		waitForType(t, aliceMsgs, "reaction", 5*time.Second)
 		waitForType(t, bobMsgs, "reaction", 5*time.Second)
 	})
@@ -122,7 +124,7 @@ func TestFullLifecycle(t *testing.T) {
 		}
 
 		// Room messages persisted and decrypted
-		msgs, err := st.GetRoomMessages("general", 200)
+		msgs, err := st.GetRoomMessages(generalID, 200)
 		if err != nil {
 			t.Fatalf("get messages: %v", err)
 		}
@@ -145,8 +147,8 @@ func TestFullLifecycle(t *testing.T) {
 		}
 
 		// Epoch key persisted
-		epoch := alice.CurrentEpoch("general")
-		key, err := st.GetEpochKey("general", epoch)
+		epoch := alice.CurrentEpoch(generalID)
+		key, err := st.GetEpochKey(generalID, epoch)
 		if err != nil || key == nil {
 			t.Errorf("epoch key not persisted: epoch=%d err=%v", epoch, err)
 		}
@@ -206,20 +208,20 @@ func TestFullLifecycle(t *testing.T) {
 		}
 
 		if st != nil {
-			msgs, _ := st.GetRoomMessages("general", 200)
+			msgs, _ := st.GetRoomMessages(generalID, 200)
 			if len(msgs) < 5 {
 				t.Errorf("after reconnect: only %d messages (expected 5+)", len(msgs))
 			}
 
-			epoch := alice2.CurrentEpoch("general")
-			key := alice2.RoomEpochKey("general", epoch)
+			epoch := alice2.CurrentEpoch(generalID)
+			key := alice2.RoomEpochKey(generalID, epoch)
 			if key == nil {
 				t.Error("epoch key not available after reconnect")
 			}
 		}
 
 		// Can send new message (verifies connection works regardless of DB)
-		alice2.SendRoomMessage("general", "post-reconnect", "", nil)
+		alice2.SendRoomMessage(generalID, "post-reconnect", "", nil)
 		waitForType(t, bobMsgs, "message", 5*time.Second)
 		waitForType(t, alice2Msgs, "message", 5*time.Second)
 
@@ -274,7 +276,7 @@ func TestCreateTestDB(t *testing.T) {
 	}
 	defer st.Close()
 
-	msgs, err := st.GetRoomMessages("general", 100)
+	msgs, err := st.GetRoomMessages(testutil.TestRoomID, 100)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -290,7 +292,7 @@ func TestCreateTestDB(t *testing.T) {
 	}
 
 	// Verify epoch key was seeded
-	key, err := st.GetEpochKey("general", 1)
+	key, err := st.GetEpochKey(testutil.TestRoomID, 1)
 	if err != nil || key == nil {
 		t.Error("epoch key not seeded")
 	}

@@ -64,7 +64,9 @@ func TestE2ERoomChat(t *testing.T) {
 		t.Fatal("alice sync timeout")
 	}
 
-	t.Logf("alice connected: user=%s admin=%v rooms=%v", alice.Username(), alice.IsAdmin(), alice.Rooms())
+	t.Logf("alice connected: user=%s admin=%v rooms=%v", alice.UserID(), alice.IsAdmin(), alice.Rooms())
+
+	generalID := roomIDByName(t, alice, "general")
 
 	// Alice should have received an epoch_trigger for "general" since she's the first user
 	// and the room has no epoch key yet. Wait for it.
@@ -83,7 +85,7 @@ func TestE2ERoomChat(t *testing.T) {
 		t.Log("no epoch_confirmed (may not have triggered rotation)")
 	}
 
-	currentEpoch := alice.CurrentEpoch("general")
+	currentEpoch := alice.CurrentEpoch(generalID)
 	t.Logf("alice current epoch for general: %d", currentEpoch)
 
 	// -- Connect bob --
@@ -120,8 +122,8 @@ func TestE2ERoomChat(t *testing.T) {
 		t.Fatal("bob sync timeout")
 	}
 
-	t.Logf("bob connected: user=%s rooms=%v", bob.Username(), bob.Rooms())
-	t.Logf("bob current epoch for general: %d", bob.CurrentEpoch("general"))
+	t.Logf("bob connected: user=%s rooms=%v", bob.UserID(), bob.Rooms())
+	t.Logf("bob current epoch for general: %d", bob.CurrentEpoch(generalID))
 
 	// Give a moment for epoch keys to settle
 	time.Sleep(500 * time.Millisecond)
@@ -131,7 +133,7 @@ func TestE2ERoomChat(t *testing.T) {
 		t.Skip("no epoch key available — server didn't trigger rotation for this test setup")
 	}
 
-	err := alice.SendRoomMessage("general", "Hello Bob, this is encrypted!", "", nil)
+	err := alice.SendRoomMessage(generalID, "Hello Bob, this is encrypted!", "", nil)
 	if err != nil {
 		t.Fatalf("alice send: %v", err)
 	}
@@ -171,7 +173,7 @@ func TestE2ERoomChat(t *testing.T) {
 	}
 
 	// -- Bob sends a reply --
-	err = bob.SendRoomMessage("general", "Hi Alice, I can read your encrypted message!", "", nil)
+	err = bob.SendRoomMessage(generalID, "Hi Alice, I can read your encrypted message!", "", nil)
 	if err != nil {
 		t.Fatalf("bob send: %v", err)
 	}
@@ -268,7 +270,7 @@ func TestE2EDMChat(t *testing.T) {
 	time.Sleep(500 * time.Millisecond) // let profiles settle
 
 	// Alice creates a DM with bob
-	err := alice.CreateDM([]string{testutil.Bob.Username}, "")
+	err := alice.CreateDM([]string{testutil.Bob.UserID}, "")
 	if err != nil {
 		t.Fatalf("create DM: %v", err)
 	}
@@ -379,14 +381,16 @@ func TestE2EReplayDetection(t *testing.T) {
 	<-synced
 	time.Sleep(500 * time.Millisecond)
 
-	epoch := c.CurrentEpoch("general")
+	generalID := roomIDByName(t, c, "general")
+
+	epoch := c.CurrentEpoch(generalID)
 	if epoch == 0 {
 		t.Skip("no epoch key")
 	}
 
 	// Send two messages — seq should increment
-	c.SendRoomMessage("general", "message one", "", nil)
-	c.SendRoomMessage("general", "message two", "", nil)
+	c.SendRoomMessage(generalID, "message one", "", nil)
+	c.SendRoomMessage(generalID, "message two", "", nil)
 
 	time.Sleep(time.Second)
 
@@ -439,8 +443,8 @@ func TestE2EKeyPinning(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Check that profiles were received and keys pinned
-	aliceProfile := c.Profile(testutil.Alice.Username)
-	bobProfile := c.Profile(testutil.Bob.Username)
+	aliceProfile := c.Profile(testutil.Alice.UserID)
+	bobProfile := c.Profile(testutil.Bob.UserID)
 
 	if aliceProfile == nil {
 		t.Fatal("alice profile not received")
@@ -454,7 +458,7 @@ func TestE2EKeyPinning(t *testing.T) {
 
 	// Verify keys are pinned in the local store
 	if c.Store() != nil {
-		fp, verified, err := c.Store().GetPinnedKey(testutil.Bob.Username)
+		fp, verified, err := c.Store().GetPinnedKey(testutil.Bob.UserID)
 		if err != nil {
 			t.Fatalf("get pinned key: %v", err)
 		}

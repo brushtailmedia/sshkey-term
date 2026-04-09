@@ -67,7 +67,9 @@ func TestE2EEpochRotationOnJoin(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond)
 
-	aliceEpoch1 := alice.CurrentEpoch("general")
+	generalID := roomIDByName(t, alice, "general")
+
+	aliceEpoch1 := alice.CurrentEpoch(generalID)
 	t.Logf("alice current epoch for general: %d", aliceEpoch1)
 
 	if aliceEpoch1 == 0 {
@@ -75,7 +77,7 @@ func TestE2EEpochRotationOnJoin(t *testing.T) {
 	}
 
 	// Alice sends a message with epoch 1
-	err := alice.SendRoomMessage("general", "message at epoch 1", "", nil)
+	err := alice.SendRoomMessage(generalID, "message at epoch 1", "", nil)
 	if err != nil {
 		t.Fatalf("alice send at epoch 1: %v", err)
 	}
@@ -117,7 +119,7 @@ func TestE2EEpochRotationOnJoin(t *testing.T) {
 	<-bobSynced
 	time.Sleep(500 * time.Millisecond)
 
-	bobEpoch := bob.CurrentEpoch("general")
+	bobEpoch := bob.CurrentEpoch(generalID)
 	t.Logf("bob current epoch for general: %d", bobEpoch)
 
 	// Bob should have received the epoch key that alice created
@@ -129,7 +131,7 @@ func TestE2EEpochRotationOnJoin(t *testing.T) {
 	// (it was sent before bob connected, so it's in the sync batch)
 
 	// Alice sends another message — bob should receive and decrypt it
-	err = alice.SendRoomMessage("general", "hello bob, welcome!", "", nil)
+	err = alice.SendRoomMessage(generalID, "hello bob, welcome!", "", nil)
 	if err != nil {
 		t.Fatalf("alice send: %v", err)
 	}
@@ -198,7 +200,9 @@ func TestE2EEpochRotationPeriodic(t *testing.T) {
 	<-synced
 	time.Sleep(time.Second) // let initial rotation complete
 
-	epoch1 := c.CurrentEpoch("general")
+	generalID := roomIDByName(t, c, "general")
+
+	epoch1 := c.CurrentEpoch(generalID)
 	t.Logf("initial epoch: %d", epoch1)
 
 	if epoch1 == 0 {
@@ -207,7 +211,7 @@ func TestE2EEpochRotationPeriodic(t *testing.T) {
 
 	// Send messages — not 100, but enough to verify the counter is working
 	for i := 0; i < 5; i++ {
-		err := c.SendRoomMessage("general", fmt.Sprintf("periodic test message %d", i), "", nil)
+		err := c.SendRoomMessage(generalID, fmt.Sprintf("periodic test message %d", i), "", nil)
 		if err != nil {
 			t.Fatalf("send %d: %v", i, err)
 		}
@@ -215,7 +219,7 @@ func TestE2EEpochRotationPeriodic(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond)
 
-	epochAfter := c.CurrentEpoch("general")
+	epochAfter := c.CurrentEpoch(generalID)
 	t.Logf("epoch after 5 messages: %d", epochAfter)
 
 	// Epoch should NOT have changed (threshold is 100 messages)
@@ -265,13 +269,15 @@ func TestE2EEpochGraceWindow(t *testing.T) {
 	<-synced
 	time.Sleep(time.Second)
 
-	epoch := c.CurrentEpoch("general")
+	generalID := roomIDByName(t, c, "general")
+
+	epoch := c.CurrentEpoch(generalID)
 	if epoch == 0 {
 		t.Fatal("no epoch key")
 	}
 
 	// Send a message with the current epoch
-	err := c.SendRoomMessage("general", "current epoch message", "", nil)
+	err := c.SendRoomMessage(generalID, "current epoch message", "", nil)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -327,6 +333,8 @@ func TestE2EMultiDeviceEpochKey(t *testing.T) {
 	<-synced1
 	time.Sleep(time.Second)
 
+	generalID := roomIDByName(t, dev1, "general")
+
 	// Alice device 2 (same key, different device ID)
 	synced2 := make(chan bool, 1)
 	msgs2 := make(chan protocol.Message, 10)
@@ -358,8 +366,8 @@ func TestE2EMultiDeviceEpochKey(t *testing.T) {
 	<-synced2
 	time.Sleep(500 * time.Millisecond)
 
-	epoch1 := dev1.CurrentEpoch("general")
-	epoch2 := dev2.CurrentEpoch("general")
+	epoch1 := dev1.CurrentEpoch(generalID)
+	epoch2 := dev2.CurrentEpoch(generalID)
 	t.Logf("device1 epoch: %d, device2 epoch: %d", epoch1, epoch2)
 
 	if epoch1 == 0 || epoch2 == 0 {
@@ -367,7 +375,7 @@ func TestE2EMultiDeviceEpochKey(t *testing.T) {
 	}
 
 	// Device 1 sends a message
-	err := dev1.SendRoomMessage("general", "hello from device 1", "", nil)
+	err := dev1.SendRoomMessage(generalID, "hello from device 1", "", nil)
 	if err != nil {
 		t.Fatalf("device1 send: %v", err)
 	}

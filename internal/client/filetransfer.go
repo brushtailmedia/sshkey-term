@@ -40,23 +40,21 @@ var (
 )
 
 // UploadFile encrypts and uploads a file using the room's current epoch key.
-// For DM uploads, use UploadDMFile instead — it takes a per-file key from
-// the caller which is stored in the Attachment struct inside the encrypted
-// message payload.
+// For group DM uploads, use UploadGroupFile instead — it takes a per-file
+// key from the caller which is stored in the Attachment struct inside the
+// encrypted message payload.
 //
-// Returns the server-assigned file_id.
-// UploadFile encrypts a file with the current room epoch key and uploads it.
 // Returns the server-assigned file_id and the epoch used for encryption, so
 // the caller can stamp FileEpoch on the attachment metadata correctly (avoids
 // a race if the epoch rotates between upload and send).
-func (c *Client) UploadFile(localPath, room, conversation string) (fileID string, epoch int64, err error) {
+func (c *Client) UploadFile(localPath, room, group string) (fileID string, epoch int64, err error) {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return "", 0, fmt.Errorf("read file: %w", err)
 	}
 
 	if room == "" {
-		return "", 0, fmt.Errorf("UploadFile requires a room; for DM attachments use UploadDMFile")
+		return "", 0, fmt.Errorf("UploadFile requires a room; for group DM attachments use UploadGroupFile")
 	}
 
 	c.mu.RLock()
@@ -67,19 +65,14 @@ func (c *Client) UploadFile(localPath, room, conversation string) (fileID string
 		return "", 0, fmt.Errorf("no epoch key for room %s", room)
 	}
 
-	fileID, err = c.uploadEncrypted(data, encKey, room, conversation)
+	fileID, err = c.uploadEncrypted(data, encKey, room, group, "")
 	return fileID, epoch, err
 }
 
-// UploadDMFile encrypts a file with the given per-file key (K_file) and
-// uploads it. The caller stores K_file inside the Attachment's FileKey
-// field when sending the DM message that references this file_id, so
-// recipients can decrypt the file after decrypting the message payload.
-//
-// This is Design A: each attachment carries its own key in the encrypted
-// payload, decoupling upload from message send. See PROTOCOL.md "DM
-// attachments".
-func (c *Client) UploadDMFile(localPath, conversation string, fileKey []byte) (string, error) {
+// UploadDMFile encrypts a file with a per-file key and uploads it for a 1:1 DM.
+// Same Design A pattern as UploadGroupFile — each attachment carries its own
+// key in the encrypted payload.
+func (c *Client) UploadDMFile(localPath, dmID string, fileKey []byte) (string, error) {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
@@ -87,13 +80,32 @@ func (c *Client) UploadDMFile(localPath, conversation string, fileKey []byte) (s
 	if len(fileKey) == 0 {
 		return "", fmt.Errorf("UploadDMFile: fileKey is required")
 	}
-	return c.uploadEncrypted(data, fileKey, "", conversation)
+	return c.uploadEncrypted(data, fileKey, "", "", dmID)
+}
+
+// UploadGroupFile encrypts a file with the given per-file key (K_file) and
+// uploads it. The caller stores K_file inside the Attachment's FileKey
+// field when sending the group DM message that references this file_id, so
+// recipients can decrypt the file after decrypting the message payload.
+//
+// This is Design A: each attachment carries its own key in the encrypted
+// payload, decoupling upload from message send. See PROTOCOL.md "DM
+// attachments".
+func (c *Client) UploadGroupFile(localPath, group string, fileKey []byte) (string, error) {
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+	if len(fileKey) == 0 {
+		return "", fmt.Errorf("UploadGroupFile: fileKey is required")
+	}
+	return c.uploadEncrypted(data, fileKey, "", group, "")
 }
 
 // uploadEncrypted is the shared transport: encrypts bytes with encKey, runs
 // the upload_start → binary frame → upload_complete round-trip, and returns
 // the server-assigned file_id.
-func (c *Client) uploadEncrypted(data, encKey []byte, room, conversation string) (string, error) {
+func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (string, error) {
 	encrypted, err := crypto.Encrypt(encKey, data)
 	if err != nil {
 		return "", fmt.Errorf("encrypt: %w", err)
@@ -122,12 +134,13 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, conversation string)
 	}()
 
 	err = c.enc.Encode(protocol.UploadStart{
-		Type:         "upload_start",
-		UploadID:     uploadID,
-		Size:         int64(len(encBytes)),
-		ContentHash:  contentHash,
-		Room:         room,
-		Conversation: conversation,
+		Type:        "upload_start",
+		UploadID:    uploadID,
+		Size:        int64(len(encBytes)),
+		ContentHash: contentHash,
+		Room:        room,
+		Group:       group,
+		DM:          dm,
 	})
 	if err != nil {
 		return "", fmt.Errorf("send upload_start: %w", err)

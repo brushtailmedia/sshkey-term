@@ -41,16 +41,18 @@ func TestErrorPaths(t *testing.T) {
 
 	time.Sleep(time.Second) // epoch rotation
 
+	generalID := roomIDByName(t, alice, "general")
+
 	// =========================================================================
 	// 1. Display name rejected — duplicate
 	// =========================================================================
 	t.Run("display_name_duplicate", func(t *testing.T) {
 		// Bob tries to set his display name to Alice's display name
-		bobDisplayBefore := bob.DisplayName(bob.Username())
+		bobDisplayBefore := bob.DisplayName(bob.UserID())
 
 		bob.Enc().Encode(protocol.SetProfile{
 			Type:        "set_profile",
-			DisplayName: alice.DisplayName(alice.Username()),
+			DisplayName: alice.DisplayName(alice.UserID()),
 		})
 
 		// Should receive an error back
@@ -63,7 +65,7 @@ func TestErrorPaths(t *testing.T) {
 		}
 
 		// Bob's display name should be unchanged
-		bobDisplayAfter := bob.DisplayName(bob.Username())
+		bobDisplayAfter := bob.DisplayName(bob.UserID())
 		if bobDisplayBefore != bobDisplayAfter {
 			t.Errorf("bob's name changed despite rejection: %q → %q", bobDisplayBefore, bobDisplayAfter)
 		}
@@ -95,7 +97,7 @@ func TestErrorPaths(t *testing.T) {
 	// 3. Download nonexistent file — fails fast, no hang
 	// =========================================================================
 	t.Run("download_not_found", func(t *testing.T) {
-		epochKey := bob.RoomEpochKey("general", bob.CurrentEpoch("general"))
+		epochKey := bob.RoomEpochKey(generalID, bob.CurrentEpoch(generalID))
 		if epochKey == nil {
 			t.Skip("no epoch key")
 		}
@@ -127,7 +129,7 @@ func TestErrorPaths(t *testing.T) {
 			Type:     "upload_start",
 			UploadID: uploadID,
 			Size:     100,
-			Room:     "general",
+			Room:     generalID,
 			// ContentHash intentionally empty
 		})
 
@@ -155,7 +157,7 @@ func TestErrorPaths(t *testing.T) {
 			UploadID:    uploadID,
 			Size:        500 * 1024 * 1024, // 500MB > 50MB limit
 			ContentHash: "blake2b-256:deadbeef",
-			Room:        "general",
+			Room:        generalID,
 		})
 
 		raw := waitForType(t, aliceMsgs, "upload_error", 5*time.Second)
@@ -177,13 +179,13 @@ func TestErrorPaths(t *testing.T) {
 		// This is a TUI-level check, not protocol — test via the model directly
 		// (already covered in wizard_test.go / verify tests)
 		// Here we just confirm the client-level identity is correct
-		if alice.Username() == "" {
+		if alice.UserID() == "" {
 			t.Fatal("alice has no username")
 		}
-		if alice.Username() == bob.Username() {
+		if alice.UserID() == bob.UserID() {
 			t.Fatal("alice and bob have the same username")
 		}
-		t.Logf("self-verify: alice=%s bob=%s (different identities confirmed)", alice.Username(), bob.Username())
+		t.Logf("self-verify: alice=%s bob=%s (different identities confirmed)", alice.UserID(), bob.UserID())
 	})
 
 	// =========================================================================
@@ -208,7 +210,7 @@ func TestErrorPaths(t *testing.T) {
 	// =========================================================================
 	t.Run("message_wrong_epoch", func(t *testing.T) {
 		// Send a room message and verify it arrives correctly first
-		err := alice.SendRoomMessage("general", "error test msg", "", nil)
+		err := alice.SendRoomMessage(generalID, "error test msg", "", nil)
 		if err != nil {
 			t.Fatalf("send: %v", err)
 		}
@@ -223,7 +225,7 @@ func TestErrorPaths(t *testing.T) {
 	// =========================================================================
 	t.Run("content_hash_correct", func(t *testing.T) {
 		// Encrypt some data and verify the hash round-trips
-		key := alice.RoomEpochKey("general", alice.CurrentEpoch("general"))
+		key := alice.RoomEpochKey(generalID, alice.CurrentEpoch(generalID))
 		if key == nil {
 			t.Skip("no epoch key")
 		}
@@ -257,7 +259,7 @@ func TestErrorPaths(t *testing.T) {
 	// =========================================================================
 	t.Run("dm_to_self", func(t *testing.T) {
 		// Create a DM with just yourself
-		alice.CreateDM([]string{alice.Username()}, "")
+		alice.CreateDM([]string{alice.UserID()}, "")
 
 		// Should either succeed (self-DM) or return an error — not hang
 		select {
@@ -281,7 +283,7 @@ func TestErrorPaths(t *testing.T) {
 	// 11. Reaction on nonexistent message — doesn't crash
 	// =========================================================================
 	t.Run("reaction_nonexistent_msg", func(t *testing.T) {
-		err := alice.SendRoomReaction("general", "msg_DOES_NOT_EXIST", "👍")
+		err := alice.SendRoomReaction(generalID, "msg_DOES_NOT_EXIST", "👍")
 		if err != nil {
 			t.Logf("reaction on nonexistent: client error — %v", err)
 			return
@@ -417,12 +419,14 @@ func TestUploadRateLimit(t *testing.T) {
 	defer alice.Close()
 	<-aliceSynced
 
+	generalID := roomIDByName(t, alice, "general")
+
 	// Send upload_start with missing hash — server returns upload_error immediately
 	alice.Enc().Encode(protocol.UploadStart{
 		Type:     "upload_start",
 		UploadID: "up_rate_test",
 		Size:     100,
-		Room:     "general",
+		Room:     generalID,
 	})
 
 	raw := waitForType(t, aliceMsgs, "upload_error", 5*time.Second)
@@ -435,7 +439,7 @@ func TestUploadRateLimit(t *testing.T) {
 
 	// After receiving the error, normal operations should still work
 	time.Sleep(time.Second)
-	err := alice.SendRoomMessage("general", "post-error message", "", nil)
+	err := alice.SendRoomMessage(generalID, "post-error message", "", nil)
 	if err != nil {
 		t.Fatalf("send after upload error: %v", err)
 	}

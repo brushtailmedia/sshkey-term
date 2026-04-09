@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Room identity switched to nanoid IDs (`room_` prefix) — display names resolved at TUI layer
+- All protocol `Room` fields now carry nanoid IDs instead of display names
+- `room_list` handled at client layer (persists room metadata to local DB)
+
+### Added
+- `rooms` table in client DB for room metadata persistence (id, name, topic, members)
+- `DisplayRoomName()` resolver — reads from local DB, falls back to raw ID
+- `resolveRoomName` callbacks in sidebar, messages header, quickswitch, infopanel, notifications
+
 ## v0.1.1 — 2026-04-07
 
 - **Soft-delete messages** — deleted messages show as tombstones in the conversation stream instead of disappearing. Self-deletes show "message deleted"; admin deletes show "message removed by [name]". Preserves conversation flow. Replies to deleted messages show "Deleted message" as the parent preview. Thread view handles deleted roots.

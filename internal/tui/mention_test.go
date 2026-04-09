@@ -52,8 +52,8 @@ func TestContainsMention(t *testing.T) {
 func TestExtractMentions_WordBoundary(t *testing.T) {
 	input := NewInput()
 	input.SetMembers([]MemberEntry{
-		{Username: "usr_alice123", DisplayName: "Alice"},
-		{Username: "usr_bob456", DisplayName: "Bob"},
+		{UserID: "usr_alice123", DisplayName: "Alice"},
+		{UserID: "usr_bob456", DisplayName: "Bob"},
 	})
 
 	// Should match: @Alice at word boundary
