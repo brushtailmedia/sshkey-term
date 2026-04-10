@@ -894,12 +894,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case DeleteDMConfirmMsg:
-		// User confirmed /delete on a 1:1 DM. Per dm_refactor.md, /delete
-		// is silent (the other party is never notified) and atomic in
-		// the sense that we wait for the server's dm_left echo before
-		// touching local state. The echo arrives via the dm_left case
-		// below, which calls into client.go to purge local messages and
-		// then drops the sidebar entry here.
+		// User confirmed /delete on a 1:1 DM. /delete is silent (the
+		// other party is never notified) and atomic in the sense that
+		// we wait for the server's dm_left echo before touching local
+		// state. The echo arrives via the dm_left case below, which
+		// calls into client.go to purge local messages and then drops
+		// the sidebar entry here.
 		//
 		// Server-busy retries are NOT auto-handled — if the server
 		// returns server_busy because a cleanup is in progress, the
@@ -1767,10 +1767,11 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 	switch sc.Command {
 	case "/leave":
 		// Branches on context. Group DM and room each get their own
-		// confirmation dialog. 1:1 DMs don't have a /leave path (see
-		// dm_refactor.md). Server enforces policy and returns errors;
-		// the client always opens the dialog and waits for the echo
-		// (or the error) before touching local state.
+		// confirmation dialog. 1:1 DMs don't have a /leave path — they
+		// only expose /delete, since "leave but keep in sidebar" has
+		// no useful semantic on a 1:1. Server enforces policy and
+		// returns errors; the client always opens the dialog and
+		// waits for the echo (or the error) before touching local state.
 		if sc.Group != "" {
 			// Group DM /leave — look up display name for the dialog
 			groupName := ""

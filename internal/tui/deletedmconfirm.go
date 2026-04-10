@@ -7,12 +7,12 @@ import (
 )
 
 // DeleteDMConfirmModel is the yes/no confirmation dialog for /delete on a
-// 1:1 DM. Per dm_refactor.md, /delete is silent (the other party is never
-// notified) but globally destructive on the leaver's side: every device
-// purges local history when the dm_left echo arrives. We require an
-// explicit confirmation because the action is unrecoverable on this
-// account — only the OTHER party still has the messages, and the next
-// time they message us it will appear as a fresh conversation.
+// 1:1 DM. /delete is silent (the other party is never notified) but
+// globally destructive on the leaver's side: every device purges local
+// history when the dm_left echo arrives. We require an explicit
+// confirmation because the action is unrecoverable on this account —
+// only the OTHER party still has the messages, and the next time they
+// message us it will appear as a fresh conversation.
 type DeleteDMConfirmModel struct {
 	visible   bool
 	dm        string // DM ID — passed back via DeleteDMConfirmMsg on confirm
