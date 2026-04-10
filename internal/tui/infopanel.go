@@ -22,6 +22,7 @@ type InfoPanelModel struct {
 	isGroup         bool
 	isDM            bool
 	left            bool // true when the user has left this context (read-only)
+	retired         bool // true when the room has been retired by an admin (Phase 12)
 	muted           bool
 	cursor          int
 	resolveRoomName func(string) string // room nanoid → display name
@@ -56,9 +57,11 @@ func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[stri
 	i.isDM = false
 	i.cursor = 0
 	i.left = false
+	i.retired = false
 	if c != nil {
 		if st := c.Store(); st != nil {
 			i.left = st.IsRoomLeft(room)
+			i.retired = st.IsRoomRetired(room)
 		}
 	}
 
@@ -105,6 +108,7 @@ func (i *InfoPanelModel) ShowGroup(groupID string, c *client.Client, online map[
 	i.isDM = false
 	i.cursor = 0
 	i.left = false
+	i.retired = false
 	if c != nil {
 		if st := c.Store(); st != nil {
 			i.left = st.IsGroupLeft(groupID)
@@ -157,6 +161,7 @@ func (i *InfoPanelModel) ShowDM(dmID string, c *client.Client, online map[string
 	// left_at is set, treat it as active (the sidebar should have already
 	// filtered it out via dm_list).
 	i.left = false
+	i.retired = false
 	i.muted = false
 	i.topic = ""
 	i.name = ""
@@ -281,9 +286,17 @@ func (i InfoPanelModel) View(width int) string {
 	}
 	b.WriteString("\n\n")
 
-	// Archived indicator — when the user has left this context, the
-	// info panel says so up front and points at the placeholder /delete.
-	if i.left {
+	// Status + /leave + /delete hints. The wording depends on whether
+	// the context is:
+	//   - a retired room: admin archived it, only /delete remains
+	//   - a left room/group: user self-left, only /delete remains
+	//   - an active room: both /leave and /delete are options
+	//   - an active group: both /leave and /delete are options
+	// Retirement takes priority over left (it's the underlying cause).
+	if i.retired {
+		b.WriteString(" " + errorStyle.Render("Status:") + " this room was archived by an admin (read-only)\n")
+		b.WriteString(" " + helpDescStyle.Render("Type /delete to remove from your view.") + "\n\n")
+	} else if i.left {
 		var label string
 		if i.room != "" {
 			label = "room"
@@ -291,7 +304,16 @@ func (i InfoPanelModel) View(width int) string {
 			label = "group"
 		}
 		b.WriteString(" " + errorStyle.Render("Status:") + " you left this " + label + " (read-only)\n")
-		b.WriteString(" " + helpDescStyle.Render("Type /delete to remove from your view (coming in a later phase).") + "\n\n")
+		b.WriteString(" " + helpDescStyle.Render("Type /delete to remove from your view.") + "\n\n")
+	} else if i.room != "" {
+		// Active room: surface both /leave and /delete as the available
+		// exit paths. /leave is subject to the server's policy flag, so
+		// the user may get a "Forbidden" back — but we don't pre-check
+		// here (the server is authoritative and hot-reloadable).
+		b.WriteString(" " + helpDescStyle.Render("Type /leave to stop receiving messages, or /delete to remove from your view.") + "\n\n")
+	} else if i.isGroup {
+		// Active group DM: /leave and /delete are both available.
+		b.WriteString(" " + helpDescStyle.Render("Type /leave to stop receiving messages, or /delete to remove from your view.") + "\n\n")
 	}
 
 	// 1:1 DMs surface the /delete hint up front — it's the only exit

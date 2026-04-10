@@ -6,11 +6,19 @@
 - Room identity switched to nanoid IDs (`room_` prefix) — display names resolved at TUI layer
 - All protocol `Room` fields now carry nanoid IDs instead of display names
 - `room_list` handled at client layer (persists room metadata to local DB)
+- Info panel hints: active rooms and groups show both `/leave` and `/delete`; left/retired rooms show `/delete` only; obsolete "(coming in a later phase)" placeholder removed
+- Read-only banner wording distinguishes self-leave ("you left this room") from admin retirement ("this room was archived by an admin")
 
 ### Added
 - `rooms` table in client DB for room metadata persistence (id, name, topic, members)
 - `DisplayRoomName()` resolver — reads from local DB, falls back to raw ID
 - `resolveRoomName` callbacks in sidebar, messages header, quickswitch, infopanel, notifications
+- **Room retirement + `/delete` for rooms (Phase 12)** — clients receive `room_retired` / `retired_rooms` and `room_deleted` / `deleted_rooms` broadcasts and catchup lists; UI flips affected rooms to read-only or removes them entirely
+- `DeleteRoomConfirmModel` — confirmation dialog with distinct wording for active vs retired rooms
+- Sidebar: retired rooms render with `(retired)` marker (takes priority over `(left)`); unread counts suppressed; `RemoveRoom` helper parallel to `RemoveGroup`
+- Messages view: `SetRoomRetired` state + banner for the read-only admin-archived case
+- `rooms.retired_at` column (no migration — empty client DBs); `MarkRoomRetired`, `IsRoomRetired`, `PurgeRoomMessages` store helpers
+- `DeleteRoom` client method; `case "room_retired" / "retired_rooms" / "room_deleted" / "deleted_rooms"` in client dispatch loop
 
 ## v0.1.1 — 2026-04-07
 

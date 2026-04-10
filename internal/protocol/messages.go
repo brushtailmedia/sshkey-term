@@ -203,6 +203,58 @@ type RoomLeft struct {
 	Reason string `json:"reason,omitempty"` // "" | "admin" | "retirement" | "user_retired"
 }
 
+// Phase 12: Room retirement and delete
+
+// RoomRetired is broadcast to every connected member of a room at the
+// moment the room is retired. Carries the post-retirement (suffixed)
+// display name so clients can update their local cache immediately.
+// Also used inside the RetiredRoomsList catchup payload sent during
+// the connect handshake.
+type RoomRetired struct {
+	Type        string `json:"type"`             // "room_retired"
+	Room        string `json:"room"`
+	DisplayName string `json:"display_name"`
+	RetiredAt   string `json:"retired_at"`
+	RetiredBy   string `json:"retired_by"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// RetiredRoomsList is sent during the connect handshake (BEFORE
+// room_list) to catch up devices that were offline when a room was
+// retired. Carries every retired room where the user is still in
+// room_members.
+type RetiredRoomsList struct {
+	Type  string        `json:"type"` // "retired_rooms"
+	Rooms []RoomRetired `json:"rooms"`
+}
+
+// DeleteRoom is the client-initiated request to remove a room from
+// the user's view. Parallel to DeleteGroup. The server runs the leave
+// flow, records a deleted_rooms sidecar row for multi-device catchup,
+// and echoes RoomDeleted back to every connected session of the caller.
+type DeleteRoom struct {
+	Type string `json:"type"` // "delete_room"
+	Room string `json:"room"`
+}
+
+// RoomDeleted is the server's confirmation that a delete_room request
+// succeeded. Sent to every active session of the caller so all of
+// their devices can purge local state in lockstep. Distinct from
+// RoomLeft — RoomLeft keeps local history, RoomDeleted purges it.
+type RoomDeleted struct {
+	Type string `json:"type"` // "room_deleted"
+	Room string `json:"room"`
+}
+
+// DeletedRoomsList is the offline-catchup payload sent during the
+// connect handshake (BEFORE room_list and retired_rooms) listing
+// every room ID this user has previously /delete'd. Clients run the
+// same purge path as RoomDeleted for each entry.
+type DeletedRoomsList struct {
+	Type  string   `json:"type"` // "deleted_rooms"
+	Rooms []string `json:"rooms"`
+}
+
 // 1:1 DM messages
 
 type CreateDM struct {

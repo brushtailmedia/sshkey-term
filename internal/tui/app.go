@@ -68,6 +68,7 @@ type App struct {
 	leaveRoomConfirm  LeaveRoomConfirmModel
 	deleteDMConfirm   DeleteDMConfirmModel
 	deleteGroupConfirm DeleteGroupConfirmModel
+	deleteRoomConfirm  DeleteRoomConfirmModel
 	deviceRevoked     DeviceRevokedModel
 	deviceMgr     DeviceMgrModel
 	quickSwitch QuickSwitchModel
@@ -327,6 +328,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.deleteGroupConfirm.IsVisible() {
 			var cmd tea.Cmd
 			a.deleteGroupConfirm, cmd = a.deleteGroupConfirm.Update(msg)
+			return a, cmd
+		}
+
+		// Delete-room confirmation intercepts all keys (Phase 12)
+		if a.deleteRoomConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.deleteRoomConfirm, cmd = a.deleteRoomConfirm.Update(msg)
 			return a, cmd
 		}
 
@@ -665,11 +673,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Block input on archived contexts (user has /leave'd a room or
-			// group). Allow navigation keys to move focus away. Slash
-			// commands like /delete still work because we explicitly let
-			// "enter" through and the input filters slash commands
-			// separately.
-			if a.messages.IsLeft() {
+			// group, OR the room has been retired by an admin). Allow
+			// navigation keys to move focus away. Slash commands like
+			// /delete still work because we explicitly let "enter" through
+			// and the input filters slash commands separately.
+			if a.messages.IsLeft() || a.messages.IsRoomRetired() {
 				switch msg.String() {
 				case "tab", "shift+tab", "up", "down", "left", "right":
 					// fall through
@@ -677,14 +685,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Only allow slash commands (start with /), block normal sends
 					text := strings.TrimSpace(a.input.Value())
 					if !strings.HasPrefix(text, "/") {
-						label := "context"
-						switch {
-						case a.messages.room != "":
-							label = "room"
-						case a.messages.group != "":
-							label = "group"
+						if a.messages.IsRoomRetired() {
+							a.statusBar.SetError("This room was archived by an admin — type /delete to remove from your view")
+						} else {
+							label := "context"
+							switch {
+							case a.messages.room != "":
+								label = "room"
+							case a.messages.group != "":
+								label = "group"
+							}
+							a.statusBar.SetError("You left this " + label + " — type /delete to remove from your view")
 						}
-						a.statusBar.SetError("You left this " + label + " — type /delete to remove from your view")
 						return a, nil
 					}
 					// fall through for slash commands
@@ -926,6 +938,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// so the same purge path runs.
 		if a.client != nil && msg.Group != "" {
 			if err := a.client.DeleteGroup(msg.Group); err != nil {
+				a.statusBar.SetError("Delete failed: " + err.Error())
+			}
+		}
+		return a, nil
+
+	case DeleteRoomConfirmMsg:
+		// User confirmed /delete on a room. Sends delete_room and waits
+		// for the server's room_deleted echo before touching local state.
+		// The echo arrives via the room_deleted case, which is handled
+		// by both client.go (purge messages, epoch keys, reactions; set
+		// left_at) and here (drop sidebar entry, reset active context).
+		//
+		// Idempotent: works on both active and retired rooms. For active
+		// rooms the server performs the leave side-effects first (remove
+		// from room_members, broadcast room_event leave, rotate epoch);
+		// for retired rooms the leave steps are skipped since the room
+		// is already archived and the epoch is already frozen.
+		if a.client != nil && msg.Room != "" {
+			if err := a.client.DeleteRoom(msg.Room); err != nil {
 				a.statusBar.SetError("Delete failed: " + err.Error())
 			}
 		}
@@ -1430,7 +1461,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.pendingPanel.IsVisible() ||
 		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
 		a.quitConfirm.IsVisible() || a.leaveConfirm.IsVisible() || a.leaveRoomConfirm.IsVisible() ||
-		a.deleteDMConfirm.IsVisible() || a.deleteGroupConfirm.IsVisible() ||
+		a.deleteDMConfirm.IsVisible() || a.deleteGroupConfirm.IsVisible() || a.deleteRoomConfirm.IsVisible() ||
 		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
 		return a, nil
 	}
@@ -1613,28 +1644,34 @@ func (a *App) setUnreadDividerAfter(lastReadID string) {
 	}
 }
 
-// syncMessagesLeftState updates the messages model's "left" flag based on
-// the current context (room or group DM). Called after any SetContext to
-// keep the read-only indicator in sync with whether the user has left.
+// syncMessagesLeftState updates the messages model's "left" and
+// "roomRetired" flags based on the current context (room or group DM).
+// Called after any SetContext to keep the read-only indicator in sync
+// with whether the user has left OR the room was retired by an admin.
 func (a *App) syncMessagesLeftState() {
 	if a.client == nil {
 		a.messages.SetLeft(false)
+		a.messages.SetRoomRetired(false)
 		return
 	}
 	st := a.client.Store()
 	if st == nil {
 		a.messages.SetLeft(false)
+		a.messages.SetRoomRetired(false)
 		return
 	}
 	if a.messages.group != "" {
 		a.messages.SetLeft(st.IsGroupLeft(a.messages.group))
+		a.messages.SetRoomRetired(false)
 		return
 	}
 	if a.messages.room != "" {
 		a.messages.SetLeft(st.IsRoomLeft(a.messages.room))
+		a.messages.SetRoomRetired(st.IsRoomRetired(a.messages.room))
 		return
 	}
 	a.messages.SetLeft(false)
+	a.messages.SetRoomRetired(false)
 }
 
 // updateTitle updates the terminal title with the total unread count.
@@ -1861,7 +1898,24 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			return
 		}
 		if sc.Room != "" {
-			a.statusBar.SetError("/delete for rooms is not yet implemented")
+			// Room /delete — Phase 12. Dialog wording depends on whether
+			// the room has been retired by an admin. Active rooms get
+			// the "you'll need an admin to re-add you" hint; retired
+			// rooms get "this action cannot be undone" since there's no
+			// un-retirement path. We resolve the retired flag from the
+			// local client store (populated by room_retired / retired_rooms
+			// catchup events).
+			roomName := sc.Room
+			if a.client != nil {
+				roomName = a.client.DisplayRoomName(sc.Room)
+			}
+			retired := false
+			if a.client != nil {
+				if st := a.client.Store(); st != nil {
+					retired = st.IsRoomRetired(sc.Room)
+				}
+			}
+			a.deleteRoomConfirm.Show(sc.Room, roomName, retired)
 			return
 		}
 		a.statusBar.SetError("/delete must be run inside a conversation")
@@ -2356,6 +2410,69 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			}
 			a.statusBar.SetError("Left room")
 		}
+	case "room_retired":
+		// An admin retired a room via sshkey-ctl. The client layer has
+		// already updated the local DB (new display name + retired_at
+		// flag). Here we refresh the sidebar entry to the new name +
+		// retired marker, flip the messages view to read-only if the
+		// retired room was currently focused, and surface a status
+		// message. Retirement is a broadcast event — all connected
+		// members of the room see this at the same time.
+		var m protocol.RoomRetired
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.sidebar.MarkRoomRetired(m.Room)
+			if a.messages.room == m.Room {
+				a.messages.SetRoomRetired(true)
+				// Inline system message so the user sees the event in
+				// the message stream, not just the banner.
+				a.messages.AddSystemMessage("this room was archived by an admin")
+			}
+			a.statusBar.SetError("Room archived by admin")
+		}
+	case "retired_rooms":
+		// Sync catchup. Each entry was retired by an admin while this
+		// device was offline. The client layer has already applied
+		// MarkRoomRetired for each. Here we flag them in the sidebar
+		// and update the active context's read-only state if one of
+		// them is currently focused.
+		var m protocol.RetiredRoomsList
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			for _, r := range m.Rooms {
+				a.sidebar.MarkRoomRetired(r.Room)
+				if a.messages.room == r.Room {
+					a.messages.SetRoomRetired(true)
+				}
+			}
+		}
+	case "room_deleted":
+		// Server confirmed /delete (this device or another). The
+		// client layer has already purged local messages, epoch keys,
+		// and reactions, and flipped left_at. Here we drop the
+		// sidebar entry entirely and reset the active message
+		// context if the deleted room was being viewed. Setting an
+		// empty context also clears the message buffer.
+		var m protocol.RoomDeleted
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.sidebar.RemoveRoom(m.Room)
+			if a.messages.room == m.Room {
+				a.messages.SetContext("", "", "")
+			}
+		}
+	case "deleted_rooms":
+		// Sync catchup. Each entry was /delete'd from another device
+		// while this one was offline. The client layer has already
+		// applied MarkRoomLeft + PurgeRoomMessages for each. Here we
+		// drop them from the sidebar and reset the active context if
+		// any of them was the currently-viewed room.
+		var m protocol.DeletedRoomsList
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			for _, roomID := range m.Rooms {
+				a.sidebar.RemoveRoom(roomID)
+				if a.messages.room == roomID {
+					a.messages.SetContext("", "", "")
+				}
+			}
+		}
 	case "group_renamed":
 		var m protocol.GroupRenamed
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
@@ -2791,6 +2908,9 @@ func (a App) View() string {
 	}
 	if a.deleteGroupConfirm.IsVisible() {
 		return a.deleteGroupConfirm.View(a.width)
+	}
+	if a.deleteRoomConfirm.IsVisible() {
+		return a.deleteRoomConfirm.View(a.width)
 	}
 	if a.deviceRevoked.IsVisible() {
 		return a.deviceRevoked.View(a.width)

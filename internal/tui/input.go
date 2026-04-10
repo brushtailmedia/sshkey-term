@@ -188,12 +188,13 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 			i.pendingCmd = &SlashCommandMsg{Command: "/leave_dm_rejected", DM: dm}
 		}
 	case "/delete":
-		// Context-aware delete. 1:1 DMs are wired end-to-end: the app
-		// layer opens a confirmation dialog and, on confirm, sends
-		// leave_dm and waits for the dm_left echo before touching local
-		// state. Room and group DM variants are still placeholders at
-		// the app layer — /delete routes to them the same way, but they
-		// surface a "not yet implemented" status bar message for now.
+		// Context-aware delete. All three contexts (1:1 DM, group DM,
+		// room) are wired end-to-end: the app layer opens a confirmation
+		// dialog and, on confirm, sends the appropriate delete verb
+		// (leave_dm for 1:1, delete_group for groups, delete_room for
+		// rooms) and waits for the server echo before touching local
+		// state. Room /delete works for both active and retired rooms;
+		// the dialog wording changes based on IsRoomRetired.
 		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	case "/rename":
 		if c != nil && group != "" && arg != "" {

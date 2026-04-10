@@ -386,6 +386,40 @@ func (s *Store) IsRoomLeft(roomID string) bool {
 	return leftAt > 0
 }
 
+// MarkRoomRetired flags a room as retired on the client and updates
+// its display name to the post-retirement suffixed form. Called from
+// the room_retired event handler and the retired_rooms catchup list
+// handler (Phase 12). Distinct from MarkRoomLeft — a room can be
+// retired without the user having left it, or left before retirement
+// (per Q9: two separate flags).
+//
+// The rooms row stays in place; the sidebar continues to render it
+// (greyed with a "(retired)" marker instead of "(left)") until the
+// user runs /delete.
+func (s *Store) MarkRoomRetired(roomID, newDisplayName string, retiredAt int64) error {
+	_, err := s.db.Exec(
+		`UPDATE rooms SET retired_at = ?, name = ? WHERE id = ?`,
+		retiredAt, newDisplayName, roomID,
+	)
+	return err
+}
+
+// IsRoomRetired returns true if the room has been retired server-side
+// and the client has recorded the retirement locally. Used by the TUI
+// to render the correct state label and by the /delete command flow
+// to pick the right confirmation dialog wording.
+func (s *Store) IsRoomRetired(roomID string) bool {
+	var retiredAt int64
+	err := s.db.QueryRow(
+		`SELECT retired_at FROM rooms WHERE id = ?`,
+		roomID,
+	).Scan(&retiredAt)
+	if err != nil {
+		return false
+	}
+	return retiredAt > 0
+}
+
 // GetRoomLeftAt returns the unix timestamp when the user left this room,
 // or 0 if they are still an active member (or the room does not exist).
 func (s *Store) GetRoomLeftAt(roomID string) int64 {
@@ -551,6 +585,39 @@ func (s *Store) PurgeGroupMessages(groupID string) error {
 		return err
 	}
 	if _, err := s.db.Exec(`DELETE FROM messages WHERE group_id = ?`, groupID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// PurgeRoomMessages drops all locally-stored messages, reactions, and
+// epoch keys for the given room. Called when the server echoes
+// room_deleted in response to a /delete, or when the deleted_rooms
+// catchup list arrives on reconnect. Phase 12 parallel to
+// PurgeGroupMessages.
+//
+// Idempotent: re-running on an already-purged room is a no-op. The
+// local rooms row is preserved (with left_at set by the caller) so
+// that multi-device catchup can detect the state on reconnect and so
+// the TUI app layer can detect the row in its sidebar cleanup. The
+// app-level sidebar entry removal happens separately via
+// sidebar.RemoveRoom.
+func (s *Store) PurgeRoomMessages(roomID string) error {
+	// Drop reactions attached to messages in this room
+	if _, err := s.db.Exec(
+		`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE room = ?)`,
+		roomID,
+	); err != nil {
+		return err
+	}
+	// Drop the messages themselves
+	if _, err := s.db.Exec(`DELETE FROM messages WHERE room = ?`, roomID); err != nil {
+		return err
+	}
+	// Drop epoch keys — they're unrecoverable without the server's
+	// wrapped keys anyway, and the room is being removed from the
+	// user's view entirely
+	if _, err := s.db.Exec(`DELETE FROM epoch_keys WHERE room = ?`, roomID); err != nil {
 		return err
 	}
 	return nil

@@ -592,6 +592,82 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 				}
 			}
 		}
+	case "room_retired":
+		// Phase 12: broadcast from the server's runRoomRetirementProcessor
+		// telling every connected member of a room that the room has
+		// been retired. Update the local rooms row to flip the retired
+		// flag and overwrite the cached display name with the
+		// post-retirement (suffixed) form so the sidebar and info panel
+		// render the right state.
+		var rr protocol.RoomRetired
+		if err := json.Unmarshal(raw, &rr); err == nil {
+			if c.store != nil {
+				if err := c.store.MarkRoomRetired(rr.Room, rr.DisplayName, time.Now().Unix()); err != nil {
+					c.logger.Warn("MarkRoomRetired on room_retired", "room", rr.Room, "error", err)
+				}
+			}
+			c.logger.Info("room retired", "room", rr.Room, "display_name", rr.DisplayName)
+		}
+	case "retired_rooms":
+		// Phase 12: offline-catchup list sent during the connect
+		// handshake listing every retired room the user is still a
+		// member of. Apply the same local effects as room_retired for
+		// each entry. Idempotent on already-marked rooms.
+		var rrl protocol.RetiredRoomsList
+		if err := json.Unmarshal(raw, &rrl); err == nil {
+			if c.store != nil {
+				now := time.Now().Unix()
+				for _, rr := range rrl.Rooms {
+					if err := c.store.MarkRoomRetired(rr.Room, rr.DisplayName, now); err != nil {
+						c.logger.Warn("MarkRoomRetired on retired_rooms catchup",
+							"room", rr.Room, "error", err)
+					}
+				}
+			}
+		}
+	case "room_deleted":
+		// Phase 12: server confirmed a delete_room from this account,
+		// possibly from another device. Apply the local /delete
+		// effects on THIS device too: mark left, purge every locally
+		// stored message for the room, drop epoch keys. The row
+		// itself stays (the TUI app layer handles sidebar entry
+		// removal via sidebar.RemoveRoom). Parallel to the
+		// group_deleted handler above.
+		//
+		// Idempotent — receiving room_deleted on a device that has
+		// already purged just runs the no-op DELETE statements again.
+		var rd protocol.RoomDeleted
+		if err := json.Unmarshal(raw, &rd); err == nil {
+			if c.store != nil {
+				if err := c.store.MarkRoomLeft(rd.Room, time.Now().Unix()); err != nil {
+					c.logger.Warn("MarkRoomLeft on room_deleted", "room", rd.Room, "error", err)
+				}
+				if err := c.store.PurgeRoomMessages(rd.Room); err != nil {
+					c.logger.Warn("PurgeRoomMessages on room_deleted", "room", rd.Room, "error", err)
+				}
+			}
+			c.logger.Info("room deleted", "room", rd.Room)
+		}
+	case "deleted_rooms":
+		// Phase 12: offline-catchup list sent during the connect
+		// handshake listing every room ID this user has previously
+		// /delete'd. Run the same purge path for each entry as if a
+		// live room_deleted echo had arrived. Idempotent on
+		// already-purged entries. Parallel to deleted_groups handler.
+		var drl protocol.DeletedRoomsList
+		if err := json.Unmarshal(raw, &drl); err == nil {
+			if c.store != nil {
+				now := time.Now().Unix()
+				for _, roomID := range drl.Rooms {
+					if err := c.store.MarkRoomLeft(roomID, now); err != nil {
+						c.logger.Warn("MarkRoomLeft on deleted_rooms", "room", roomID, "error", err)
+					}
+					if err := c.store.PurgeRoomMessages(roomID); err != nil {
+						c.logger.Warn("PurgeRoomMessages on deleted_rooms", "room", roomID, "error", err)
+					}
+				}
+			}
+		}
 	case "dm_list":
 		var dl protocol.DMList
 		if err := json.Unmarshal(raw, &dl); err == nil {

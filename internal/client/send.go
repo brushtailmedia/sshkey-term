@@ -600,6 +600,23 @@ func (c *Client) DeleteGroup(groupID string) error {
 	})
 }
 
+// DeleteRoom sends a delete_room request for a room (Phase 12). The
+// server runs the leave flow (removes the user from room_members,
+// broadcasts room_event{leave} to remaining members), records the
+// deletion in its deleted_rooms sidecar for multi-device catchup, and
+// echoes room_deleted back to all of the caller's connected sessions.
+// Client-side purge happens when the room_deleted echo arrives — see
+// the room_deleted case in client.go's dispatch. Policy-gated by
+// allow_self_leave_rooms (active rooms) or allow_self_leave_retired_rooms
+// (retired rooms); server picks the right flag based on the room's
+// retired state. Parallel to DeleteGroup.
+func (c *Client) DeleteRoom(roomID string) error {
+	return c.enc.Encode(protocol.DeleteRoom{
+		Type: "delete_room",
+		Room: roomID,
+	})
+}
+
 // CreateDM creates a new 1:1 DM with a single other user.
 func (c *Client) CreateDM(other string) error {
 	return c.enc.Encode(protocol.CreateDM{

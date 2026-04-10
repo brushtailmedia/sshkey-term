@@ -154,6 +154,7 @@ type MessagesModel struct {
 	unreadFromID   string            // first unread message ID (for divider)
 	retired        map[string]bool   // userID -> account retired
 	left           bool              // current context is archived (read-only, user has left)
+	roomRetired    bool              // current context is a retired room (archived by admin)
 }
 
 func NewMessages() MessagesModel {
@@ -205,7 +206,8 @@ func (m *MessagesModel) SetContext(room, group, dm string) {
 	m.unreadFromID = ""
 	m.hasMore = true
 	m.loadingHistory = false
-	m.left = false // caller should call SetLeft after if the new context is archived
+	m.left = false        // caller should call SetLeft after if the new context is archived
+	m.roomRetired = false // caller should call SetRoomRetired after if the new context is a retired room
 	// Clear typing indicators on context switch. SetTyping only inserts
 	// entries that match the current context, but stale entries from the
 	// previous context can linger (entries time out via the 5-second
@@ -228,6 +230,20 @@ func (m *MessagesModel) SetLeft(left bool) {
 // IsLeft returns true if the current messages context is archived.
 func (m *MessagesModel) IsLeft() bool {
 	return m.left
+}
+
+// SetRoomRetired marks the current context as a retired room (Phase
+// 12). When true, the read-only banner renders different wording
+// ("this room was archived by an admin") to differentiate from a
+// self-leave. Orthogonal to left: a room may be both retired and left,
+// but the retired wording takes precedence because it's the cause.
+func (m *MessagesModel) SetRoomRetired(retired bool) {
+	m.roomRetired = retired
+}
+
+// IsRoomRetired returns true if the current context is a retired room.
+func (m *MessagesModel) IsRoomRetired() bool {
+	return m.roomRetired
 }
 
 // SetUnreadFrom sets the first unread message ID for the divider.
@@ -1077,9 +1093,18 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 	}
 
 	// Read-only / archived indicator. Shown when the user has left the
-	// current context. Messages above remain readable, but the input bar
-	// is disabled. Use /delete to remove the entry from your view.
-	if m.left {
+	// current context or the room has been retired by an admin. Messages
+	// above remain readable, but the input bar is disabled. Use /delete
+	// to remove the entry from your view.
+	//
+	// Retirement takes precedence over "left" because it's the cause:
+	// if a room was retired, we want the banner to say so (and explain
+	// that /delete is the only remaining action), even if the user also
+	// happens to have left before it was retired.
+	if m.roomRetired {
+		b.WriteString(systemMsgStyle.Render(" ── this room was archived by an admin — read-only — type /delete to remove from your view ──"))
+		b.WriteString("\n")
+	} else if m.left {
 		var label string
 		switch {
 		case m.room != "":

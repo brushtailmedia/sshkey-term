@@ -186,13 +186,20 @@ func (s *Store) init() error {
 		-- left_at = 0 means active member; >0 means the user has left this
 		-- room (archived: greyed in sidebar, input disabled, history still
 		-- scrollable until /delete).
+		--
+		-- retired_at = 0 means active room; >0 means the room has been
+		-- retired (admin action, Phase 12). Distinct from left_at per Q9:
+		-- a user can be in a retired room (retired_at > 0, left_at = 0)
+		-- or leave a retired room (both > 0), and the TUI renders them
+		-- differently. name carries the post-retirement suffixed form.
 		CREATE TABLE IF NOT EXISTS rooms (
 			id         TEXT PRIMARY KEY,
 			name       TEXT NOT NULL DEFAULT '',
 			topic      TEXT NOT NULL DEFAULT '',
 			members    INTEGER NOT NULL DEFAULT 0,
 			updated_at INTEGER NOT NULL DEFAULT 0,
-			left_at    INTEGER NOT NULL DEFAULT 0
+			left_at    INTEGER NOT NULL DEFAULT 0,
+			retired_at INTEGER NOT NULL DEFAULT 0
 		);
 
 		-- Group DMs (local cache of group member lists + names).

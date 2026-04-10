@@ -58,6 +58,7 @@ type SidebarModel struct {
 	retired       map[string]bool   // user -> retired
 	leftGroups    map[string]bool   // group ID -> user has left (archived, read-only)
 	leftRooms     map[string]bool   // room ID -> user has left (archived, read-only)
+	retiredRooms  map[string]bool   // room ID -> room was retired by an admin (archived, read-only)
 	cursor        int               // position in the combined list
 	selectedRoom  string
 	selectedGroup string
@@ -74,11 +75,12 @@ type SidebarModel struct {
 
 func NewSidebar() SidebarModel {
 	return SidebarModel{
-		unread:     make(map[string]int),
-		online:     make(map[string]bool),
-		retired:    make(map[string]bool),
-		leftGroups: make(map[string]bool),
-		leftRooms:  make(map[string]bool),
+		unread:       make(map[string]int),
+		online:       make(map[string]bool),
+		retired:      make(map[string]bool),
+		leftGroups:   make(map[string]bool),
+		leftRooms:    make(map[string]bool),
+		retiredRooms: make(map[string]bool),
 	}
 }
 
@@ -128,6 +130,47 @@ func (s *SidebarModel) MarkRoomRejoined(roomID string) {
 // (archived/read-only in the sidebar).
 func (s *SidebarModel) IsRoomLeft(roomID string) bool {
 	return s.leftRooms[roomID]
+}
+
+// MarkRoomRetired flags a room as retired by an admin (Phase 12). The
+// sidebar entry stays visible but renders greyed with a (retired) suffix
+// so the user knows the difference between "I left" and "an admin
+// archived this room for everyone". Retirement is permanent — the only
+// way to clear a retired room entry is /delete.
+func (s *SidebarModel) MarkRoomRetired(roomID string) {
+	if s.retiredRooms == nil {
+		s.retiredRooms = make(map[string]bool)
+	}
+	s.retiredRooms[roomID] = true
+}
+
+// IsRoomRetired returns true if the room has been flagged as retired.
+func (s *SidebarModel) IsRoomRetired(roomID string) bool {
+	return s.retiredRooms[roomID]
+}
+
+// RemoveRoom drops a room from the sidebar by ID. Used by the
+// room_deleted handler when /delete completes (any device, this device
+// or another). Clears unread badge, left/retired flags, and resets the
+// selected-room cursor if it pointed at the removed entry.
+//
+// Distinct from MarkRoomLeft / MarkRoomRetired, both of which keep the
+// entry visible but greyed. RemoveRoom deletes the entry entirely — the
+// user has explicitly asked for it to be gone from their view.
+func (s *SidebarModel) RemoveRoom(roomID string) {
+	filtered := make([]string, 0, len(s.rooms))
+	for _, existing := range s.rooms {
+		if existing != roomID {
+			filtered = append(filtered, existing)
+		}
+	}
+	s.rooms = filtered
+	delete(s.unread, roomID)
+	delete(s.leftRooms, roomID)
+	delete(s.retiredRooms, roomID)
+	if s.selectedRoom == roomID {
+		s.selectedRoom = ""
+	}
 }
 
 // MarkRetired flags a user as retired. Used to render [retired] on any DM
@@ -312,16 +355,23 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 			displayName = s.resolveRoomName(room)
 		}
 		isLeft := s.leftRooms[room]
+		isRetired := s.retiredRooms[room]
 		line := " # " + displayName
-		if isLeft {
+		// Retired takes visual priority over left — a retired room is
+		// archived for everyone, whereas left is user-specific. Show the
+		// more "permanent" label so users know re-adding them to the
+		// room isn't possible.
+		if isRetired {
+			line += " " + helpDescStyle.Render("(retired)")
+		} else if isLeft {
 			line += " " + helpDescStyle.Render("(left)")
 		}
-		if count, ok := s.unread[room]; ok && count > 0 && !isLeft {
+		if count, ok := s.unread[room]; ok && count > 0 && !isLeft && !isRetired {
 			line += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
 		}
 
-		// Grey out archived rooms
-		if isLeft {
+		// Grey out archived rooms (left or retired)
+		if isLeft || isRetired {
 			line = archivedStyle.Render(line)
 		}
 
