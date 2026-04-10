@@ -1,19 +1,25 @@
 # sshkey-term
 
-v0.1.1 — Expect breaking changes until v1.0.
+Expect breaking changes until v1.0.
 
 Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat) -- a private messaging server over SSH with E2E encryption.
 
 ## Features
 
-- End-to-end encrypted rooms and DMs (AES-256-GCM, X25519 key wrapping)
+- End-to-end encrypted rooms, 1:1 DMs, and group DMs (AES-256-GCM, X25519 key wrapping)
 - SSH key is your permanent identity -- no accounts, no passwords, no key rotation
-- Rooms with epoch-based key rotation, DMs with per-message keys
-- File sharing, reactions, typing indicators, read receipts, presence
+- Rooms with epoch-based key rotation, DMs with per-message keys (Signal-level forward secrecy)
+- `/leave` and `/delete` for rooms, 1:1 DMs, and group DMs with multi-device sync
+- Retired-room read-only state (admin-archived rooms show a distinct banner)
+- File sharing, reactions, typing indicators, read receipts, presence, pinned messages
+- Soft-delete: deleted messages show as tombstones in the stream, not disappearances
 - Inline images via sixel/kitty/iterm2 protocols
-- Local encrypted database (SQLCipher) with full-text search
-- Multi-server support
-- Offline message history (lazy scroll-back)
+- Local encrypted database (SQLCipher) with full-text search (FTS5)
+- Multi-server support (Ctrl+1-9 to switch)
+- Offline message history with lazy scroll-back (local-first, server fallback)
+- Quick switch (Ctrl+K fuzzy search across rooms and conversations)
+- Thread view, reply preview, jump-to-parent
+- Alt+Up/Down fast room navigation
 - Self-service account retirement (settings → Retire account) with typed confirmation
 - Self-service device management (settings → Manage devices) — list and revoke your own devices
 - First-run wizard with key generation + passphrase + mandatory backup acknowledgement
@@ -99,7 +105,7 @@ On first launch, the client prompts to select or generate an Ed25519 SSH key, th
 
 ```
 ~/.sshkey-chat/
-��── config.toml              global config, server list, device ID
+└── config.toml              global config, server list, device ID
 ├── chat.example.com/
 │   ├── messages.db          encrypted local DB (all rooms + DMs)
 │   └── files/               cached attachments
