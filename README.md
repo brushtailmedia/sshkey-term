@@ -137,7 +137,7 @@ Each server is independent -- different keys, different rooms, different users. 
 
 ## Security model
 
-**Your Ed25519 key is your permanent identity.** 
+**Your Ed25519 SSH key is your permanent identity.** 
 
 The server never sees your private key or passphrase, only the public key. The client handles all encryption, decryption, signing, and verification locally. The server is a blind relay that routes messages and enforces access control based on public keys.
 
@@ -156,6 +156,14 @@ Device revocation is operational cleanup — it doesn't stop an attacker who has
 **Back up your key.** If you lose both the key and your passphrase with no backup, your account ends — the server cannot help you recover it. The first-run wizard enforces an explicit acknowledgement of this before letting you connect.
 
 See the server's [PROTOCOL.md](https://github.com/brushtailmedia/sshkey-chat/blob/main/PROTOCOL.md) section "Account Retirement" for the wire protocol and [PROJECT.md "Account Lifecycle"](https://github.com/brushtailmedia/sshkey-chat/blob/main/PROJECT.md) for the full design rationale.
+
+## Documentation
+
+| File | Contents |
+|---|---|
+| [DESIGN.md](DESIGN.md) | Client architecture: local DB schema, caching, slash commands, focus model, sync flow, offline mode |
+| [KEYBINDINGS.md](KEYBINDINGS.md) | Keyboard shortcuts and slash commands — quick reference |
+| [APPLICATION-LAYOUT.md](APPLICATION-LAYOUT.md) | Visual layout: panels, message rendering, color palette |
 
 ## Protocol
 

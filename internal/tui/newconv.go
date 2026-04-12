@@ -6,8 +6,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
-	"github.com/brushtailmedia/sshkey-term/internal/client"
 )
 
 var (
@@ -114,7 +112,7 @@ func (n *NewConvModel) updateSuggestions() {
 	}
 }
 
-func (n NewConvModel) Update(msg tea.KeyMsg, c *client.Client) (NewConvModel, tea.Cmd) {
+func (n NewConvModel) Update(msg tea.KeyMsg) (NewConvModel, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		n.Hide()
@@ -132,12 +130,12 @@ func (n NewConvModel) Update(msg tea.KeyMsg, c *client.Client) (NewConvModel, te
 		return n, nil
 
 	case "ctrl+enter":
-		return n, n.create(c)
+		return n, n.create()
 
 	case "enter":
 		if n.focusName {
 			// Create on Enter in name field
-			return n, n.create(c)
+			return n, n.create()
 		}
 		// Toggle member selection
 		if len(n.suggestions) > 0 && n.suggCursor < len(n.suggestions) {
@@ -187,7 +185,7 @@ func (n NewConvModel) Update(msg tea.KeyMsg, c *client.Client) (NewConvModel, te
 	return n, cmd
 }
 
-func (n *NewConvModel) create(c *client.Client) tea.Cmd {
+func (n *NewConvModel) create() tea.Cmd {
 	members := n.selectedList()
 	if len(members) == 0 {
 		return nil

@@ -1,5 +1,5 @@
 # Binary
-sshkey-chat
+sshkey-term
 *.exe
 *.exe~
 *.dll
@@ -37,9 +37,6 @@ Thumbs.db
 *.swp
 *.swo
 *~
-
-# Design docs (internal reference only)
-terminal-design.md
 
 # env file
 .env

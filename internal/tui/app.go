@@ -428,7 +428,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// New conversation dialog intercepts keys when visible
 		if a.newConv.IsVisible() {
 			var cmd tea.Cmd
-			a.newConv, cmd = a.newConv.Update(msg, a.client)
+			a.newConv, cmd = a.newConv.Update(msg)
 			if !a.newConv.IsVisible() {
 				a.focus = FocusInput
 			}
@@ -1855,8 +1855,9 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		// redirect so the user isn't confused about which command to use.
 		a.statusBar.SetError("/leave is not available for 1:1 DMs — use /delete")
 	case "/delete":
-		// /delete is context-aware. The 1:1 DM path is wired here; the
-		// room and group DM variants are still placeholder (Phase 12).
+		// /delete is context-aware. All three contexts (1:1 DM, group DM,
+		// room) are wired end-to-end with confirmation dialogs and
+		// wait-for-echo state management.
 		if sc.DM != "" {
 			// Resolve the other party's display name for the dialog.
 			other := ""

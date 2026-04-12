@@ -121,7 +121,7 @@ func (h HelpModel) View(width, height int) string {
 		{"/verify <user>", "verify safety number"},
 		{"/rename <name>", "rename group DM"},
 		{"/leave", "leave room or group DM"},
-		{"/delete", "remove archived from view (placeholder)"},
+		{"/delete", "delete conversation from your view"},
 		{"/mute", "toggle mute"},
 		{"/settings", "open settings"},
 		{"/unverify <user>", "remove verification"},

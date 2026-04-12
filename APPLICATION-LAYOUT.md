@@ -1,0 +1,1127 @@
+# sshkey-term — Application Layout
+
+> Visual layout specification for the sshkey-term terminal UI. For architecture see [DESIGN.md](DESIGN.md). For keyboard shortcuts see [KEYBINDINGS.md](KEYBINDINGS.md).
+
+---
+
+## Layout
+
+Three-panel layout. Member panel is toggleable.
+
+```
+┌─ sshkey-term ─── ● Personal │ Work ──────────────────────────────────────┐
+│                                                                           │
+│  ┌─ Sidebar ────┐  ┌─ #room / DM name ──────────────────────────────┐   │
+│  │              │  │  ▶ N pinned messages (rooms only, if any)       │   │
+│  │  Rooms       │  ├─────────────────────────────────────────────────┤   │
+│  │  # general  ◀│  │                                                 │   │
+│  │  # engineer  │  │  message stream                                 │   │
+│  │  # design    │  │                                                 │   │
+│  │              │  │                                                 │   │
+│  ├──────────────┤  │                                                 │   │
+│  │  Messages    │  │                                                 │   │
+│  │  ● Bob       │  │                                                 │   │
+│  │  Carol    (2)│  │  ── alice is typing... ─────────────────────    │   │
+│  │  Project A   │  │                                                 │   │
+│  ├──────────────┤  ├─────────────────────────────────────────────────┤   │
+│  │  DMs         │  │ > input                                         │   │
+│  │  ● Dave    ✓ │  └─────────────────────────────────────────────────┘   │
+│  └──────────────┘                                                        │
+│                                                                           │
+│  E2E encrypted · 3 members · epoch 12                          alice ●   │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+**Server tabs:** top bar shows tabs for each configured server. Active tab is highlighted. Connection dot to the left of the active server name. `Ctrl+1`/`Ctrl+2`/etc or click to switch servers. Single server = no tabs, just the server name.
+
+**Connection status dot (left of server name):**
+
+```
+● green   connected
+● amber   reconnecting (pulses: ● ○ ● ○)
+● red     disconnected / offline
+```
+
+With member panel (Ctrl+M):
+
+```
+┌─ Sidebar ────┐  ┌─ #general ──────────────────────┐  ┌─ Members ──┐
+│  ...          │  │  messages...                     │  │  ● alice   │
+│              │  │                                  │  │  ● bob   ◀ │
+│              │  │                                  │  │  ○ carol   │
+│              │  ├──────────────────────────────────┤  │            │
+│              │  │ > input                          │  │            │
+└──────────────┘  └──────────────────────────────────┘  └────────────┘
+```
+
+Member panel is navigable with `↑/↓` when focused (`Tab` to focus). `Enter` or click on a member opens the member context menu:
+
+```
+┌──────────────────────┐
+│  Message bob          │   ← opens 1:1 DM
+│  Create group with... │   ← opens new conversation dialog with bob pre-selected
+│  Verify bob           │   ← safety numbers
+│  View profile         │
+└──────────────────────┘
+```
+
+---
+
+## Sidebar
+
+Three sections: Rooms, Messages (group DMs), DMs (1:1).
+
+### Rooms section
+
+```
+┌─ Rooms ──────┐
+│  # general  ◀│   ← selected (highlighted)
+│  # engineer  │
+│  # design (3)│   ← unread count
+│  # old-proj (retired)│  ← retired by admin, greyed, no unread
+│  # archive  (left)   │  ← user left, greyed
+```
+
+- `#` prefix for rooms
+- `◀` or highlight for current selection
+- `(N)` unread badge (suppressed for retired and left rooms)
+- `(retired)` marker — room archived by admin, greyed with `archivedStyle`. Takes priority over `(left)` when both flags are set.
+- `(left)` marker — user self-left, greyed with `archivedStyle`
+- Sorted by config order
+
+### Messages section (group DMs)
+
+```
+├─ Messages ──┤
+│  ● Project A  │   ← group DM with name, online dot
+│  ● Team Chat  │   ← group DM with name
+│  D, Eve, Fr   │   ← group DM without name, truncated member list
+│  Old Group [retired] (left)│  ← member retired + user left
+```
+
+- Group DMs show the conversation name, or truncated member list if no name
+- Online indicator (●) if any member is online
+- `[retired]` marker — shown when any member of the group has a retired account
+- `(left)` marker — user self-left, greyed
+- Unread badge suppressed for left groups
+
+### DMs section (1:1)
+
+```
+├─ DMs ────────┤
+│  ● Dave     ✓│   ← online, key verified
+│  ○ Eve    (2)│   ← offline, 2 unread
+│  ○ Frank [retired]│  ← other party retired, greyed
+```
+
+- Display name of the other party
+- Online indicator (●/○)
+- `✓` verification badge (green) — key verified via safety numbers
+- `[retired]` marker — other party's account retired
+- `(N)` unread badge
+
+---
+
+## Message Stream
+
+### Regular message
+
+```
+alice  10:32 AM
+Hey everyone, the deploy looks good
+```
+
+### Message from a retired user
+
+```
+alice  10:32 AM  [retired]
+Hey everyone, the deploy looks good
+```
+
+`[retired]` marker in dim style next to the timestamp when the sender's account has been retired.
+
+### With reply
+
+```
+alice  10:34 AM
+None so far. Monitoring grafana now
+  ↳ re: Nice. Any issues with the migration?
+```
+
+### With reactions
+
+```
+bob  10:33 AM
+Nice. Any issues with the migration?
+  👍 2  🎉 1
+```
+
+### With attachment
+
+```
+carol  10:35 AM
+┌──────────────────────┐
+│  screenshot.png       │
+│  [inline image]       │   ← sixel/kitty/iterm2 if supported
+└──────────────────────┘
+Looks clean ^
+```
+
+Fallback for unsupported terminals:
+
+```
+carol  10:35 AM
+📎 screenshot.png (230 KB, image/jpeg)
+Looks clean ^
+```
+
+### System messages
+
+```
+  ── carol has joined the room ──
+  ── alice renamed the group to "Project Alpha" ──
+  ── bob left the group ──
+  ── bob was removed from the group by alice ──
+  ── this room was archived by an admin ──
+```
+
+### Deleted message (tombstone)
+
+Deleted messages render as inline tombstones in the stream, preserving conversation flow:
+
+```
+  ── message deleted ──
+  ── message removed by alice ──
+```
+
+Self-deletes show "message deleted". Admin deletes show "message removed by {admin_name}".
+
+### Pinned message indicator
+
+```
+📌 alice  10:32 AM
+Deploy checklist: 1. Run migrations 2. Clear...
+```
+
+### Typing indicator
+
+```
+  ── alice is typing... ──
+  ── alice and bob are typing... ──
+  ── 3 people are typing... ──
+```
+
+Appears above the input bar. Expires after 5 seconds. Three or more typists collapse to a count.
+
+### Read-only banners
+
+Shown at the bottom of the message stream when the context is archived:
+
+```
+  ── you left this room — read-only — type /delete to remove from your view ──
+  ── this room was archived by an admin — read-only — type /delete to remove from your view ──
+  ── you left this group — read-only — type /delete to remove from your view ──
+```
+
+Retired-room banner takes priority over the self-leave banner when both flags are set.
+
+### Signature warnings
+
+```
+⚠ bob  10:40 AM  [unsigned]
+This message was not signed
+
+⚠ bob  10:41 AM  [signature failed]
+This message failed signature verification
+```
+
+### Replay warning
+
+```
+⚠ alice  10:42 AM  [possible replay]
+Duplicate message detected
+```
+
+---
+
+## Pinned Messages Bar
+
+Collapsed (default):
+
+```
+┌─ #general ── pinned ─────────────────────────────────┐
+│  ▶ 2 pinned message(s)  (Ctrl+P to expand)           │
+├──────────────────────────────────────────────────────┤
+```
+
+Expanded (Ctrl+P or click):
+
+```
+┌─ #general ── pinned ─────────────────────────────────┐
+│  📌 alice: Deploy checklist: 1. Run migrations...     │
+│  📌 bob: API docs are at https://docs.example...      │
+│  ─────────────────────────────────────────────────── │
+```
+
+Click a pinned message to jump to it. Esc to collapse.
+
+---
+
+## Status Bar
+
+```
+E2E encrypted · 3 members · epoch 12                          alice ● (admin)
+```
+
+- Encryption status (always E2E)
+- Member count for current room/conversation
+- Current epoch (rooms only)
+- Current user + online indicator + `(admin)` badge if server admin (right-aligned)
+- Pending keys indicator for admins when unapproved keys exist
+
+**Persistent error messages:**
+
+```
+⚠ Forbidden — please contact an admin to leave this room
+⚠ Left room
+⚠ This room was archived by an admin — type /delete to remove from your view
+```
+
+Errors persist in the status bar until the user's next action (typing, navigation). They don't auto-dismiss on a timer.
+
+---
+
+## Context Menu (right-click or Enter on selected message)
+
+**Your own message (room):**
+```
+┌──────────────────┐
+│  Reply            │
+│  React            │
+│  Thread           │
+│  Pin to room      │
+│  Delete           │
+│  Copy text        │
+└──────────────────┘
+```
+
+**Someone else's message (room):**
+```
+┌──────────────────┐
+│  Reply            │
+│  React            │
+│  Thread           │
+│  Pin to room      │
+│  Copy text        │
+└──────────────────┘
+```
+
+**Someone else's message (DM/group):**
+```
+┌──────────────────┐
+│  Reply            │
+│  React            │
+│  Thread           │
+│  Copy text        │
+└──────────────────┘
+```
+
+No pin in DMs or group DMs. No delete on others' messages (exception: server admins see delete on all room messages).
+
+---
+
+## Reaction Picker
+
+After selecting "React" from context menu or pressing `e` on a selected message:
+
+```
+┌─ React ──────────────────────┐
+│  👍 👎 😂 ❤️  🎉 😮 😢 🔥    │
+│  [type to search...]         │
+└──────────────────────────────┘
+```
+
+Click or arrow keys to select. Type to filter emoji by name. `1`-`8` quick-select from top row.
+
+---
+
+## Info Panels (Ctrl+I)
+
+### Group DM Info Panel
+
+```
+┌─ Project Alpha ─── info ──────────────┐
+│                                        │
+│  Type /leave to stop receiving         │
+│  messages, or /delete to remove        │
+│  from your view.                       │
+│                                        │
+│  Muted: [off]  (press m to toggle)     │
+│                                        │
+│  Members (3):                          │
+│   [Admins]                             │
+│    ● alice (you)                       │
+│   [Members]                            │
+│    ● bob                               │
+│    ○ carol                             │
+│                                        │
+│  Enter=message  m=mute  Esc=close      │
+└────────────────────────────────────────┘
+```
+
+- Members split into [Admins] and [Members] subsections, admins first
+- Online/offline dot per member
+- Arrow-key focusable member rows, Enter opens DM or member menu
+- /leave and /delete hint at top (context-aware: active, left, retired)
+
+### Group DM Info Panel (left state)
+
+```
+┌─ Project Alpha ─── info ──────────────┐
+│                                        │
+│  Status: you left this group           │
+│  (read-only)                           │
+│  Type /delete to remove from your      │
+│  view.                                 │
+│  ...                                   │
+└────────────────────────────────────────┘
+```
+
+### Room Info Panel
+
+```
+┌─ #general ─── info ───────────────────┐
+│                                        │
+│  Type /leave to stop receiving         │
+│  messages, or /delete to remove        │
+│  from your view.                       │
+│                                        │
+│  Topic: General chat                   │
+│                                        │
+│  Muted: [off]  (press m to toggle)     │
+│                                        │
+│  Members (12):                         │
+│   [Admins]                             │
+│    ● alice (you) ✓                     │
+│   [Members]                            │
+│    ● bob ✓                             │
+│    ○ carol                             │
+│    ○ dave                              │
+│                                        │
+│  Enter=message  m=mute  Esc=close      │
+└────────────────────────────────────────┘
+```
+
+### Room Info Panel (retired state)
+
+```
+┌─ #general_V1St ─── info ──────────────┐
+│                                        │
+│  Status: this room was archived by     │
+│  an admin (read-only)                  │
+│  Type /delete to remove from your      │
+│  view.                                 │
+│  ...                                   │
+└────────────────────────────────────────┘
+```
+
+### 1:1 DM Info Panel
+
+```
+┌─ DM with Bob ─── info ───────────────┐
+│                                        │
+│  Type /delete to remove this           │
+│  conversation from your view.          │
+│                                        │
+│  Muted: [off]  (press m to toggle)     │
+│                                        │
+│    ● alice (you) ✓                     │
+│    ○ bob                               │
+│                                        │
+│  Enter=message  m=mute  Esc=close      │
+└────────────────────────────────────────┘
+```
+
+No [Admins]/[Members] split for 1:1 DMs — flat two-member list.
+
+---
+
+## Thread Panel
+
+Opened by pressing `t` on a message or selecting "Thread" from context menu:
+
+```
+┌─ Thread ─────────────────────────────┐
+│                                       │
+│  bob  10:33 AM                        │  ← root message
+│  Nice. Any issues with the migration? │
+│  ─────────────────────────────────── │
+│  alice  10:34 AM                      │  ← reply 1
+│  None so far. Monitoring grafana now  │
+│                                       │
+│  carol  10:36 AM                      │  ← reply 2
+│  Looks clean from my end              │
+│                                       │
+│  Esc=close                            │
+└───────────────────────────────────────┘
+```
+
+Shows the root message and all its replies in order. Press `g` on a reply in the main stream to jump to its parent.
+
+---
+
+## Quick Switch (Ctrl+K)
+
+Fuzzy search across all rooms and conversations:
+
+```
+┌─ Switch to... ───────────────────────┐
+│  > gen█                               │
+│                                       │
+│    # general                          │  ← room match
+│    ● Gene                             │  ← DM match
+│                                       │
+└───────────────────────────────────────┘
+```
+
+Type to filter, arrow keys to navigate, Enter to switch.
+
+---
+
+## Confirmation Dialogs
+
+### Quit Confirm (Ctrl+Q)
+
+```
+┌─────────────────────────────────────┐
+│  Disconnect from server?             │
+│  [y] Disconnect  [n] Cancel          │
+└─────────────────────────────────────┘
+```
+
+### Leave Group Confirm
+
+```
+┌─────────────────────────────────────┐
+│  Leave group?                        │
+│                                      │
+│  Leave Project Alpha?                │
+│  You will stop receiving new         │
+│  messages and cannot post.           │
+│                                      │
+│  [y] Leave  [n] Cancel              │
+└─────────────────────────────────────┘
+```
+
+### Leave Room Confirm
+
+Same shape as Leave Group, with room-specific wording.
+
+### Delete DM Confirm
+
+```
+┌─────────────────────────────────────┐
+│  Delete conversation with Bob?       │
+│                                      │
+│  This will remove the conversation   │
+│  from every device on your account   │
+│  and start a new conversation with   │
+│  no history if Bob messages you       │
+│  again.                              │
+│                                      │
+│  [y] Delete  [n] Cancel             │
+└─────────────────────────────────────┘
+```
+
+### Delete Group Confirm
+
+Same shape as Delete DM, with group-specific wording.
+
+### Delete Room Confirm (active room)
+
+```
+┌─────────────────────────────────────┐
+│  Delete room?                        │
+│                                      │
+│  This will remove you from the room  │
+│  and delete all local messages.      │
+│  An admin will need to add you back. │
+│                                      │
+│  [y] Delete  [n] Cancel             │
+└─────────────────────────────────────┘
+```
+
+### Delete Room Confirm (retired room)
+
+```
+┌─────────────────────────────────────┐
+│  Delete archived room?               │
+│                                      │
+│  This room is archived and           │
+│  read-only. Deleting it cannot       │
+│  be undone.                          │
+│                                      │
+│  [y] Delete  [n] Cancel             │
+└─────────────────────────────────────┘
+```
+
+### Retire Account Confirm
+
+```
+┌─────────────────────────────────────┐
+│  Retire your account?                │
+│                                      │
+│  This is PERMANENT and IRREVERSIBLE. │
+│  Your SSH key will no longer work.   │
+│  You will need a new account with    │
+│  a new key to use this server again. │
+│                                      │
+│  Type RETIRE MY ACCOUNT to confirm:  │
+│  > █                                 │
+│                                      │
+│  [Esc] Cancel                        │
+└─────────────────────────────────────┘
+```
+
+---
+
+## Pending Keys Panel (admin only)
+
+Opened by `/pending`:
+
+```
+┌─ Pending Key Requests ───────────────┐
+│                                       │
+│  SHA256:abc123...  3 attempts         │
+│    First: 2026-04-03  Last: 2026-04-04│
+│                                       │
+│  SHA256:def456...  1 attempt          │
+│    First: 2026-04-04  Last: 2026-04-04│
+│                                       │
+│  Approve via: sshkey-ctl approve      │
+│  Esc=close                            │
+└───────────────────────────────────────┘
+```
+
+Read-only. Approve/reject happens via `sshkey-ctl` on the server box.
+
+---
+
+## Device Manager
+
+Opened from Settings → Manage devices:
+
+```
+┌─ Your Devices ───────────────────────┐
+│                                       │
+│  dev_laptop  (current)                │
+│    Last synced: 2 minutes ago         │
+│                                       │
+│  dev_phone                            │
+│    Last synced: 3 hours ago           │
+│    [Revoke]                           │
+│                                       │
+│  dev_old  [revoked]                   │
+│    Created: 2025-06-01                │
+│                                       │
+│  Esc=close                            │
+└───────────────────────────────────────┘
+```
+
+---
+
+## Connection Failed Overlay
+
+Shown on first-run when the server rejects the connection (unknown key):
+
+```
+┌─ Connection Failed ──────────────────┐
+│                                       │
+│  Your SSH key is not recognized.      │
+│  Share your public key with the       │
+│  server admin:                        │
+│                                       │
+│  ssh-ed25519 AAAA...  alice@laptop    │
+│  [Copy to clipboard]                  │
+│                                       │
+│  Fingerprint: SHA256:abc123...        │
+│                                       │
+│  Once approved, reconnect.            │
+│  [Retry]  [Quit]                      │
+└───────────────────────────────────────┘
+```
+
+---
+
+## Key Change Warning
+
+Shown when a peer's public key changes (potential MITM):
+
+```
+┌─ ⚠ Key Changed ─────────────────────┐
+│                                       │
+│  bob's SSH key has changed.           │
+│                                       │
+│  This could mean:                     │
+│  • bob generated a new key            │
+│  • someone is impersonating bob       │
+│                                       │
+│  Previous: SHA256:old123...           │
+│  Current:  SHA256:new456...           │
+│                                       │
+│  [Accept new key]  [Disconnect]       │
+└───────────────────────────────────────┘
+```
+
+---
+
+## Device Revoked Alert
+
+Shown when the server revokes the current device:
+
+```
+┌─ Device Revoked ─────────────────────┐
+│                                       │
+│  This device has been revoked.        │
+│                                       │
+│  Device: dev_laptop                   │
+│  Reason: admin_action                 │
+│                                       │
+│  You will be disconnected.            │
+│  [OK]                                 │
+└───────────────────────────────────────┘
+```
+
+---
+
+## @Mentions
+
+When someone mentions you, the message gets a left border and your name is highlighted:
+
+```
+│  bob  10:33 AM                                    │
+│  Has anyone looked at the logs?                    │
+│                                                    │
+│▐ bob  10:35 AM                                    │
+│▐ Hey @alice can you take a look at the deploy?    │
+│       ^^^^^^ accent color                          │
+```
+
+- Left border in accent violet on messages that mention you
+- Your `@name` rendered in accent color within the body
+- Other people's @mentions rendered in bold (no border)
+- Notification generated even if room is muted (configurable)
+
+In the sidebar, mentions get a stronger indicator than unread counts:
+
+```
+├─ Rooms ──────┤
+│  # general @  │   ← @ = you were mentioned
+│  # engineer(3)│   ← just unread, no mention
+```
+
+`@` badge clears when you view the message.
+
+---
+
+## Mouse Interactions
+
+| Action | Result |
+|---|---|
+| Click room/DM in sidebar | Switch to it |
+| Click message | Select it (shows context menu) |
+| Click unread badge | Jump to first unread |
+| Click member name (member panel) | Open member context menu (message, create group, verify, profile) |
+| Click pinned bar | Expand/collapse pins |
+| Click pinned message | Jump to it in history |
+| Click link in message | Open in system browser |
+| Scroll wheel in messages | Scroll history (lazy scroll-back at top) |
+
+---
+
+## First-Run Wizard
+
+9-step guided setup on first launch. All steps render inside a rounded purple border (`dialogStyle`). Navigation: `Enter` to advance, `Esc` to go back, `q` to quit. Mouse-clickable on all steps.
+
+### Step 0 — Welcome
+
+```
+┌────────────────────────────────────┐
+│                                    │
+│          sshkey-chat               │
+│                                    │
+│  Welcome to sshkey-chat            │
+│  Private messaging over SSH with   │
+│  end-to-end encryption.            │
+│                                    │
+│  Let's get you set up.             │
+│                                    │
+│          [Continue]                │
+│                                    │
+└────────────────────────────────────┘
+```
+
+### Step 1 — Choose Display Name
+
+```
+┌────────────────────────────────────┐
+│                                    │
+│       Choose Your Name             │
+│                                    │
+│  This will be your display name    │
+│  on the server. Your admin can     │
+│  change it if needed.              │
+│                                    │
+│  Display name:                     │
+│  │alice█                           │
+│                                    │
+│  Enter=continue  Esc=back  q=quit  │
+└────────────────────────────────────┘
+```
+
+Min 2, max 32 characters. Error shown in orange if invalid.
+
+### Step 2 — Select SSH Key
+
+```
+┌────────────────────────────────────┐
+│                                    │
+│            SSH Key                 │
+│                                    │
+│  Select your SSH key:              │
+│                                    │
+│  ▶ ~/.ssh/id_ed25519              │  ← selected (highlighted)
+│    ~/.ssh/work_ed25519             │
+│    ~/.ssh/id_rsa (rsa)             │  ← grey, not Ed25519
+│  ─────────────────────────────────│
+│    Import from file                │
+│    Generate new key                │
+│                                    │
+│  Only Ed25519 keys supported       │
+└────────────────────────────────────┘
+```
+
+Arrow keys / `j`/`k` to navigate, `Enter` to select. Non-Ed25519 keys rejected with error. "Import" and "Generate" options below the separator.
+
+### Step 3 — Import Key (if chosen)
+
+```
+┌────────────────────────────────────┐
+│                                    │
+│          Import Key                │
+│                                    │
+│  Path to SSH private key:          │
+│  │~/path/to/private_key█          │
+│                                    │
+│  Enter=import  Esc=back            │
+└────────────────────────────────────┘
+```
+
+Validates file exists and is Ed25519. Tilde-expanded.
+
+### Step 4 — Generate Key (if chosen)
+
+```
+┌────────────────────────────────────┐
+│                                    │
+│         Generate Key               │
+│                                    │
+│  Save to:                          │
+│  │~/.sshkey-chat/keys/id_ed25519█ │
+│                                    │
+│  Passphrase (recommended):         │
+│  │●●●●●●●●                        │
+│                                    │
+│  Confirm passphrase:               │
+│  │●●●●●●●●                        │
+│                                    │
+│  ⚠ A passphrase protects your key │
+│    if your device is stolen.       │
+│                                    │
+│  Tab=next field  Enter=generate    │
+│  Esc=back                          │
+└────────────────────────────────────┘
+```
+
+`Tab` cycles between the three fields. Passphrases must match (both empty = no passphrase, allowed but warned).
+
+### Step 5 — Back Up Your Key
+
+**Mandatory decision point** — the user cannot skip this step without choosing.
+
+```
+┌────────────────────────────────────┐
+│                                    │
+│       Back Up Your Key             │
+│                                    │
+│  This key is your identity. If     │
+│  you lose it, you lose access to   │
+│  your account and all encrypted    │
+│  message history. The server       │
+│  cannot recover your account.      │
+│                                    │
+│  Your key:                         │
+│  ~/.ssh/id_ed25519                 │
+│                                    │
+│  [e] Export copy to file           │
+│  [a] I'll back it up myself        │
+│      — I understand there          │
+│      is no recovery                │
+│                                    │
+│  Esc=go back                       │
+└────────────────────────────────────┘
+```
+
+`e` → Export step. `a` → Acknowledge and skip to Share step.
+
+### Step 6 — Export Key (if chosen)
+
+```
+┌────────────────────────────────────┐
+│                                    │
+│          Export Key                 │
+│                                    │
+│  Save a backup copy to:            │
+│  │~/Documents/sshkey-backup█      │
+│                                    │
+│  Enter=save  Esc=back              │
+└────────────────────────────────────┘
+```
+
+Copies private key + `.pub` to the chosen directory.
+
+### Step 7 — Share Public Key
+
+```
+┌────────────────────────────────────┐
+│                                    │
+│     Share With Your Admin          │
+│                                    │
+│  Your server admin needs your      │
+│  public key to add you to the      │
+│  server.                           │
+│                                    │
+│  Name: alice                       │
+│  Fingerprint: SHA256:abc123...     │
+│                                    │
+│  Public key (includes your name):  │
+│  ssh-ed25519 AAAAC3NzaC1lZDI1...  │
+│                                    │
+│  [c] Copy public key to clipboard  │
+│                                    │
+│  Send this to your admin via a     │
+│  trusted channel.                  │
+│                                    │
+│  Enter=continue  Esc=back          │
+│                                    │
+│  ✓ Public key copied to clipboard  │  ← shown after pressing c
+└────────────────────────────────────┘
+```
+
+`c` copies the full public key. Green confirmation appears.
+
+### Step 8 — Connect to Server
+
+```
+┌────────────────────────────────────┐
+│                                    │
+│       Connect to Server            │
+│                                    │
+│  Server name:                      │
+│  │Personal█                        │
+│                                    │
+│  Host:                             │
+│  │chat.example.com                 │
+│                                    │
+│  Port:                             │
+│  │2222                             │
+│                                    │
+│  Tab=next field  Enter=connect     │
+│  Esc=back  q=quit                  │
+└────────────────────────────────────┘
+```
+
+`Tab` cycles fields. Host required; server name defaults to host if empty; port defaults to 2222. On `Enter`, the wizard completes and the app connects.
+
+---
+
+## Settings Panel (Ctrl+, or /settings)
+
+```
+┌─ Settings ────────────────────────┐
+│                                    │
+│  Profile                           │
+│    Display name: Alice Chen  [▶]  │
+│    Status: On vacation  [▶]       │
+│                                    │
+│  Servers                           │
+│    ● Personal (connected)  [▶]    │
+│    ○ Work                  [▶]    │
+│    [Add server]                    │
+│                                    │
+│  Account                           │
+│    [Manage devices]                │
+│    [Retire account]                │
+│                                    │
+│  [Clear history]                   │
+│                                    │
+│  Esc=close                         │
+└────────────────────────────────────┘
+```
+
+Arrow keys navigate, `Enter` on items with `[▶]` opens edit mode. "Manage devices" opens the Device Manager. "Retire account" opens the typed confirmation dialog.
+
+---
+
+## Search Overlay (Ctrl+F or /search)
+
+```
+┌─ Sidebar ────┐  ┌─ Search ──────────────────────────────────────────┐
+│  ...          │  │  🔍 │migration█                                   │
+│              │  │                                                    │
+│              │  │  alice  10:34 AM  #general                        │
+│              │  │  None so far. Monitoring grafana now               │
+│              │  │  ↳ "migration"                                    │
+│              │  │                                                    │
+│              │  │  bob  10:33 AM  #general                          │
+│              │  │  Has anyone looked at the migration logs?          │
+│              │  │  ↳ "migration"                                    │
+│              │  │                                                    │
+│              │  │  3 results · FTS5 search                          │
+└──────────────┘  └────────────────────────────────────────────────────┘
+```
+
+Results show sender, timestamp, room/group context, and a snippet with the match highlighted. Enter on a result jumps to that message. Shows "FTS5 search" or "LIKE search (slow)" indicator.
+
+---
+
+## Help Screen (? or /help)
+
+```
+┌─ sshkey-term ─── Help ───────────────────────────────────────────────┐
+│                                                                       │
+│  Keyboard Shortcuts                                                   │
+│                                                                       │
+│  Ctrl+K    quick switch          r    reply to message               │
+│  Ctrl+N    new conversation      e    react with emoji               │
+│  Ctrl+M    toggle members        p    pin/unpin (rooms)              │
+│  Ctrl+P    toggle pinned         d    delete message                 │
+│  Ctrl+I    info panel            c    copy message text              │
+│  Ctrl+F    search                g    jump to parent                 │
+│  Ctrl+,    settings              t    thread view                    │
+│  Alt+↑/↓   switch room          o    open attachment                │
+│  Tab       cycle focus           s    save attachment                │
+│  Esc       close / back          u    unreact                        │
+│  ?         this help screen                                          │
+│                                                                       │
+│  Slash Commands: /leave /delete /rename /upload /verify /search      │
+│  /settings /help /pending /mykey /mute /unverify                     │
+│                                                                       │
+│  Press Esc to close                                                   │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Passphrase Prompt
+
+Shown on startup if the selected SSH key is passphrase-protected:
+
+```
+┌────────────────────────────────────┐
+│                                    │
+│  SSH Key Passphrase                │
+│                                    │
+│  Enter passphrase for:             │
+│  ~/.ssh/id_ed25519                 │
+│                                    │
+│  │●●●●●●●●█                       │
+│                                    │
+│  Enter=unlock  Esc=quit            │
+└────────────────────────────────────┘
+```
+
+---
+
+## Verify Dialog (/verify @user)
+
+```
+┌─ Verify bob ─────────────────────┐
+│                                   │
+│  Safety Number                    │
+│                                   │
+│  1234 5678 9012                   │
+│  3456 7890 1234                   │
+│                                   │
+│  Compare this number with bob     │
+│  in person or via a trusted       │
+│  channel. If the numbers match,   │
+│  mark as verified.                │
+│                                   │
+│  [v] Mark verified                │
+│  [Esc] Close                      │
+└───────────────────────────────────┘
+```
+
+---
+
+## Color Scheme
+
+Truecolor (24-bit) with automatic fallback to 256-color or ANSI 16 for older terminals. Bubble Tea's lipgloss handles detection.
+
+Text and backgrounds use the terminal default so the app adapts to the user's scheme. The app's own identity comes from accent colors on interactive and navigational elements.
+
+### Palette
+
+```
+Brand accent:     #7C3AED  (violet)
+Success/verified: #22C55E  (green)
+Warning:          #F59E0B  (amber)
+Error/danger:     #EF4444  (red)
+Muted/dim:        #64748B  (slate)
+
+Text:             terminal default
+Background:       terminal default
+```
+
+### Element Color Map
+
+| Element | Color | Style |
+|---|---|---|
+| **Content** | | |
+| Usernames | terminal default | bold |
+| Message body | terminal default | normal |
+| Timestamps | muted `#64748B` | normal |
+| Reply references `↳ re:` | muted `#64748B` | italic |
+| System messages | muted `#64748B` | italic |
+| [retired] markers | muted `#64748B` | faint |
+| (left) / (retired) sidebar markers | muted `#64748B` | faint |
+| **Interactive** | | |
+| Selected sidebar item | accent `#7C3AED` | bg highlight |
+| Unread badge `(2)` | accent `#7C3AED` | bold |
+| Reaction counts | accent `#7C3AED` | normal |
+| Input cursor | accent `#7C3AED` | |
+| Pinned indicator `📌` | accent `#7C3AED` | |
+| **Status** | | |
+| Online dot `●` | green `#22C55E` | |
+| Offline dot `○` | muted `#64748B` | |
+| Verified badge `✓` | green `#22C55E` | |
+| **Warnings** | | |
+| Unsigned indicator | amber `#F59E0B` | |
+| Signature failed | red `#EF4444` | bold |
+| Key changed warning | red `#EF4444` | bold |
+| Replay warning | amber `#F59E0B` | |
+| Status bar error `⚠` | red `#EF4444` | |
+| **Structure** | | |
+| Panel borders | muted `#64748B` | |
+| Status bar text | muted `#64748B` | |
+| Dividers | muted `#64748B` | |
+| Archived/left entries | muted `#64748B` | faint |
+
+### Principles
+
+- Terminal default for content (text, backgrounds) -- adapts to dark and light schemes
+- Violet accent for interactive/navigational elements -- the app's visual signature
+- Semantic colors (green/amber/red) for trust and warnings only
+- Bold and italic for emphasis, not color -- accessible on any terminal
+- No theme system, no config options for colors -- the palette is the brand
