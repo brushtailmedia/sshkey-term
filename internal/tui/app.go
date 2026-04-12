@@ -1051,6 +1051,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				a.client.CreateDM(msg.Members[0])
 			} else if len(msg.Members) > 0 {
+				// Soft warning at 50+ total members (49+ others + caller).
+				// Per-message wrapped keys scale linearly with member count;
+				// rooms use a shared epoch key and are more efficient for
+				// high-traffic large groups. The server hard-caps at 150.
+				if len(msg.Members) >= 49 {
+					a.statusBar.SetError(fmt.Sprintf("Large group (%d members) — consider using a room for better performance", len(msg.Members)+1))
+				}
 				a.client.CreateGroup(msg.Members, msg.Name)
 			}
 		}

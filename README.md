@@ -91,12 +91,12 @@ Or download pre-built binaries from [Releases](https://github.com/brushtailmedia
 
 ```bash
 # Build with FTS5 full-text search support (recommended)
-CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" go build -o sshkey-chat .
+CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" go build -o sshkey-term .
 
 # Or build without FTS5 (search falls back to LIKE queries)
-go build -o sshkey-chat .
+go build -o sshkey-term .
 
-./sshkey-chat
+./sshkey-term
 ```
 
 On first launch, the client prompts to select or generate an Ed25519 SSH key, then connect to a server.
