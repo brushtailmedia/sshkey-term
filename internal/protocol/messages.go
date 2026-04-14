@@ -41,6 +41,7 @@ type SyncBatch struct {
 	Type      string         `json:"type"`
 	Messages  []RawMessage   `json:"messages"`
 	Reactions []RawMessage   `json:"reactions,omitempty"`
+	Events    []RawMessage   `json:"events,omitempty"` // Phase 14: group admin events (join/leave/promote/demote/rename) for offline replay
 	EpochKeys []SyncEpochKey `json:"epoch_keys"`
 	Page      int            `json:"page"`
 	HasMore   bool           `json:"has_more"`
@@ -97,6 +98,7 @@ type GroupCreated struct {
 	Type    string   `json:"type"`
 	Group   string   `json:"group"`
 	Members []string `json:"members"`
+	Admins  []string `json:"admins,omitempty"` // Phase 14: admin user IDs (includes creator on fresh groups)
 	Name    string   `json:"name,omitempty"`
 }
 
@@ -154,10 +156,109 @@ type DeletedGroupsList struct {
 	Groups []string `json:"groups"`
 }
 
+// Phase 14 — in-group admin verbs
+//
+// The server enforces byte-identical privacy for the "unknown group /
+// non-member / non-admin" triple: all three rejection shapes return an
+// identical ErrUnknownGroup frame. Clients MUST NOT try to derive admin
+// state from wire-level errors — always read it from the local is_admin
+// flag or the GroupInfo.Admins payload. Only AFTER the caller has proven
+// membership AND admin status does the server start returning distinct
+// errors (already_member, already_admin, forbidden, unknown_user).
+//
+// The Quiet flag on AddToGroup / PromoteGroupAdmin / DemoteGroupAdmin /
+// RenameGroup suppresses the inline system message on receiving clients
+// while still persisting the event and updating member/admin lists.
+// RemoveFromGroup deliberately does NOT have a Quiet flag — kicks are
+// always loud.
+
+// AddToGroup is the client's request for an admin to add a new member
+// to an existing group. Multi-target adds are done client-side by
+// sending one AddToGroup per target.
+type AddToGroup struct {
+	Type  string `json:"type"`            // "add_to_group"
+	Group string `json:"group"`
+	User  string `json:"user"`            // target to add
+	Quiet bool   `json:"quiet,omitempty"` // suppress inline system message
+}
+
+// RemoveFromGroup is the client's request for an admin to remove a
+// member from a group. Passing the caller's own user ID falls through
+// to the self-leave path (handleLeaveGroup).
+type RemoveFromGroup struct {
+	Type  string `json:"type"`  // "remove_from_group"
+	Group string `json:"group"`
+	User  string `json:"user"`  // target to remove
+}
+
+// PromoteGroupAdmin is the client's request to promote a member to
+// admin. Unilateral — any admin can promote any non-admin member.
+type PromoteGroupAdmin struct {
+	Type  string `json:"type"`            // "promote_group_admin"
+	Group string `json:"group"`
+	User  string `json:"user"`            // target to promote
+	Quiet bool   `json:"quiet,omitempty"` // suppress inline system message
+}
+
+// DemoteGroupAdmin is the client's request to demote an admin (possibly
+// the caller themselves) back to regular member. Rejected by the server
+// if the demotion would leave the group with zero admins.
+type DemoteGroupAdmin struct {
+	Type  string `json:"type"`            // "demote_group_admin"
+	Group string `json:"group"`
+	User  string `json:"user"`            // target to demote (may equal caller for self-demote)
+	Quiet bool   `json:"quiet,omitempty"` // suppress inline system message
+}
+
+// AddGroupResult echoes a successful add_to_group back to the calling admin.
+type AddGroupResult struct {
+	Type  string `json:"type"`  // "add_group_result"
+	Group string `json:"group"`
+	User  string `json:"user"`  // added user
+}
+
+// RemoveGroupResult echoes a successful remove_from_group back to the calling admin.
+type RemoveGroupResult struct {
+	Type  string `json:"type"`  // "remove_group_result"
+	Group string `json:"group"`
+	User  string `json:"user"`  // removed user
+}
+
+// PromoteAdminResult echoes a successful promote_group_admin back to the calling admin.
+type PromoteAdminResult struct {
+	Type  string `json:"type"`  // "promote_admin_result"
+	Group string `json:"group"`
+	User  string `json:"user"`  // promoted user
+}
+
+// DemoteAdminResult echoes a successful demote_group_admin back to the calling admin.
+type DemoteAdminResult struct {
+	Type  string `json:"type"`  // "demote_admin_result"
+	Group string `json:"group"`
+	User  string `json:"user"`  // demoted user
+}
+
+// GroupAddedTo is a direct notification sent to a user's sessions when
+// an admin adds them to a group. Carries the full group metadata (name,
+// members, admins, added_by) so the client can insert the group into
+// local state without waiting for a fresh group_list catchup.
+//
+// The added user receives no pre-join history — their first decryptable
+// message is the next group_message broadcast after the add lands.
+type GroupAddedTo struct {
+	Type    string   `json:"type"`    // "group_added_to"
+	Group   string   `json:"group"`
+	Name    string   `json:"name,omitempty"`
+	Members []string `json:"members"`
+	Admins  []string `json:"admins"`
+	AddedBy string   `json:"added_by"` // user ID of the admin who added the recipient
+}
+
 type RenameGroup struct {
 	Type  string `json:"type"`
 	Group string `json:"group"`
 	Name  string `json:"name"`
+	Quiet bool   `json:"quiet,omitempty"` // Phase 14: suppress inline system message
 }
 
 type GroupRenamed struct {
@@ -167,22 +268,64 @@ type GroupRenamed struct {
 	RenamedBy string `json:"renamed_by"`
 }
 
+// GroupEvent is the generic broadcast envelope for every admin-initiated
+// group mutation and self-leave. Phase 14 extended it significantly:
+//
+//   - Event values: "leave" (unchanged), "join", "promote", "demote", "rename"
+//     (added). A group_event{leave} carries optional Reason; the other event
+//     types use dedicated fields (Name for rename, By for the acting admin).
+//   - By: the user ID of the admin that triggered this event. Required
+//     (non-empty) for admin-initiated events (join, promote, demote, rename,
+//     and leave with reason="removed"). Empty for self-leave, retirement,
+//     and retirement-succession promote.
+//   - Quiet: when true, clients MUST still update member/admin lists and
+//     persist the event to the local group_events table, but MUST suppress
+//     the inline system message in the message view. Always false for kicks
+//     (leave with reason="removed") — being removed is high-consequence and
+//     clients should always surface it loudly.
+//   - Name: new name value for rename events.
+//
+// Reason values for Event="leave":
+//   - ""             self-leave via /leave
+//   - "removed"      admin-initiated removal via handleRemoveFromGroup; By required
+//   - "retirement"   caller account was retired; By empty
+//
+// Reason values for Event="promote":
+//   - ""                        normal admin promote; By required
+//   - "retirement_succession"   auto-promote of oldest member when the last
+//                               admin retires their account; By empty
 type GroupEvent struct {
 	Type   string `json:"type"`
 	Group  string `json:"group"`
-	Event  string `json:"event"`
-	User   string `json:"user"`
-	Reason string `json:"reason,omitempty"` // "retirement" when leave was caused by account retirement
+	Event  string `json:"event"`            // "leave" | "join" | "promote" | "demote" | "rename"
+	User   string `json:"user"`             // target user
+	By     string `json:"by,omitempty"`     // Phase 14: acting admin (required when Reason="removed" or Event in {join,promote,demote,rename})
+	Reason string `json:"reason,omitempty"` // "" | "removed" | "retirement" | "retirement_succession"
+	Name   string `json:"name,omitempty"`   // Phase 14: new name for Event="rename"
+	Quiet  bool   `json:"quiet,omitempty"`  // Phase 14: suppress inline system message (never true for kicks)
 }
 
 // GroupLeft is the server's confirmation that a leave_group request
 // succeeded. Sent only to the leaving user (across all of their active
 // sessions). The leaver is not included in group_event broadcasts because
 // they have already been removed from member lists.
+//
+// Reason distinguishes self-leave from admin-triggered removal:
+//   - ""           self-leave via /leave
+//   - "removed"    Phase 14: admin-initiated removal via handleRemoveFromGroup.
+//                  By carries the kicking admin's user ID for rendering
+//                  "You were removed from the group by alice".
+//   - "retirement" the user's account was retired
+//
+// Phase 14 historical note: "admin" was the reason code used by the
+// pre-Phase-14 CLI escape hatch. That path was deleted entirely in Phase 14.
+// Treat any persisted "admin" rows as equivalent to "removed" (no new
+// rows should appear with that value in v1).
 type GroupLeft struct {
 	Type   string `json:"type"`
 	Group  string `json:"group"`
-	Reason string `json:"reason,omitempty"` // "" | "admin" | "retirement"
+	Reason string `json:"reason,omitempty"` // "" | "removed" | "retirement"
+	By     string `json:"by,omitempty"`     // Phase 14: kicking admin's user ID; required when Reason="removed", empty otherwise
 }
 
 // LeaveRoom requests that the server remove the caller from a room. Gated
@@ -508,6 +651,7 @@ type GroupList struct {
 type GroupInfo struct {
 	ID      string   `json:"id"`
 	Members []string `json:"members"`
+	Admins  []string `json:"admins,omitempty"` // Phase 14: admin user IDs (subset of Members); empty on pre-14 servers
 	Name    string   `json:"name,omitempty"`
 }
 
