@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Changed
+- **Group DMs gained an in-group admin model (Phase 14)** — matches the server-side reversal of the "immutable peer DMs" decision. Group creators become the first admin; any admin can add/remove/promote/demote members. New `/add`, `/kick`, `/promote`, `/demote`, `/transfer` slash commands with confirmation dialogs. See `groups_admin.md` in the server repo for the full design.
+- **Info panel per-member admin flag** now reads from the in-memory group admin set (populated by `group_list` catchup + live `group_event{promote,demote}` broadcasts) instead of the global `profile.Admin` flag (which tracks server-wide admin status, unrelated to per-group governance).
+- **`/rename` now admin-gated client-side** — non-admin attempts surface a friendly "you are not an admin" message without hitting the wire. Matches the server-side admin gate landed in Phase 14.
+- **Group `group_renamed` + `group_event{rename}` dual broadcast** — the client now handles both shapes during the single-repo upgrade window. Sync replay uses `group_event{rename}` via the new `SyncBatch.Events` field.
+- **System message rendering for group events** — all five event types (`join`, `leave`, `promote`, `demote`, `rename`) render as system messages in the message view with specific wording ("alice added bob to the group", "alice removed bob", etc.). Honors the Phase 14 `Quiet` flag.
 - Room identity switched to nanoid IDs (`room_` prefix) — display names resolved at TUI layer
 - All protocol `Room` fields now carry nanoid IDs instead of display names
 - `room_list` handled at client layer (persists room metadata to local DB)
@@ -10,6 +15,23 @@
 - Read-only banner wording distinguishes self-leave ("you left this room") from admin retirement ("this room was archived by an admin")
 
 ### Added
+- **Phase 14 group admin slash commands**:
+  - Admin verbs: `/add @user`, `/kick @user`, `/promote @user`, `/demote @user`, `/transfer @user` (atomic promote-then-leave handoff). Each with confirmation dialog. All admin verbs pre-check the local `is_admin` flag and surface a friendly rejection before hitting the wire.
+  - Status commands: `/members`, `/admins`, `/role @user`, `/whoami`, `/groupinfo`, `/audit [N]` (recent admin actions, default 10), `/undo` (revert last kick within 30 seconds).
+  - Creation commands: `/groupcreate ["name"] @a @b @c` (inline group DM creation, bypasses the wizard), `/dmcreate @user` (inline 1:1 DM creation).
+- **`/audit` overlay** — one-shot read-only panel showing recent admin actions for the current group, read from the local `group_events` table. Populated from both live broadcasts and offline sync replay.
+- **`/members` and `/admins` overlays** — one-shot read-only panels listing group members with ★ admin markers. `/admins` pre-filters to just admins.
+- **Sidebar ★ admin indicator** — groups where the local user is an admin show a muted ★ glyph before the group name. Updates live on `group_event{promote,demote}` via the `resolveIsLocalAdmin` callback.
+- **Info panel admin keyboard shortcuts** — A/K/P/X on a focused member row route to the admin verb dialogs (Add / Kick / Promote / demoteX). X is used for demote because D means delete elsewhere in the app. Active only in group contexts.
+- **Event coalescing** — consecutive same-admin same-verb events within 10 seconds collapse into one system message ("alice added bob, carol, and dave"). Applies to join/promote/demote/removed; never coalesces self-leave, retirement, or rename. Individual events are still persisted un-coalesced to the local `group_events` table (visible in `/audit`).
+- **Client `group_events` table** — single table with `group_id` column (client is single-DB-per-server). Populated from both live `group_event` broadcasts and the new `SyncBatch.Events` replay. Feeds the `/audit` overlay.
+- **Client `groups.is_admin` column** — the local user's admin flag per group, persisted so the TUI pre-check survives restart. Not folded into the `StoreGroup` upsert so promote/demote events can't clobber the members list.
+- **In-memory `groupAdmins` map on `Client`** — other members' admin state, sourced from `group_list` + live `group_event{promote,demote}` + `sync_batch.Events` replay. Accessed via `GroupAdmins(groupID)` and `IsGroupAdmin(groupID, userID)`.
+- **New client store helpers**: `IsLocalUserGroupAdmin`, `SetLocalUserGroupAdmin`, `RecordGroupEvent`, `GetGroupEvents`, `GetRecentGroupEvents`, plus a `FindUserByName` accessor on `Client` for resolving `@user` arguments to user IDs.
+- **Confirmation dialogs** — five new dialog models (`AddConfirmModel`, `KickConfirmModel`, `PromoteConfirmModel`, `DemoteConfirmModel`, `TransferConfirmModel`) following the existing `LeaveConfirmModel` shape. Transfer carries a `TargetAlreadyAdmin` flag so the text flips to "already admin, just leave?" when promote would be a no-op.
+- **`group_added_to` handler** — when an admin adds the local user to an existing group, the client inserts the group into local state immediately and surfaces a toast-style status bar notification ("alice added you to 'Project X'").
+- **`/undo` 30-second kick revert** — tracks the last kick the local user performed; `/undo` within the window re-adds via `add_to_group`. Exactly one kick tracked, no stack.
+- **Protocol type mirrors** — nine new message types in `sshkey-term/internal/protocol/messages.go` (`AddToGroup`, `RemoveFromGroup`, `PromoteGroupAdmin`, `DemoteGroupAdmin`, four result echoes, and `GroupAddedTo`), plus extensions to `GroupEvent` (`By`/`Name`/`Quiet`), `GroupLeft` (`By`), `GroupCreated` (`Admins`), `GroupInfo` (`Admins`), `RenameGroup` (`Quiet`), `SyncBatch` (`Events`).
 - `rooms` table in client DB for room metadata persistence (id, name, topic, members)
 - `DisplayRoomName()` resolver — reads from local DB, falls back to raw ID
 - `resolveRoomName` callbacks in sidebar, messages header, quickswitch, infopanel, notifications
