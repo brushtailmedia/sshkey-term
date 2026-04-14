@@ -1108,6 +1108,32 @@ func (c *Client) Profile(user string) *protocol.Profile {
 	return c.profiles[user]
 }
 
+// FindUserByName searches the profile cache for a user whose display
+// name or user ID matches the given name (case-insensitive). Returns
+// ("", false) if no match is found. Used by /add in the TUI to
+// resolve @user arguments against the pool of users the client has
+// ever seen — necessary because /add's target is by definition not
+// yet a member of the current group, so GroupMembers() lookups don't
+// work. Phase 14.
+//
+// Retired users are matched — Phase 14 /add explicitly rejects
+// retired targets on the server side (ErrUnknownUser), and the
+// client pre-check would be wrong to silently filter them out of
+// autocomplete.
+func (c *Client) FindUserByName(name string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for uid, p := range c.profiles {
+		if p != nil && strings.EqualFold(p.DisplayName, name) {
+			return uid, true
+		}
+		if strings.EqualFold(uid, name) {
+			return uid, true
+		}
+	}
+	return "", false
+}
+
 // IsRetired returns true if the user's account has been retired, along with
 // the retirement timestamp. TUI layers use this to render [retired] markers
 // on historical messages, disable sends to retired users in 1:1 DMs, and

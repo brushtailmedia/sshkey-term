@@ -69,6 +69,12 @@ type App struct {
 	deleteDMConfirm   DeleteDMConfirmModel
 	deleteGroupConfirm DeleteGroupConfirmModel
 	deleteRoomConfirm  DeleteRoomConfirmModel
+	// Phase 14 in-group admin verb dialogs
+	addConfirm         AddConfirmModel
+	kickConfirm        KickConfirmModel
+	promoteConfirm     PromoteConfirmModel
+	demoteConfirm      DemoteConfirmModel
+	transferConfirm    TransferConfirmModel
 	deviceRevoked     DeviceRevokedModel
 	deviceMgr     DeviceMgrModel
 	quickSwitch QuickSwitchModel
@@ -335,6 +341,33 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.deleteRoomConfirm.IsVisible() {
 			var cmd tea.Cmd
 			a.deleteRoomConfirm, cmd = a.deleteRoomConfirm.Update(msg)
+			return a, cmd
+		}
+
+		// Phase 14 in-group admin verb dialogs intercept all keys
+		if a.addConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.addConfirm, cmd = a.addConfirm.Update(msg)
+			return a, cmd
+		}
+		if a.kickConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.kickConfirm, cmd = a.kickConfirm.Update(msg)
+			return a, cmd
+		}
+		if a.promoteConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.promoteConfirm, cmd = a.promoteConfirm.Update(msg)
+			return a, cmd
+		}
+		if a.demoteConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.demoteConfirm, cmd = a.demoteConfirm.Update(msg)
+			return a, cmd
+		}
+		if a.transferConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.transferConfirm, cmd = a.transferConfirm.Update(msg)
 			return a, cmd
 		}
 
@@ -886,6 +919,75 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}); err != nil {
 				a.statusBar.SetError("Leave failed: " + err.Error())
 			}
+		}
+		return a, nil
+
+	case AddConfirmMsg:
+		// Phase 14: user confirmed /add. Send add_to_group; the server
+		// runs the admin gate and emits group_event{join} back to the
+		// whole group plus group_added_to to the target's sessions.
+		// State updates all flow through the existing dispatch pipeline.
+		if a.client != nil && msg.Group != "" && msg.TargetID != "" {
+			if err := a.client.AddToGroup(msg.Group, msg.TargetID, false); err != nil {
+				a.statusBar.SetError("Add failed: " + err.Error())
+			}
+		}
+		return a, nil
+
+	case KickConfirmMsg:
+		// Phase 14: user confirmed /kick. Send remove_from_group;
+		// the server runs the admin gate + last-admin check and
+		// emits group_event{leave, reason:"removed"} to remaining
+		// members plus group_left to the kicked user's sessions.
+		if a.client != nil && msg.Group != "" && msg.TargetID != "" {
+			if err := a.client.RemoveFromGroup(msg.Group, msg.TargetID); err != nil {
+				a.statusBar.SetError("Remove failed: " + err.Error())
+			}
+		}
+		return a, nil
+
+	case PromoteConfirmMsg:
+		// Phase 14: user confirmed /promote. Server runs the admin
+		// gate and already-admin check, then broadcasts
+		// group_event{promote}.
+		if a.client != nil && msg.Group != "" && msg.TargetID != "" {
+			if err := a.client.PromoteGroupAdmin(msg.Group, msg.TargetID, false); err != nil {
+				a.statusBar.SetError("Promote failed: " + err.Error())
+			}
+		}
+		return a, nil
+
+	case DemoteConfirmMsg:
+		// Phase 14: user confirmed /demote. Server runs the admin
+		// gate + last-admin check, then broadcasts group_event{demote}.
+		if a.client != nil && msg.Group != "" && msg.TargetID != "" {
+			if err := a.client.DemoteGroupAdmin(msg.Group, msg.TargetID, false); err != nil {
+				a.statusBar.SetError("Demote failed: " + err.Error())
+			}
+		}
+		return a, nil
+
+	case TransferConfirmMsg:
+		// Phase 14: user confirmed /transfer. Client-side sugar:
+		// promote target (if not already admin), then leave. The
+		// server serializes writes so leave lands after promote and
+		// the "at least one admin" invariant holds during the
+		// transition. If the target is already admin, the promote
+		// is skipped entirely — just send leave.
+		if a.client == nil || msg.Group == "" || msg.TargetID == "" {
+			return a, nil
+		}
+		if !msg.TargetAlreadyAdmin {
+			if err := a.client.PromoteGroupAdmin(msg.Group, msg.TargetID, false); err != nil {
+				a.statusBar.SetError("Transfer failed (promote): " + err.Error())
+				return a, nil
+			}
+		}
+		if err := a.client.Enc().Encode(map[string]string{
+			"type":  "leave_group",
+			"group": msg.Group,
+		}); err != nil {
+			a.statusBar.SetError("Transfer failed (leave): " + err.Error())
 		}
 		return a, nil
 
@@ -1479,6 +1581,8 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
 		a.quitConfirm.IsVisible() || a.leaveConfirm.IsVisible() || a.leaveRoomConfirm.IsVisible() ||
 		a.deleteDMConfirm.IsVisible() || a.deleteGroupConfirm.IsVisible() || a.deleteRoomConfirm.IsVisible() ||
+		a.addConfirm.IsVisible() || a.kickConfirm.IsVisible() || a.promoteConfirm.IsVisible() ||
+		a.demoteConfirm.IsVisible() || a.transferConfirm.IsVisible() ||
 		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
 		return a, nil
 	}
@@ -2021,7 +2125,205 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			}
 			a.statusBar.SetError("Uploaded: " + filepath.Base(path))
 		}()
+	case "/rename":
+		// Phase 14: client-side admin pre-check. Non-admins get a
+		// friendly local rejection; admins pass through to the server
+		// which also enforces the gate. Without this pre-check, the
+		// server rejection surfaces as ErrUnknownGroup (byte-identical
+		// privacy), which reads as a confusing "you are not a member".
+		if sc.Group == "" || sc.Arg == "" {
+			return
+		}
+		if a.client == nil {
+			return
+		}
+		if !a.isLocalAdminOfGroup(sc.Group) {
+			a.statusBar.SetError("You are not an admin of this group — only admins can /rename")
+			return
+		}
+		if err := a.client.Enc().Encode(map[string]string{
+			"type": "rename_group", "group": sc.Group, "name": sc.Arg,
+		}); err != nil {
+			a.statusBar.SetError("Rename failed: " + err.Error())
+		}
+	case "/add", "/kick", "/promote", "/demote", "/transfer":
+		a.handleGroupAdminCommand(sc)
+	case "/whoami":
+		a.handleWhoamiCommand(sc)
+	case "/groupinfo":
+		if sc.Group == "" || a.client == nil {
+			return
+		}
+		a.infoPanel.ShowGroup(sc.Group, a.client, a.sidebar.online)
 	}
+}
+
+// Phase 14 helpers ------------------------------------------------------
+
+// isLocalAdminOfGroup returns true if the local user is currently
+// recorded as an admin of the given group. Reads from the client's
+// in-memory admin set (populated by group_list catchup and live
+// group_event{promote,demote} broadcasts) so the answer reflects
+// the most recent state without a server round-trip.
+func (a *App) isLocalAdminOfGroup(groupID string) bool {
+	if a.client == nil {
+		return false
+	}
+	return a.client.IsGroupAdmin(groupID, a.client.UserID())
+}
+
+// resolveGroupMemberByName maps a typed @display-name string (with or
+// without the leading @) to a member user ID in the given group.
+// Returns ("", false) if no member matches. Case-insensitive.
+func (a *App) resolveGroupMemberByName(groupID, name string) (string, bool) {
+	if a.client == nil {
+		return "", false
+	}
+	target := strings.TrimPrefix(name, "@")
+	target = strings.ToLower(strings.TrimSpace(target))
+	if target == "" {
+		return "", false
+	}
+	for _, uid := range a.client.GroupMembers(groupID) {
+		if strings.EqualFold(a.client.DisplayName(uid), target) {
+			return uid, true
+		}
+		if strings.EqualFold(uid, target) {
+			return uid, true
+		}
+	}
+	return "", false
+}
+
+// resolveNonMemberByName searches the client's profile cache for a
+// user matching the typed name. Used by /add where the target is
+// (by definition) not yet in GroupMembers(). Delegates to the client
+// layer which owns the profile cache + its lock.
+func (a *App) resolveNonMemberByName(name string) (string, bool) {
+	if a.client == nil {
+		return "", false
+	}
+	target := strings.TrimPrefix(name, "@")
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", false
+	}
+	return a.client.FindUserByName(target)
+}
+
+// lookupGroupName returns the display name of a group, falling back
+// to a comma-joined member list when no explicit name is set.
+func (a *App) lookupGroupName(groupID string) string {
+	for _, g := range a.sidebar.groups {
+		if g.ID == groupID {
+			if g.Name != "" {
+				return g.Name
+			}
+			var names []string
+			for _, m := range g.Members {
+				name := m
+				if a.client != nil {
+					name = a.client.DisplayName(m)
+				}
+				names = append(names, name)
+			}
+			return strings.Join(names, ", ")
+		}
+	}
+	return groupID
+}
+
+// handleGroupAdminCommand is the common entry point for the five
+// Phase 14 in-group admin verbs. Pre-check + @resolve + dialog show.
+// On dialog confirm a *ConfirmMsg flows back through the Update loop
+// which calls the client.Send* function for the wire verb.
+func (a *App) handleGroupAdminCommand(sc *SlashCommandMsg) {
+	if sc.Group == "" {
+		a.statusBar.SetError(sc.Command + " only works inside a group DM")
+		return
+	}
+	if sc.Arg == "" {
+		a.statusBar.SetError("Usage: " + sc.Command + " @user")
+		return
+	}
+	if a.client == nil {
+		return
+	}
+
+	// Pre-check: local is_admin flag. Non-admins get a friendly
+	// client-side rejection. Without this, the server rejection
+	// surfaces as ErrUnknownGroup (byte-identical privacy) which
+	// reads as a confusing "you are not a member".
+	if !a.isLocalAdminOfGroup(sc.Group) {
+		a.statusBar.SetError("You are not an admin of this group — only admins can " + sc.Command + ". Type /admins to see who is.")
+		return
+	}
+
+	groupName := a.lookupGroupName(sc.Group)
+
+	// Resolve @user → userID. /add looks at the profile cache (target
+	// is not yet a member); the other four verbs look at the current
+	// group's member list.
+	var targetID string
+	var ok bool
+	if sc.Command == "/add" {
+		targetID, ok = a.resolveNonMemberByName(sc.Arg)
+	} else {
+		targetID, ok = a.resolveGroupMemberByName(sc.Group, sc.Arg)
+	}
+	if !ok {
+		a.statusBar.SetError("No user matching " + sc.Arg)
+		return
+	}
+	targetName := a.client.DisplayName(targetID)
+
+	switch sc.Command {
+	case "/add":
+		for _, m := range a.client.GroupMembers(sc.Group) {
+			if m == targetID {
+				a.statusBar.SetError(targetName + " is already a member of this group")
+				return
+			}
+		}
+		a.addConfirm.Show(sc.Group, groupName, targetID, targetName)
+	case "/kick":
+		// Self-kick shortcut: route to /leave flow instead (applies
+		// the last-admin gate and keeps the audit trail cleaner).
+		if targetID == a.client.UserID() {
+			a.leaveConfirm.Show(sc.Group, groupName)
+			return
+		}
+		a.kickConfirm.Show(sc.Group, groupName, targetID, targetName)
+	case "/promote":
+		if a.client.IsGroupAdmin(sc.Group, targetID) {
+			a.statusBar.SetError(targetName + " is already an admin")
+			return
+		}
+		a.promoteConfirm.Show(sc.Group, groupName, targetID, targetName)
+	case "/demote":
+		if !a.client.IsGroupAdmin(sc.Group, targetID) {
+			a.statusBar.SetError(targetName + " is not an admin")
+			return
+		}
+		a.demoteConfirm.Show(sc.Group, groupName, targetID, targetName)
+	case "/transfer":
+		alreadyAdmin := a.client.IsGroupAdmin(sc.Group, targetID)
+		a.transferConfirm.Show(sc.Group, groupName, targetID, targetName, alreadyAdmin)
+	}
+}
+
+// handleWhoamiCommand surfaces the local user's display name + role
+// in the current context via the status bar.
+func (a *App) handleWhoamiCommand(sc *SlashCommandMsg) {
+	if a.client == nil {
+		return
+	}
+	name := a.client.DisplayName(a.client.UserID())
+	role := "member"
+	if sc.Group != "" && a.isLocalAdminOfGroup(sc.Group) {
+		role = "admin"
+	}
+	a.statusBar.SetError(name + " — " + role)
 }
 
 // handleServerMessage processes incoming server messages for the UI.
@@ -3053,6 +3355,22 @@ func (a App) View() string {
 	}
 	if a.deleteRoomConfirm.IsVisible() {
 		return a.deleteRoomConfirm.View(a.width)
+	}
+	// Phase 14 in-group admin verb dialogs
+	if a.addConfirm.IsVisible() {
+		return a.addConfirm.View(a.width)
+	}
+	if a.kickConfirm.IsVisible() {
+		return a.kickConfirm.View(a.width)
+	}
+	if a.promoteConfirm.IsVisible() {
+		return a.promoteConfirm.View(a.width)
+	}
+	if a.demoteConfirm.IsVisible() {
+		return a.demoteConfirm.View(a.width)
+	}
+	if a.transferConfirm.IsVisible() {
+		return a.transferConfirm.View(a.width)
 	}
 	if a.deviceRevoked.IsVisible() {
 		return a.deviceRevoked.View(a.width)

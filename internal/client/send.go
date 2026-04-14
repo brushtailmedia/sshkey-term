@@ -625,6 +625,61 @@ func (c *Client) CreateDM(other string) error {
 	})
 }
 
+// Phase 14 — in-group admin verbs
+//
+// Each Send* below sends the corresponding wire verb and returns any
+// encoder error. The server runs the byte-identical privacy gate, so
+// sending a verb you're not authorized for surfaces as an ErrUnknownGroup
+// frame in the normal dispatch path. Clients should still pre-check the
+// local is_admin flag (see App.checkGroupAdminAllowed) to catch the 99%
+// case without a round-trip and render a friendlier error.
+
+// AddToGroup asks the server to add a new member to a group DM. The
+// caller must be an admin of the group. quiet suppresses the inline
+// system message on receiving clients (state updates still happen).
+func (c *Client) AddToGroup(groupID, userID string, quiet bool) error {
+	return c.enc.Encode(protocol.AddToGroup{
+		Type:  "add_to_group",
+		Group: groupID,
+		User:  userID,
+		Quiet: quiet,
+	})
+}
+
+// RemoveFromGroup asks the server to remove a member from a group DM.
+// Kicks are deliberately always loud — there is no Quiet flag on the
+// wire verb, so this function mirrors that.
+func (c *Client) RemoveFromGroup(groupID, userID string) error {
+	return c.enc.Encode(protocol.RemoveFromGroup{
+		Type:  "remove_from_group",
+		Group: groupID,
+		User:  userID,
+	})
+}
+
+// PromoteGroupAdmin asks the server to promote a member to admin.
+// Unilateral — any admin can promote any non-admin member.
+func (c *Client) PromoteGroupAdmin(groupID, userID string, quiet bool) error {
+	return c.enc.Encode(protocol.PromoteGroupAdmin{
+		Type:  "promote_group_admin",
+		Group: groupID,
+		User:  userID,
+		Quiet: quiet,
+	})
+}
+
+// DemoteGroupAdmin asks the server to demote an admin back to regular
+// member. Server rejects if demotion would leave the group with zero
+// admins (the caller must promote a successor first).
+func (c *Client) DemoteGroupAdmin(groupID, userID string, quiet bool) error {
+	return c.enc.Encode(protocol.DemoteGroupAdmin{
+		Type:  "demote_group_admin",
+		Group: groupID,
+		User:  userID,
+		Quiet: quiet,
+	})
+}
+
 // SendDMMessage encrypts and sends a 1:1 DM message.
 func (c *Client) SendDMMessage(dmID, body string, replyTo string, mentions []string) error {
 	return c.SendDMMessageFull(dmID, body, replyTo, mentions, nil)

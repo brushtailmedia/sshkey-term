@@ -197,10 +197,13 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		// the dialog wording changes based on IsRoomRetired.
 		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	case "/rename":
-		if c != nil && group != "" && arg != "" {
-			c.Enc().Encode(map[string]string{
-				"type": "rename_group", "group": group, "name": arg,
-			})
+		// Phase 14: route to the app layer so the admin pre-check
+		// runs BEFORE the wire send. Non-admins get a friendly
+		// client-side rejection; admins pass through to the server.
+		// The server also enforces the admin gate — this is purely
+		// a UX improvement.
+		if group != "" && arg != "" {
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Group: group}
 		}
 	case "/mute":
 		// Handled via info panel toggle — just set a flag
@@ -210,6 +213,27 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 	case "/upload":
 		if arg != "" {
 			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
+		}
+	case "/add", "/kick", "/promote", "/demote", "/transfer":
+		// Phase 14 admin verbs. Each requires a group context and an
+		// @user argument. Route to the app layer for the pre-check,
+		// @user → userID resolution, and confirmation dialog. The
+		// actual wire send happens on dialog confirm.
+		if group != "" && arg != "" {
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Group: group}
+		}
+	case "/whoami":
+		// Phase 14 status command. Shows the current user's own
+		// display name + role in the active context. Works in any
+		// context (room/group/dm); the app layer surfaces it via the
+		// status bar.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Room: room, Group: group, DM: dm}
+	case "/groupinfo":
+		// Phase 14: open the info panel for the current group. Same
+		// effect as Ctrl+I when already in a group context, but
+		// discoverable via /help and chainable in scripted usage.
+		if group != "" {
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Group: group}
 		}
 	}
 }
