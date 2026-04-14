@@ -235,6 +235,45 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		if group != "" {
 			i.pendingCmd = &SlashCommandMsg{Command: cmd, Group: group}
 		}
+	case "/audit", "/members", "/admins":
+		// Phase 14 read-only overlays scoped to the current group.
+		// /audit takes an optional numeric argument for the row
+		// limit; /members and /admins take no args. Dropped outside
+		// a group context — the app layer never sees them.
+		if group != "" {
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Group: group}
+		}
+	case "/role":
+		// Phase 14: readout of a target user's role in the current
+		// group. Status bar message, no dialog. Requires a target
+		// (/role @user) and a group context.
+		if group != "" && arg != "" {
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Group: group}
+		}
+	case "/undo":
+		// Phase 14: revert the last kick if it happened within the
+		// undo window. Group-scoped because the kick itself was;
+		// the app layer does the actual state check.
+		if group != "" {
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Group: group}
+		}
+	case "/groupcreate":
+		// Phase 14 inline group creation. Arg form:
+		//   /groupcreate "Project X" @alice @bob @carol
+		// or
+		//   /groupcreate @alice @bob @carol
+		// The arg is parsed entirely in the app layer (it needs
+		// the client's display-name → user-ID mapping), so we just
+		// forward the whole remainder. Any context — groups DMs
+		// can be created from anywhere.
+		if arg != "" {
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg}
+		}
+	case "/dmcreate":
+		// Phase 14 inline 1:1 DM creation. /dmcreate @user.
+		if arg != "" {
+			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg}
+		}
 	}
 }
 

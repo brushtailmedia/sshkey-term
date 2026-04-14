@@ -250,6 +250,44 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 		return i, func() tea.Msg {
 			return MuteToggleMsg{Target: target, Muted: muted}
 		}
+	// Phase 14 admin-action shortcuts on the focused member row.
+	// A/K/P/X emit MemberActionMsg with admin action values that the
+	// app.go handler routes to the appropriate confirmation dialog
+	// (same dialog as typing /add, /kick, /promote, /demote). The
+	// app pre-checks local is_admin and falls through to a status
+	// bar error for non-admins. Keys only fire in a group context —
+	// rooms and DMs ignore them.
+	//
+	// "X" is used for demote because "D" means /delete everywhere
+	// else in the app. Matches the plan's keybinding.
+	case "a":
+		if i.isGroup {
+			return i, func() tea.Msg {
+				return MemberActionMsg{Action: "admin_add", User: ""}
+			}
+		}
+	case "K":
+		// Capital K to avoid colliding with lowercase "k" (up).
+		if i.isGroup && i.cursor < len(i.members) {
+			user := i.members[i.cursor].User
+			return i, func() tea.Msg {
+				return MemberActionMsg{Action: "admin_kick", User: user}
+			}
+		}
+	case "p":
+		if i.isGroup && i.cursor < len(i.members) {
+			user := i.members[i.cursor].User
+			return i, func() tea.Msg {
+				return MemberActionMsg{Action: "admin_promote", User: user}
+			}
+		}
+	case "x":
+		if i.isGroup && i.cursor < len(i.members) {
+			user := i.members[i.cursor].User
+			return i, func() tea.Msg {
+				return MemberActionMsg{Action: "admin_demote", User: user}
+			}
+		}
 	}
 	return i, nil
 }

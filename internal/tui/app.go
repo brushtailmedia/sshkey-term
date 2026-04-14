@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,11 @@ import (
 	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
+
+// undoWindowSeconds is the Phase 14 /undo window for reverting a
+// kick. Per the plan: 30 seconds, no stack, only the last kick is
+// trackable, any other admin action supersedes the undo target.
+const undoWindowSeconds int64 = 30
 
 // ServerMsg wraps a protocol message received from the server.
 type ServerMsg struct {
@@ -75,6 +81,16 @@ type App struct {
 	promoteConfirm     PromoteConfirmModel
 	demoteConfirm      DemoteConfirmModel
 	transferConfirm    TransferConfirmModel
+	// Phase 14 read-only overlays (/audit, /members, /admins)
+	auditOverlay       AuditOverlayModel
+	membersOverlay    MembersOverlayModel
+	// Phase 14 /undo state: last kick the local user performed.
+	// If /undo runs within undoWindow seconds, the kicked user is
+	// re-added via add_to_group. Cleared on any other admin action
+	// or on expiry. Tracks exactly one kick — there's no undo stack.
+	lastKickGroup  string
+	lastKickUserID string
+	lastKickTS     int64
 	deviceRevoked     DeviceRevokedModel
 	deviceMgr     DeviceMgrModel
 	quickSwitch QuickSwitchModel
@@ -341,6 +357,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.deleteRoomConfirm.IsVisible() {
 			var cmd tea.Cmd
 			a.deleteRoomConfirm, cmd = a.deleteRoomConfirm.Update(msg)
+			return a, cmd
+		}
+
+		// Phase 14 read-only overlays intercept all keys
+		if a.auditOverlay.IsVisible() {
+			var cmd tea.Cmd
+			a.auditOverlay, cmd = a.auditOverlay.Update(msg)
+			return a, cmd
+		}
+		if a.membersOverlay.IsVisible() {
+			var cmd tea.Cmd
+			a.membersOverlay, cmd = a.membersOverlay.Update(msg)
 			return a, cmd
 		}
 
@@ -777,12 +805,53 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case MemberActionMsg:
-		a.infoPanel.Hide()
+		// Phase 14 admin actions keep the info panel open so the
+		// user can chain multiple operations. All other actions
+		// (message, menu, verify, profile) still close it as before.
+		isAdminAction := msg.Action == "admin_kick" || msg.Action == "admin_promote" ||
+			msg.Action == "admin_demote" || msg.Action == "admin_add"
+		if !isAdminAction {
+			a.infoPanel.Hide()
+		}
 		// Don't hide the member menu when the action IS to open it
 		if msg.Action != "menu" {
 			a.memberMenu.Hide()
 		}
 		switch msg.Action {
+		case "admin_kick":
+			// Route through the existing /kick path — same
+			// pre-check, same dialog. The info panel stays open so
+			// the user can make another selection after the dialog
+			// closes.
+			if msg.User != "" {
+				a.handleGroupAdminCommand(&SlashCommandMsg{
+					Command: "/kick",
+					Group:   a.infoPanel.group,
+					Arg:     msg.User, // raw userID, resolves via the fallback branch
+				})
+			}
+		case "admin_promote":
+			if msg.User != "" {
+				a.handleGroupAdminCommand(&SlashCommandMsg{
+					Command: "/promote",
+					Group:   a.infoPanel.group,
+					Arg:     msg.User,
+				})
+			}
+		case "admin_demote":
+			if msg.User != "" {
+				a.handleGroupAdminCommand(&SlashCommandMsg{
+					Command: "/demote",
+					Group:   a.infoPanel.group,
+					Arg:     msg.User,
+				})
+			}
+		case "admin_add":
+			// Add doesn't have a target in the info panel — the
+			// user needs to type a username in response. Surface
+			// a hint in the status bar and let them use /add from
+			// the input. Future: could open an inline prompt.
+			a.statusBar.SetError("Use /add @user to add a new member to this group")
 		case "menu":
 			// Open MemberMenu via keyboard (Enter on a member in the panel).
 			// Same options as right-click: message, create_group, verify,
@@ -939,9 +1008,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the server runs the admin gate + last-admin check and
 		// emits group_event{leave, reason:"removed"} to remaining
 		// members plus group_left to the kicked user's sessions.
+		//
+		// Also record the kick for /undo — within undoWindowSeconds
+		// the user can run /undo to re-add the kicked user via
+		// add_to_group. Only the MOST RECENT kick is tracked (no
+		// undo stack); any subsequent admin action supersedes it.
 		if a.client != nil && msg.Group != "" && msg.TargetID != "" {
 			if err := a.client.RemoveFromGroup(msg.Group, msg.TargetID); err != nil {
 				a.statusBar.SetError("Remove failed: " + err.Error())
+			} else {
+				a.lastKickGroup = msg.Group
+				a.lastKickUserID = msg.TargetID
+				a.lastKickTS = time.Now().Unix()
+				targetName := a.resolveDisplayName(msg.TargetID)
+				a.statusBar.SetError("Removed " + targetName + " — /undo within 30s to revert")
 			}
 		}
 		return a, nil
@@ -1583,6 +1663,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.deleteDMConfirm.IsVisible() || a.deleteGroupConfirm.IsVisible() || a.deleteRoomConfirm.IsVisible() ||
 		a.addConfirm.IsVisible() || a.kickConfirm.IsVisible() || a.promoteConfirm.IsVisible() ||
 		a.demoteConfirm.IsVisible() || a.transferConfirm.IsVisible() ||
+		a.auditOverlay.IsVisible() || a.membersOverlay.IsVisible() ||
 		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
 		return a, nil
 	}
@@ -2155,7 +2236,233 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			return
 		}
 		a.infoPanel.ShowGroup(sc.Group, a.client, a.sidebar.online)
+	case "/audit":
+		a.handleAuditCommand(sc)
+	case "/members":
+		a.handleMembersOverlayCommand(sc, false)
+	case "/admins":
+		a.handleMembersOverlayCommand(sc, true)
+	case "/role":
+		a.handleRoleCommand(sc)
+	case "/undo":
+		a.handleUndoCommand(sc)
+	case "/groupcreate":
+		a.handleGroupcreateCommand(sc)
+	case "/dmcreate":
+		a.handleDmcreateCommand(sc)
 	}
+}
+
+// Phase 14 Chunk 6 command handlers ------------------------------------
+
+// handleAuditCommand opens the /audit overlay with the last N events
+// for the current group. Default N is 10; user can override with
+// /audit 50 for a longer view.
+func (a *App) handleAuditCommand(sc *SlashCommandMsg) {
+	if sc.Group == "" || a.client == nil {
+		return
+	}
+	limit := 10
+	if sc.Arg != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(sc.Arg)); err == nil && n > 0 {
+			if n > 500 {
+				n = 500 // sanity cap
+			}
+			limit = n
+		}
+	}
+	st := a.client.Store()
+	if st == nil {
+		a.statusBar.SetError("Audit unavailable — no local store")
+		return
+	}
+	events, err := st.GetRecentGroupEvents(sc.Group, limit)
+	if err != nil {
+		a.statusBar.SetError("Audit read failed: " + err.Error())
+		return
+	}
+	groupName := a.lookupGroupName(sc.Group)
+	a.auditOverlay.Show(sc.Group, groupName, events, a.resolveDisplayName)
+}
+
+// handleMembersOverlayCommand opens the /members (all) or /admins
+// (filtered) overlay for the current group. Reads from the client's
+// in-memory groupMembers + groupAdmins maps at Show time; the
+// overlay is one-shot and doesn't update live.
+func (a *App) handleMembersOverlayCommand(sc *SlashCommandMsg, adminsOnly bool) {
+	if sc.Group == "" || a.client == nil {
+		return
+	}
+	members := a.client.GroupMembers(sc.Group)
+	adminSet := make(map[string]bool)
+	for _, uid := range a.client.GroupAdmins(sc.Group) {
+		adminSet[uid] = true
+	}
+	groupName := a.lookupGroupName(sc.Group)
+	a.membersOverlay.Show(sc.Group, groupName, members, adminSet, adminsOnly, a.resolveDisplayName)
+}
+
+// handleRoleCommand surfaces the target user's role in the current
+// group via the status bar: "alice — admin" or "bob — member" or
+// "carol is not a member of this group".
+func (a *App) handleRoleCommand(sc *SlashCommandMsg) {
+	if sc.Group == "" || sc.Arg == "" || a.client == nil {
+		return
+	}
+	targetID, ok := a.resolveGroupMemberByName(sc.Group, sc.Arg)
+	if !ok {
+		a.statusBar.SetError(strings.TrimPrefix(sc.Arg, "@") + " is not a member of this group")
+		return
+	}
+	name := a.client.DisplayName(targetID)
+	role := "member"
+	if a.client.IsGroupAdmin(sc.Group, targetID) {
+		role = "admin"
+	}
+	a.statusBar.SetError(name + " — " + role)
+}
+
+// handleUndoCommand reverts the last kick the local user performed
+// within the undo window. Sends add_to_group for the previously
+// kicked user and clears the tracking state. Phase 14.
+//
+// Scope is deliberately narrow: exactly one kick, one group, 30s.
+// Any subsequent admin action (kick, promote, demote, add) does NOT
+// supersede this state on its own — only a new kick overwrites it,
+// and an expired-and-cleared undo falls through to "nothing to undo".
+func (a *App) handleUndoCommand(sc *SlashCommandMsg) {
+	// Note: the client==nil check is NOT the first guard. We want
+	// user-facing validation errors ("nothing to undo", "different
+	// group") to surface even in test scenarios where the client
+	// is nil — only the actual AddToGroup wire call needs the
+	// client pointer.
+	if a.lastKickGroup == "" || a.lastKickUserID == "" {
+		a.statusBar.SetError("Nothing to undo")
+		return
+	}
+	if time.Now().Unix()-a.lastKickTS > undoWindowSeconds {
+		a.lastKickGroup = ""
+		a.lastKickUserID = ""
+		a.lastKickTS = 0
+		a.statusBar.SetError("Undo window expired (30s)")
+		return
+	}
+	if sc.Group != a.lastKickGroup {
+		a.statusBar.SetError("Last kick was in a different group")
+		return
+	}
+	if a.client == nil {
+		return
+	}
+	// Pre-check: still an admin of this group?
+	if !a.isLocalAdminOfGroup(sc.Group) {
+		a.statusBar.SetError("You are no longer an admin of this group")
+		return
+	}
+	targetID := a.lastKickUserID
+	targetName := a.client.DisplayName(targetID)
+	if err := a.client.AddToGroup(sc.Group, targetID, false); err != nil {
+		a.statusBar.SetError("Undo failed: " + err.Error())
+		return
+	}
+	// Clear state so /undo twice in a row is a no-op instead of
+	// re-adding a user who just left voluntarily.
+	a.lastKickGroup = ""
+	a.lastKickUserID = ""
+	a.lastKickTS = 0
+	a.statusBar.SetError("Re-adding " + targetName + " to the group")
+}
+
+// handleGroupcreateCommand parses /groupcreate arguments and creates
+// a new group DM directly via client.CreateGroup (bypassing the
+// wizard). Accepted forms:
+//
+//	/groupcreate "Project X" @alice @bob @carol
+//	/groupcreate @alice @bob @carol
+//
+// The quoted name is optional. Targets are resolved via the profile
+// cache (same as /add). Min 1 target (plus the caller = 2-member
+// group); max 149 (plus caller = 150, the server's hard cap).
+func (a *App) handleGroupcreateCommand(sc *SlashCommandMsg) {
+	if a.client == nil {
+		return
+	}
+	name, tokens := parseGroupcreateArgs(sc.Arg)
+	if len(tokens) == 0 {
+		a.statusBar.SetError("Usage: /groupcreate [\"name\"] @user [@user ...]")
+		return
+	}
+	var members []string
+	var unresolved []string
+	for _, tok := range tokens {
+		uid, ok := a.resolveNonMemberByName(tok)
+		if !ok {
+			unresolved = append(unresolved, tok)
+			continue
+		}
+		members = append(members, uid)
+	}
+	if len(unresolved) > 0 {
+		a.statusBar.SetError("No user matching " + strings.Join(unresolved, ", "))
+		return
+	}
+	if len(members) == 0 {
+		a.statusBar.SetError("No valid members — nothing to create")
+		return
+	}
+	if err := a.client.CreateGroup(members, name); err != nil {
+		a.statusBar.SetError("Create failed: " + err.Error())
+	}
+}
+
+// handleDmcreateCommand parses /dmcreate @user and creates (or opens)
+// a 1:1 DM via client.CreateDM. The server dedups by pair so running
+// twice for the same target returns the existing row.
+func (a *App) handleDmcreateCommand(sc *SlashCommandMsg) {
+	if a.client == nil || sc.Arg == "" {
+		return
+	}
+	targetID, ok := a.resolveNonMemberByName(sc.Arg)
+	if !ok {
+		a.statusBar.SetError("No user matching " + sc.Arg)
+		return
+	}
+	if targetID == a.client.UserID() {
+		a.statusBar.SetError("Cannot create a DM with yourself")
+		return
+	}
+	if err := a.client.CreateDM(targetID); err != nil {
+		a.statusBar.SetError("Create DM failed: " + err.Error())
+	}
+}
+
+// parseGroupcreateArgs splits a /groupcreate argument string into
+// (optional quoted name, token list). Handles:
+//
+//	"Project X" @alice @bob        → ("Project X", ["@alice","@bob"])
+//	@alice @bob @carol             → ("",           ["@alice","@bob","@carol"])
+//	"Quoted Only"                  → ("Quoted Only",[])
+//
+// Only a leading double-quoted section is treated as the name;
+// quotes mid-string are passed through as literal tokens.
+func parseGroupcreateArgs(raw string) (string, []string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	name := ""
+	rest := raw
+	if strings.HasPrefix(raw, "\"") {
+		if end := strings.Index(raw[1:], "\""); end > 0 {
+			name = raw[1 : 1+end]
+			rest = strings.TrimSpace(raw[1+end+1:])
+		}
+	}
+	if rest == "" {
+		return name, nil
+	}
+	fields := strings.Fields(rest)
+	return name, fields
 }
 
 // Phase 14 helpers ------------------------------------------------------
@@ -2667,48 +2974,74 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		case "leave":
 			switch m.Reason {
 			case "retirement":
+				// Retirement is an account-level event — never coalesced.
 				a.messages.AddSystemMessage(userName + "'s account was retired")
 			case "removed":
 				if byName != "" {
-					a.messages.AddSystemMessage(userName + " was removed from the group by " + byName)
+					// Coalescing eligible: "alice removed bob" →
+					// "alice removed bob, carol, and dave" for
+					// same-admin rapid-fire kicks.
+					a.messages.AddCoalescingSystemMessage(
+						"removed", m.By, byName, userName, m.Group,
+						byName+" removed "+userName+" from the group",
+						func(joined string) string {
+							return byName + " removed " + joined + " from the group"
+						},
+					)
 				} else {
-					// Defensive fallback — shouldn't happen post-migration
-					// (the audit contract requires By for reason="removed"),
-					// but old persisted rows from pre-Phase-14 may have
-					// reason="admin" with empty By.
+					// Defensive fallback — shouldn't happen post-migration.
 					a.messages.AddSystemMessage(userName + " was removed from the group by an admin")
 				}
 			case "admin":
 				// Deprecated legacy value — treat as removed-by-unknown-admin.
 				a.messages.AddSystemMessage(userName + " was removed from the group by an admin")
 			default:
+				// Self-leave — user-initiated, never coalesced.
 				a.messages.AddSystemMessage(userName + " left the group")
 			}
 		case "join":
 			if byName != "" {
-				a.messages.AddSystemMessage(byName + " added " + userName + " to the group")
+				a.messages.AddCoalescingSystemMessage(
+					"join", m.By, byName, userName, m.Group,
+					byName+" added "+userName+" to the group",
+					func(joined string) string {
+						return byName + " added " + joined + " to the group"
+					},
+				)
 			} else {
 				a.messages.AddSystemMessage(userName + " joined the group")
 			}
 		case "promote":
 			if m.Reason == "retirement_succession" {
+				// Server-initiated succession — distinct from
+				// admin-initiated promote, never coalesced.
 				a.messages.AddSystemMessage(userName + " was promoted to admin (previous admin retired)")
 			} else if byName != "" {
-				a.messages.AddSystemMessage(byName + " promoted " + userName + " to admin")
+				a.messages.AddCoalescingSystemMessage(
+					"promote", m.By, byName, userName, m.Group,
+					byName+" promoted "+userName+" to admin",
+					func(joined string) string {
+						return byName + " promoted " + joined + " to admin"
+					},
+				)
 			} else {
 				a.messages.AddSystemMessage(userName + " was promoted to admin")
 			}
 		case "demote":
 			if byName != "" {
-				a.messages.AddSystemMessage(byName + " demoted " + userName)
+				a.messages.AddCoalescingSystemMessage(
+					"demote", m.By, byName, userName, m.Group,
+					byName+" demoted "+userName,
+					func(joined string) string {
+						return byName + " demoted " + joined
+					},
+				)
 			} else {
 				a.messages.AddSystemMessage(userName + " was demoted")
 			}
 		case "rename":
-			// For renames, User is the acting admin (the plan says
-			// "admin who renamed" carries through User as well as By).
-			// m.Name carries the new name. Render as "alice renamed
-			// the group to 'New Name'".
+			// Rename is never coalesced — each rename is distinct and
+			// the new name is content, not just target list extension.
 			if m.Name != "" {
 				a.messages.AddSystemMessage(userName + " renamed the group to \"" + m.Name + "\"")
 			} else {
@@ -3355,6 +3688,13 @@ func (a App) View() string {
 	}
 	if a.deleteRoomConfirm.IsVisible() {
 		return a.deleteRoomConfirm.View(a.width)
+	}
+	// Phase 14 read-only overlays
+	if a.auditOverlay.IsVisible() {
+		return a.auditOverlay.View(a.width)
+	}
+	if a.membersOverlay.IsVisible() {
+		return a.membersOverlay.View(a.width)
 	}
 	// Phase 14 in-group admin verb dialogs
 	if a.addConfirm.IsVisible() {

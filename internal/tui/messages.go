@@ -73,6 +73,18 @@ type DisplayMessage struct {
 	SystemText      string
 	Deleted         bool
 	DeletedBy       string
+	// Phase 14 coalescing metadata. Populated when IsSystem is true
+	// and the row was created by AddCoalescingSystemMessage for an
+	// admin-initiated group event (join, promote, demote, removed).
+	// Empty otherwise — regular system messages (typing, retirement,
+	// self-leave) never coalesce. See AddCoalescingSystemMessage for
+	// the merge rules.
+	coalesceVerb    string
+	coalesceByID    string
+	coalesceByName  string
+	coalesceGroup   string
+	coalesceTargets []string
+	coalesceFirstTS int64
 }
 
 // DisplayReactions returns the emoji→count map for rendering, counting the
@@ -617,11 +629,106 @@ func isImageMime(mime string) bool {
 }
 
 func (m *MessagesModel) AddSystemMessage(text string) {
+	// Plain system message append — no coalescing. Used for non-admin
+	// events (e.g. typing, reconnect notices) and fallback cases
+	// where the caller didn't provide coalescing metadata.
 	m.messages = append(m.messages, DisplayMessage{
 		IsSystem:   true,
 		SystemText: text,
 		TS:         time.Now().Unix(),
 	})
+}
+
+// AddCoalescingSystemMessage is the Phase 14 variant used by the
+// group_event dispatch path. Same output as AddSystemMessage when
+// consecutive events differ — but when the last system message was
+// the same (admin, verb) pair within 10 seconds AND targeted the
+// same group, the existing row is REPLACED with a collapsed form.
+//
+// Coalescing rules (from groups_admin.md "Client-side coalescing"):
+//
+//   - Window: 10 seconds from the first event of a series
+//   - Only collapses same admin + same verb (join, promote, demote,
+//     leave:removed). leave with empty reason (self-leave) and
+//     retirement events are NEVER coalesced — they represent
+//     user-initiated or account-level actions that each deserve
+//     their own system message.
+//   - Max 3 targets shown by name, then "and N more"
+//   - Individual rows are STILL persisted to the local group_events
+//     table in un-coalesced form (the client layer does that before
+//     this call). /audit shows the un-coalesced history.
+//
+// Parameters:
+//
+//   - verb: "join" | "promote" | "demote" | "removed"
+//   - byID: the acting admin's user ID (empty string disables coalescing)
+//   - byName: pre-resolved display name for the acting admin (used in the collapsed text)
+//   - targetName: pre-resolved display name for this event's target
+//   - groupID: used as a partition key — events in different groups
+//     never coalesce even if verb+admin match
+//   - renderSingle: the full text for this single event ("alice added bob to the group")
+//   - renderJoined: given a joined list of target names like "bob, carol, and dave", returns the coalesced text ("alice added bob, carol, and dave to the group")
+func (m *MessagesModel) AddCoalescingSystemMessage(
+	verb, byID, byName, targetName, groupID, renderSingle string,
+	renderJoined func(joined string) string,
+) {
+	now := time.Now().Unix()
+
+	// Guard: no coalescing without a stable acting admin (empty
+	// byID means self-leave or retirement — always individual rows).
+	if byID == "" {
+		m.AddSystemMessage(renderSingle)
+		return
+	}
+
+	// Check the last row for coalescing eligibility.
+	if len(m.messages) > 0 {
+		last := &m.messages[len(m.messages)-1]
+		if last.IsSystem &&
+			last.coalesceVerb == verb &&
+			last.coalesceByID == byID &&
+			last.coalesceGroup == groupID &&
+			now-last.coalesceFirstTS <= 10 {
+			// Extend the existing coalesced row instead of adding a new one.
+			last.coalesceTargets = append(last.coalesceTargets, targetName)
+			last.SystemText = renderJoined(joinCoalesced(last.coalesceTargets))
+			last.TS = now
+			return
+		}
+	}
+
+	// First event in a potential series — store metadata alongside
+	// the text so the NEXT event can coalesce into this row.
+	m.messages = append(m.messages, DisplayMessage{
+		IsSystem:        true,
+		SystemText:      renderSingle,
+		TS:              now,
+		coalesceVerb:    verb,
+		coalesceByID:    byID,
+		coalesceByName:  byName,
+		coalesceGroup:   groupID,
+		coalesceTargets: []string{targetName},
+		coalesceFirstTS: now,
+	})
+}
+
+// joinCoalesced formats the list of target names per the plan:
+// up to 3 names shown, then "and N more" for overflow. Oxford-comma
+// style separators for the 3-name case.
+func joinCoalesced(names []string) string {
+	switch n := len(names); n {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " and " + names[1]
+	case 3:
+		return names[0] + ", " + names[1] + ", and " + names[2]
+	default:
+		return names[0] + ", " + names[1] + ", " + names[2] +
+			fmt.Sprintf(", and %d more", n-3)
+	}
 }
 
 // MarkDeleted flags a message as deleted in-place. The message stays in the
