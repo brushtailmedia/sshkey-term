@@ -121,11 +121,15 @@ func (i *InfoPanelModel) ShowGroup(groupID string, c *client.Client, online map[
 		for _, m := range members {
 			p := c.Profile(m)
 			displayName := m
-			admin := false
 			if p != nil {
 				displayName = p.DisplayName
-				admin = p.Admin
 			}
+			// Phase 14: per-member admin state comes from the in-memory
+			// group admin set (sourced from group_list + live
+			// group_event{promote,demote} + sync replay), NOT from the
+			// global profile.Admin flag (which tracks server-wide
+			// admin status and is unrelated to per-group governance).
+			admin := c.IsGroupAdmin(groupID, m)
 			verified := false
 			if st := c.Store(); st != nil {
 				_, verified, _ = st.GetPinnedKey(m)

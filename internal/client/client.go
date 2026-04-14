@@ -64,6 +64,14 @@ type Client struct {
 	capabilities []string
 	profiles     map[string]*protocol.Profile
 	groupMembers map[string][]string         // group DM ID -> member userIDs
+	// Phase 14: in-memory admin set per group. Sourced from the
+	// group_list catchup on connect (protocol.GroupInfo.Admins) and
+	// updated by live group_event{promote,demote} + sync replay. Not
+	// persisted — other members' admin state is authoritative on the
+	// server and the client refetches on reconnect. The LOCAL user's
+	// admin flag IS persisted (groups.is_admin column) for pre-check
+	// survival across restart.
+	groupAdmins  map[string]map[string]bool  // group DM ID -> set of admin userIDs
 	dms          map[string][2]string        // 1:1 DM ID -> [userA, userB]
 	retired      map[string]string           // retired userID -> retired_at timestamp
 	epochKeys      map[string]map[int64][]byte // room -> epoch -> unwrapped key
@@ -90,6 +98,7 @@ func New(cfg Config) *Client {
 		logger:       cfg.Logger,
 		profiles:     make(map[string]*protocol.Profile),
 		groupMembers: make(map[string][]string),
+		groupAdmins:  make(map[string]map[string]bool),
 		dms:          make(map[string][2]string),
 		retired:      make(map[string]string),
 		epochKeys:    make(map[string]map[int64][]byte),
@@ -391,9 +400,64 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		if err := json.Unmarshal(raw, &g); err == nil {
 			c.mu.Lock()
 			c.groupMembers[g.Group] = g.Members
+			// Phase 14: populate the in-memory admin set from the
+			// new Admins field. On a fresh create this is always
+			// just the creator, but the server-sourced list is
+			// authoritative — don't assume.
+			adminSet := make(map[string]bool, len(g.Admins))
+			for _, a := range g.Admins {
+				adminSet[a] = true
+			}
+			c.groupAdmins[g.Group] = adminSet
+			localIsAdmin := adminSet[c.userID]
 			c.mu.Unlock()
 			if c.store != nil {
 				c.store.StoreGroup(g.Group, g.Name, strings.Join(g.Members, ","))
+				// Persist the local user's admin flag so the TUI
+				// pre-check survives restart. Separate write from
+				// StoreGroup so the upsert can't clobber this
+				// later.
+				if err := c.store.SetLocalUserGroupAdmin(g.Group, localIsAdmin); err != nil {
+					c.logger.Warn("SetLocalUserGroupAdmin on group_created",
+						"group", g.Group, "error", err)
+				}
+			}
+		}
+	case "group_added_to":
+		// Phase 14: direct notification that an admin added the local
+		// user to an existing group. Insert the group into local
+		// state so the sidebar updates immediately without waiting
+		// for a group_list refetch. The local user is NEVER an admin
+		// at add time (promote is a separate event), so the is_admin
+		// flag is explicitly false. TUI layer (app.go) handles the
+		// toast notification and sidebar insertion.
+		var gat protocol.GroupAddedTo
+		if err := json.Unmarshal(raw, &gat); err == nil {
+			c.mu.Lock()
+			c.groupMembers[gat.Group] = gat.Members
+			adminSet := make(map[string]bool, len(gat.Admins))
+			for _, a := range gat.Admins {
+				adminSet[a] = true
+			}
+			c.groupAdmins[gat.Group] = adminSet
+			c.mu.Unlock()
+			if c.store != nil {
+				if err := c.store.StoreGroup(gat.Group, gat.Name, strings.Join(gat.Members, ",")); err != nil {
+					c.logger.Warn("StoreGroup on group_added_to",
+						"group", gat.Group, "error", err)
+				}
+				// The added user is explicitly NOT an admin.
+				if err := c.store.SetLocalUserGroupAdmin(gat.Group, false); err != nil {
+					c.logger.Warn("SetLocalUserGroupAdmin on group_added_to",
+						"group", gat.Group, "error", err)
+				}
+				// Ensure the group isn't in left_at > 0 state — if
+				// the user was previously removed or /delete'd and
+				// is now being re-added, un-archive them locally.
+				if err := c.store.MarkGroupRejoined(gat.Group); err != nil {
+					c.logger.Warn("MarkGroupRejoined on group_added_to",
+						"group", gat.Group, "error", err)
+				}
 			}
 		}
 	case "room_list":
@@ -434,11 +498,34 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			c.mu.Lock()
 			for _, g := range gl.Groups {
 				c.groupMembers[g.ID] = g.Members
+				// Phase 14: populate the in-memory admin set from
+				// each GroupInfo.Admins field. On a pre-Phase-14
+				// server this will be empty, and IsGroupAdmin will
+				// correctly return false until a live promote
+				// arrives (upgrade-safe).
+				adminSet := make(map[string]bool, len(g.Admins))
+				for _, a := range g.Admins {
+					adminSet[a] = true
+				}
+				c.groupAdmins[g.ID] = adminSet
 			}
 			c.mu.Unlock()
 			if c.store != nil {
 				for _, g := range gl.Groups {
 					c.store.StoreGroup(g.ID, g.Name, strings.Join(g.Members, ","))
+					// Persist the local user's admin flag per
+					// group so the pre-check survives restart.
+					localIsAdmin := false
+					for _, a := range g.Admins {
+						if a == c.userID {
+							localIsAdmin = true
+							break
+						}
+					}
+					if err := c.store.SetLocalUserGroupAdmin(g.ID, localIsAdmin); err != nil {
+						c.logger.Warn("SetLocalUserGroupAdmin on group_list",
+							"group", g.ID, "error", err)
+					}
 				}
 
 				// Multi-device offline catchup for /leave: any locally-
@@ -483,8 +570,17 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		}
 	case "group_event":
 		var ge protocol.GroupEvent
-		if err := json.Unmarshal(raw, &ge); err == nil && ge.Event == "leave" {
-			c.mu.Lock()
+		if err := json.Unmarshal(raw, &ge); err != nil {
+			break
+		}
+		// Phase 14: unified dispatch for all five group event types.
+		// State updates happen here (member list, in-memory admin set,
+		// persistent local admin flag). Rendering, coalescing, and the
+		// audit trail persistence live in the TUI layer (see app.go)
+		// so the client layer stays focused on data-plane correctness.
+		c.mu.Lock()
+		switch ge.Event {
+		case "leave":
 			if members, ok := c.groupMembers[ge.Group]; ok {
 				filtered := members[:0]
 				for _, m := range members {
@@ -494,10 +590,85 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 				}
 				c.groupMembers[ge.Group] = filtered
 			}
-			c.mu.Unlock()
-			// Note: the leaver never receives this event — they have already
-			// been removed from group_members, so they are not in the broadcast
-			// set. Self-leave is handled by "group_left".
+			// Demoted-by-leave: if the leaving user was an admin,
+			// drop them from the admin set too. Keeps the in-memory
+			// admin set in sync even when kicks land via performGroupLeave.
+			if set, ok := c.groupAdmins[ge.Group]; ok {
+				delete(set, ge.User)
+			}
+		case "join":
+			// New member added by an admin. Append to members list
+			// if not already present. New members are never admins
+			// at add time — promote is a separate event.
+			found := false
+			for _, m := range c.groupMembers[ge.Group] {
+				if m == ge.User {
+					found = true
+					break
+				}
+			}
+			if !found {
+				c.groupMembers[ge.Group] = append(c.groupMembers[ge.Group], ge.User)
+			}
+		case "promote":
+			// Add target to the in-memory admin set. If the target
+			// is the local user, also persist the local flag so the
+			// TUI pre-check survives restart.
+			if c.groupAdmins[ge.Group] == nil {
+				c.groupAdmins[ge.Group] = make(map[string]bool)
+			}
+			c.groupAdmins[ge.Group][ge.User] = true
+			if ge.User == c.userID && c.store != nil {
+				if err := c.store.SetLocalUserGroupAdmin(ge.Group, true); err != nil {
+					c.logger.Warn("SetLocalUserGroupAdmin on promote",
+						"group", ge.Group, "error", err)
+				}
+			}
+		case "demote":
+			if set, ok := c.groupAdmins[ge.Group]; ok {
+				delete(set, ge.User)
+			}
+			if ge.User == c.userID && c.store != nil {
+				if err := c.store.SetLocalUserGroupAdmin(ge.Group, false); err != nil {
+					c.logger.Warn("SetLocalUserGroupAdmin on demote",
+						"group", ge.Group, "error", err)
+				}
+			}
+		case "rename":
+			// The data-layer mirror of group_renamed — update the
+			// cached name so reconnects render correctly. TUI layer
+			// handles the in-memory sidebar entry + system message.
+			if c.store != nil {
+				var members string
+				if all, err := c.store.GetAllGroups(); err == nil {
+					if entry, ok := all[ge.Group]; ok {
+						members = entry[1]
+					}
+				}
+				// Unlock around the store call to avoid holding
+				// the lock during I/O. Re-lock not needed — we're
+				// done mutating in-memory state for this event.
+				c.mu.Unlock()
+				if err := c.store.StoreGroup(ge.Group, ge.Name, members); err != nil {
+					c.logger.Warn("failed to update cached group name on rename event",
+						"group", ge.Group, "error", err)
+				}
+				c.mu.Lock() // re-lock to match the defer semantics below
+			}
+		}
+		c.mu.Unlock()
+
+		// Audit trail: persist every event to the local group_events
+		// table for /audit replay. Best-effort — failure logged, not
+		// surfaced to the caller. Sync replay uses the same helper so
+		// live and replay rows are byte-identical.
+		if c.store != nil {
+			if err := c.store.RecordGroupEvent(
+				ge.Group, ge.Event, ge.User, ge.By, ge.Reason, ge.Name, ge.Quiet, time.Now().Unix(),
+			); err != nil {
+				c.logger.Warn("RecordGroupEvent",
+					"group", ge.Group, "event", ge.Event, "error", err)
+			}
 		}
 	case "group_renamed":
 		// Update the cached name in the local store so subsequent
@@ -1005,6 +1176,44 @@ func (c *Client) GroupMembers(groupID string) []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.groupMembers[groupID]
+}
+
+// GroupAdmins returns the admin user IDs for a group DM, sorted for
+// deterministic ordering. Reads the in-memory admin set that the
+// dispatch path maintains from group_list catchup and group_event
+// {promote,demote} broadcasts. Phase 14.
+func (c *Client) GroupAdmins(groupID string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	set, ok := c.groupAdmins[groupID]
+	if !ok {
+		return nil
+	}
+	admins := make([]string, 0, len(set))
+	for userID := range set {
+		admins = append(admins, userID)
+	}
+	// Sort for deterministic rendering — map iteration order is random.
+	for i := 1; i < len(admins); i++ {
+		for j := i; j > 0 && admins[j-1] > admins[j]; j-- {
+			admins[j-1], admins[j] = admins[j], admins[j-1]
+		}
+	}
+	return admins
+}
+
+// IsGroupAdmin reports whether the given user is currently tracked as
+// an admin of the given group. False if the group isn't cached or the
+// user isn't in its admin set. Used by the info panel and sidebar
+// rendering for per-member admin markers. Phase 14.
+func (c *Client) IsGroupAdmin(groupID, userID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	set, ok := c.groupAdmins[groupID]
+	if !ok {
+		return false
+	}
+	return set[userID]
 }
 
 // DMMembers returns the member pair for a 1:1 DM.

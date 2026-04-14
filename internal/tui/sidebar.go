@@ -63,10 +63,18 @@ type SidebarModel struct {
 	selectedRoom  string
 	selectedGroup string
 	selectedDM    string
-	resolveName     func(string) string // user nanoid → display name (set by App)
-	resolveRoomName func(string) string // room nanoid → display name (set by App)
-	resolveVerified func(string) bool   // user nanoid → safety-number verified flag (set by App)
-	selfUserID      string              // the current user's ID (for DM "other party" resolve)
+	resolveName       func(string) string // user nanoid → display name (set by App)
+	resolveRoomName   func(string) string // room nanoid → display name (set by App)
+	resolveVerified   func(string) bool   // user nanoid → safety-number verified flag (set by App)
+	// Phase 14: resolveIsLocalAdmin returns true if the local user is
+	// currently an admin of the given group. Reads authoritative state
+	// from the client layer's in-memory admin set (which is updated
+	// live by group_event{promote,demote}), so the sidebar ★ marker
+	// updates immediately without waiting for a group_list refetch.
+	// If nil, the sidebar falls back to checking GroupInfo.Admins
+	// from its cached slice (which only refreshes on group_list).
+	resolveIsLocalAdmin func(string) bool
+	selfUserID          string              // the current user's ID (for DM "other party" resolve)
 
 	// For message forwarding (set by App)
 	msgCh chan ServerMsg
@@ -421,7 +429,32 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 		}
 
 		isLeft := s.leftGroups[g.ID]
-		line := " " + dot + " " + name
+
+		// Phase 14: ★ indicator when the local user is an admin of
+		// this group. Prefer the resolveIsLocalAdmin callback so the
+		// marker reflects live group_event{promote,demote} updates
+		// without waiting for a group_list refetch. Fall back to
+		// the cached GroupInfo.Admins slice if the callback isn't
+		// wired (older tests or partial initialization paths).
+		var isLocalAdmin bool
+		if s.resolveIsLocalAdmin != nil {
+			isLocalAdmin = s.resolveIsLocalAdmin(g.ID)
+		} else {
+			for _, a := range g.Admins {
+				if a == s.selfUserID {
+					isLocalAdmin = true
+					break
+				}
+			}
+		}
+
+		line := " " + dot + " "
+		if isLocalAdmin && !isLeft {
+			// Muted star before the group name. Using the same
+			// helpDescStyle as the bracket markers for consistency.
+			line += helpDescStyle.Render("★") + " "
+		}
+		line += name
 		if anyRetired {
 			line += " " + helpDescStyle.Render("[retired]")
 		}

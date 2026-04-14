@@ -1332,6 +1332,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_, verified, err := st.GetPinnedKey(user)
 			return err == nil && verified
 		}
+		// Phase 14: live callback into the client's in-memory admin
+		// set so the sidebar ★ indicator updates immediately on
+		// group_event{promote,demote} without waiting for a
+		// group_list refetch.
+		a.sidebar.resolveIsLocalAdmin = func(groupID string) bool {
+			if a.client == nil {
+				return false
+			}
+			return a.client.IsGroupAdmin(groupID, a.client.UserID())
+		}
 		a.newConv.resolveName = a.client.DisplayName
 		a.infoPanel.resolveRoomName = a.client.DisplayRoomName
 		if len(a.client.Rooms()) > 0 {
@@ -2320,61 +2330,136 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			}
 		}
 	case "group_event":
+		// Phase 14: unified dispatch for all five group event types.
+		// The client-layer handler already updated in-memory state
+		// (member list, admin set, persistent local admin flag) and
+		// persisted the row to the local group_events table for
+		// /audit replay. This branch is purely rendering: system
+		// messages in the active group's message view, with the Quiet
+		// flag honored (event still persisted, just not displayed).
+		//
+		// Note on coalescing: the plan calls for 10-second same-admin
+		// same-verb coalescing ("alice added bob, carol, and dave").
+		// That logic lives in Chunk 6 alongside the other render
+		// polish; here we emit one system message per event and the
+		// Chunk 6 coalescer wraps it.
 		var m protocol.GroupEvent
-		if err := json.Unmarshal(msg.Raw, &m); err == nil {
-			if m.Event == "leave" {
-				// Show system message in the active group stream when
-				// SOMEONE ELSE leaves. The leaver themselves is not in the
-				// broadcast set (they were removed from members already), so
-				// this branch only fires for other users — no self check needed.
-				//
-				// Reason distinguishes the trigger so the system message
-				// matches what actually happened:
-				//   - "retirement": the leaver's account was retired
-				//   - "admin": an admin removed the leaver via sshkey-ctl
-				//   - "" (empty): the leaver ran /leave themselves
-				if m.Group == a.messages.group {
-					switch m.Reason {
-					case "retirement":
-						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + "'s account was retired")
-					case "admin":
-						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " was removed from the group by an admin")
-					default:
-						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " left the group")
-					}
+		if err := json.Unmarshal(msg.Raw, &m); err != nil {
+			break
+		}
+		if m.Quiet {
+			// Suppressed: client-layer already updated state and
+			// persisted the audit row; skip the inline system message.
+			break
+		}
+		// Only render if the event is for the currently-active group.
+		if m.Group != a.messages.group {
+			break
+		}
+		userName := a.resolveDisplayName(m.User)
+		byName := ""
+		if m.By != "" {
+			byName = a.resolveDisplayName(m.By)
+		}
+		switch m.Event {
+		case "leave":
+			switch m.Reason {
+			case "retirement":
+				a.messages.AddSystemMessage(userName + "'s account was retired")
+			case "removed":
+				if byName != "" {
+					a.messages.AddSystemMessage(userName + " was removed from the group by " + byName)
+				} else {
+					// Defensive fallback — shouldn't happen post-migration
+					// (the audit contract requires By for reason="removed"),
+					// but old persisted rows from pre-Phase-14 may have
+					// reason="admin" with empty By.
+					a.messages.AddSystemMessage(userName + " was removed from the group by an admin")
 				}
+			case "admin":
+				// Deprecated legacy value — treat as removed-by-unknown-admin.
+				a.messages.AddSystemMessage(userName + " was removed from the group by an admin")
+			default:
+				a.messages.AddSystemMessage(userName + " left the group")
+			}
+		case "join":
+			if byName != "" {
+				a.messages.AddSystemMessage(byName + " added " + userName + " to the group")
+			} else {
+				a.messages.AddSystemMessage(userName + " joined the group")
+			}
+		case "promote":
+			if m.Reason == "retirement_succession" {
+				a.messages.AddSystemMessage(userName + " was promoted to admin (previous admin retired)")
+			} else if byName != "" {
+				a.messages.AddSystemMessage(byName + " promoted " + userName + " to admin")
+			} else {
+				a.messages.AddSystemMessage(userName + " was promoted to admin")
+			}
+		case "demote":
+			if byName != "" {
+				a.messages.AddSystemMessage(byName + " demoted " + userName)
+			} else {
+				a.messages.AddSystemMessage(userName + " was demoted")
+			}
+		case "rename":
+			// For renames, User is the acting admin (the plan says
+			// "admin who renamed" carries through User as well as By).
+			// m.Name carries the new name. Render as "alice renamed
+			// the group to 'New Name'".
+			if m.Name != "" {
+				a.messages.AddSystemMessage(userName + " renamed the group to \"" + m.Name + "\"")
+			} else {
+				a.messages.AddSystemMessage(userName + " cleared the group name")
 			}
 		}
 	case "group_left":
-		// Server confirmed a group leave. Reason distinguishes the
-		// trigger:
-		//   - "" (empty): self-leave via /leave command on this or
-		//     another device
-		//   - "admin": an admin removed us via sshkey-ctl
-		//     remove-from-group (the moderation escape hatch)
+		// Server confirmed a group leave. Phase 14 reason values:
+		//   - ""           self-leave via /leave on this or another device
+		//   - "removed"    an admin kicked us via handleRemoveFromGroup.
+		//                  By carries the kicking admin's user ID so we
+		//                  can render "You were removed from X by alice"
+		//                  instead of the generic "by an admin" fallback.
+		//   - "retirement" our own account was retired (should be rare
+		//                  since retirement closes sessions, but handle
+		//                  defensively for the short overlap window).
+		//   - "admin"      deprecated Phase 11 value from the old CLI
+		//                  escape hatch. Pre-Phase-14 clients may still
+		//                  see this from persisted rows during an
+		//                  upgrade window; treat as equivalent to
+		//                  "removed" with unknown actor.
 		//
-		// In both cases the client layer has already marked the group
+		// In all cases the client layer has already marked the group
 		// archived in the local DB and dropped it from the in-memory
-		// member map. Here we just update the sidebar greying, set the
+		// member map. Here we update the sidebar greying, set the
 		// active message view to read-only if the affected group is
-		// currently focused, and surface a status message that tells
-		// the user what happened.
+		// currently focused, and surface a status message.
 		var m protocol.GroupLeft
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			a.sidebar.MarkGroupLeft(m.Group)
 			if a.messages.group == m.Group {
 				a.messages.SetLeft(true)
 			}
-			if m.Reason == "admin" {
-				groupName := m.Group
-				for _, g := range a.sidebar.groups {
-					if g.ID == m.Group && g.Name != "" {
-						groupName = g.Name
-						break
-					}
+			groupName := m.Group
+			for _, g := range a.sidebar.groups {
+				if g.ID == m.Group && g.Name != "" {
+					groupName = g.Name
+					break
 				}
+			}
+			switch m.Reason {
+			case "removed":
+				if m.By != "" {
+					a.statusBar.SetError("You were removed from " + groupName + " by " + a.resolveDisplayName(m.By))
+				} else {
+					a.statusBar.SetError("You were removed from " + groupName + " by an admin")
+				}
+			case "admin":
+				// Deprecated legacy value — treat as removed-by-unknown-admin.
 				a.statusBar.SetError("You were removed from " + groupName + " by an admin")
-			} else {
+			case "retirement":
+				a.statusBar.SetError("Your account was retired")
+			default:
 				a.statusBar.SetError("Left group")
 			}
 		}
@@ -2504,12 +2589,50 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	case "group_created":
 		var m protocol.GroupCreated
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			// Phase 14: pass Admins through so the sidebar can render
+			// the ★ indicator for groups where the local user is an
+			// admin. On a fresh /groupcreate the creator is always
+			// the initial admin.
 			a.sidebar.AddGroup(protocol.GroupInfo{
 				ID:      m.Group,
 				Members: m.Members,
+				Admins:  m.Admins,
 				Name:    m.Name,
 			})
 		}
+	case "group_added_to":
+		// Phase 14: a group admin added the local user to an existing
+		// group. The client layer already inserted the row in the
+		// local store, populated groupMembers / groupAdmins, and
+		// called MarkGroupRejoined. Here we add the group to the
+		// sidebar immediately and surface a toast-style status bar
+		// message so the user knows what happened.
+		var m protocol.GroupAddedTo
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.sidebar.AddGroup(protocol.GroupInfo{
+				ID:      m.Group,
+				Members: m.Members,
+				Admins:  m.Admins,
+				Name:    m.Name,
+			})
+			groupName := m.Name
+			if groupName == "" {
+				groupName = m.Group
+			}
+			addedBy := a.resolveDisplayName(m.AddedBy)
+			a.statusBar.SetError(addedBy + " added you to '" + groupName + "'")
+		}
+	case "add_group_result", "remove_group_result", "promote_admin_result", "demote_admin_result":
+		// Phase 14: server ACKs for the admin verb the local user
+		// just sent. The meaningful state update already arrived via
+		// the broadcast (group_event{join,promote,demote} or
+		// group_left for kicks), so these echoes are informational —
+		// we don't need to re-render anything. They exist so the
+		// client can tell "my command succeeded" vs "my command was
+		// rejected" (the error frame is distinct). Intentionally
+		// no-op in the TUI layer today; Chunk 5 slash commands may
+		// surface a "[action] succeeded" confirmation if the UX
+		// warrants it.
 	case "dm_list":
 		var m protocol.DMList
 		json.Unmarshal(msg.Raw, &m)
@@ -2627,6 +2750,17 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		// and go through the same AddReactionDecrypted path as real-time)
 		for _, raw := range batch.Reactions {
 			a.handleServerMessage(ServerMsg{Type: "reaction", Raw: raw})
+		}
+		// Phase 14: replay group admin events that happened while this
+		// client was offline. Each entry routes through the same
+		// handleServerMessage("group_event", ...) path as live
+		// broadcasts, so persisted replay and live delivery produce
+		// identical state (in-memory admin set updates, store rows,
+		// system message rendering). The server guarantees ordering
+		// via ORDER BY ts ASC, id ASC so replay matches the original
+		// broadcast order.
+		for _, raw := range batch.Events {
+			a.handleServerMessage(ServerMsg{Type: "group_event", Raw: raw})
 		}
 	case "history_result":
 		var result protocol.HistoryResult

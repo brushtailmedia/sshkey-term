@@ -206,12 +206,51 @@ func (s *Store) init() error {
 		-- left_at = 0 means active member; >0 means the user has left this
 		-- group (archived: greyed in sidebar, input disabled, history still
 		-- scrollable until /delete).
+		--
+		-- Phase 14: is_admin tracks the LOCAL user's admin status in this
+		-- group (1 = admin, 0 = regular member). Other members' admin
+		-- status is NOT persisted client-side — it lives in the in-memory
+		-- groupAdmins map on Client, sourced from the server's group_list
+		-- payload and updated by group_event{promote/demote}. The local
+		-- flag exists so the TUI pre-check (gating /add, /kick, etc.) can
+		-- consult it without a server round-trip, and so it survives
+		-- restart. is_admin is deliberately NOT part of the StoreGroup
+		-- upsert — promote/demote events land via SetLocalUserGroupAdmin
+		-- so they can't clobber the members list during a normal sync.
 		CREATE TABLE IF NOT EXISTS groups (
-			id      TEXT PRIMARY KEY,
-			name    TEXT NOT NULL DEFAULT '',
-			members TEXT NOT NULL DEFAULT '',
-			left_at INTEGER NOT NULL DEFAULT 0
+			id       TEXT PRIMARY KEY,
+			name     TEXT NOT NULL DEFAULT '',
+			members  TEXT NOT NULL DEFAULT '',
+			is_admin INTEGER NOT NULL DEFAULT 0,
+			left_at  INTEGER NOT NULL DEFAULT 0
 		);
+
+		-- Phase 14: group_events is the local replay/audit table for
+		-- admin-initiated group mutations. Populated by:
+		--   (a) live group_event broadcasts from the server (join, leave,
+		--       promote, demote, rename)
+		--   (b) offline replay entries from sync_batch.Events on reconnect
+		-- Reads feed the /audit one-shot overlay and any future history
+		-- surface that wants to show "who did what and when".
+		--
+		-- Unlike the server (DB-per-context), the client is single-DB
+		-- per server, so this is one table keyed by group_id rather than
+		-- one table per group-{id}.db file. ts is INTEGER (unix seconds)
+		-- to match the server's group_events.ts type — sync replay uses
+		-- the same sinceTS watermark for both events and messages.
+		CREATE TABLE IF NOT EXISTS group_events (
+			id       INTEGER PRIMARY KEY AUTOINCREMENT,
+			group_id TEXT NOT NULL,
+			event    TEXT NOT NULL,
+			user     TEXT NOT NULL,
+			by       TEXT NOT NULL DEFAULT '',
+			reason   TEXT NOT NULL DEFAULT '',
+			name     TEXT NOT NULL DEFAULT '',
+			quiet    INTEGER NOT NULL DEFAULT 0,
+			ts       INTEGER NOT NULL
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_group_events_group_ts ON group_events(group_id, ts);
 
 		-- 1:1 DMs (local cache of DM partner info).
 		-- left_at = 0 means active; >0 means the user has /delete'd this
