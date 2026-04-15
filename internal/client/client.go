@@ -1197,6 +1197,23 @@ func (c *Client) DisplayRoomName(roomID string) string {
 	return roomID
 }
 
+// DisplayRoomTopic returns the topic for a room nanoid ID, or an empty
+// string if no topic is set (or the room isn't cached yet). Phase 18:
+// parallel to DisplayRoomName, wraps the store helper so TUI code can
+// read topics without touching the store directly. Empty-string return
+// lets the render layer omit the topic line cleanly via `if topic != ""`.
+//
+// Live topic updates after the initial room_list are deferred to Phase 16
+// (CLI audit + `room_updated` broadcast) — today's resolver reads whatever
+// the most recent room_list persisted, which is "current topic as of last
+// reconnect". Good enough for the display-only scope of Phase 18.
+func (c *Client) DisplayRoomTopic(roomID string) string {
+	if c.store != nil {
+		return c.store.GetRoomTopic(roomID)
+	}
+	return ""
+}
+
 // GroupMembers returns the member list for a group DM.
 func (c *Client) GroupMembers(groupID string) []string {
 	c.mu.RLock()

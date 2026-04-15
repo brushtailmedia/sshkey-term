@@ -163,6 +163,8 @@ The `Client` struct (`internal/client/client.go`) maintains several in-memory ca
 
 **Phase 14 admin accessors:** `Client.GroupAdmins(groupID) []string` returns the sorted admin list for a group; `Client.IsGroupAdmin(groupID, userID) bool` is the point query used by the TUI pre-check before sending admin verbs. `Client.FindUserByName(name) string` resolves a display name to a user ID — used by `/add`, `/kick`, and friends to map `@alice` arguments to `usr_abc123`.
 
+**Phase 18 topic accessor:** `Client.DisplayRoomTopic(roomID) string` returns the topic for a room nanoid ID, reading from the local `rooms` table (populated on every `room_list` refresh). Parallel to `Client.DisplayRoomName`. Returns empty string when no topic is set or when the room isn't cached yet — the render layer uses `if topic != ""` to omit the topic line cleanly. Used by both the messages pane two-line header and the info panel `Topic:` line. Live topic updates after the initial `room_list` are deferred to a future phase (CLI audit + `room_updated` broadcast); today's resolver reads whatever the most recent `room_list` persisted, which is "current topic as of last reconnect".
+
 **Startup sequence:** On connect, the client receives the handshake messages in order (see PROTOCOL.md handshake section). Each handler populates its cache AND persists to the local DB where applicable. On reconnect, the same sequence runs — server sends only what changed since `last_synced`.
 
 **Room display names** are resolved via `DisplayRoomName(roomID)` which reads from the `rooms` table. The TUI's `resolveRoomName` callback wraps this for render-time resolution. No separate in-memory room name cache — the DB is fast enough via SQLCipher's page cache.
@@ -219,6 +221,12 @@ All five pre-check the local `is_admin` flag before opening the dialog. Non-admi
 | `/groupinfo` | Group | Opens the info panel (Ctrl+I equivalent) |
 | `/audit [N]` | Group | Read-only overlay, reads recent rows from local `group_events` table |
 | `/undo` | Group (admin) | Reverts the local user's most recent kick within 30 seconds by sending `add_to_group` for the kicked target |
+
+### Topic command (Phase 18) — local-only, rooms only
+
+| Command | Context | Action |
+|---|---|---|
+| `/topic` | Room | Status bar: "#general — General chat, please be nice" or "#general has no topic set". In group/DM contexts, rejects with "/topic is only available in rooms". Pure local read via `Client.DisplayRoomTopic`; no server interaction. Changing a topic (`/topic <new text>`) is deferred to the Admin CLI audit phase. |
 
 ### Local toggle (no server interaction)
 

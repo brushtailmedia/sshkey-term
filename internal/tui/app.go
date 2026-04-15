@@ -725,6 +725,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Check if sidebar selected a new room/conversation
 			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group {
 				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
+				a.applyRoomTopic()
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
@@ -1358,6 +1359,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.DM != "" {
 			a.messages.SetContext("", "", msg.DM)
 		}
+		a.applyRoomTopic()
 		a.syncMessagesLeftState()
 		a.messages.LoadFromDB(a.client)
 		a.messages.ScrollToMessage(msg.MessageID)
@@ -1600,6 +1602,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.infoPanel.resolveRoomName = a.client.DisplayRoomName
 		if len(a.client.Rooms()) > 0 {
 			a.messages.SetContext(a.client.Rooms()[0], "", "")
+			a.applyRoomTopic()
 			a.syncMessagesLeftState()
 			a.messages.LoadFromDB(a.client)
 			// Set up member list for @completion
@@ -1803,6 +1806,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			// Switch to selected room/conversation
 			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group {
 				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
+				a.applyRoomTopic()
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
@@ -1921,6 +1925,21 @@ func (a *App) setUnreadDividerAfter(lastReadID string) {
 	}
 }
 
+// applyRoomTopic pushes the current context's room topic into the
+// messages model so the two-line header can render it (Phase 18). Called
+// from every call site that runs SetContext with a non-empty room. Safe
+// to call with group/DM contexts — the resolver returns empty for those
+// and SetRoomTopic("") omits the topic line cleanly. Also safe when the
+// client is nil (first-run wizard or pre-connect): messages model just
+// renders line 1 only until the next context switch.
+func (a *App) applyRoomTopic() {
+	if a.client == nil || a.messages.room == "" {
+		a.messages.SetRoomTopic("")
+		return
+	}
+	a.messages.SetRoomTopic(a.client.DisplayRoomTopic(a.messages.room))
+}
+
 // syncMessagesLeftState updates the messages model's "left" and
 // "roomRetired" flags based on the current context (room or group DM).
 // Called after any SetContext to keep the read-only indicator in sync
@@ -2024,6 +2043,7 @@ func (a *App) switchToSidebarSelection() {
 		return
 	}
 	a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
+	a.applyRoomTopic()
 	a.syncMessagesLeftState()
 	a.messages.LoadFromDB(a.client)
 	if a.memberPanel.IsVisible() {
@@ -2396,7 +2416,33 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		a.handleGroupcreateCommand(sc)
 	case "/dmcreate":
 		a.handleDmcreateCommand(sc)
+	case "/topic":
+		a.handleTopicCommand(sc)
 	}
+}
+
+// handleTopicCommand (Phase 18) surfaces the current room topic in the
+// status bar. Read-only — changing a topic is deferred to Phase 16 with
+// the CLI audit + room_updated broadcast work. In a room context with a
+// topic set, shows "#name — topic text". In a room with no topic, shows
+// "#name has no topic set". In a group or 1:1 DM context, shows
+// "/topic is only available in rooms" — groups have no topics by design.
+func (a *App) handleTopicCommand(sc *SlashCommandMsg) {
+	if sc.Room == "" {
+		a.statusBar.SetError("/topic is only available in rooms")
+		return
+	}
+	if a.client == nil {
+		a.statusBar.SetError("/topic unavailable — not connected")
+		return
+	}
+	name := a.client.DisplayRoomName(sc.Room)
+	topic := a.client.DisplayRoomTopic(sc.Room)
+	if topic == "" {
+		a.statusBar.SetError("#" + name + " has no topic set")
+		return
+	}
+	a.statusBar.SetError("#" + name + " — " + topic)
 }
 
 // Phase 14 Chunk 6 command handlers ------------------------------------

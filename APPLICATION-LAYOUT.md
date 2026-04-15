@@ -11,26 +11,34 @@ Three-panel layout. Member panel is toggleable.
 ```
 ┌─ sshkey-term ─── ● Personal │ Work ──────────────────────────────────────┐
 │                                                                           │
-│  ┌─ Sidebar ────┐  ┌─ #room / DM name ──────────────────────────────┐   │
-│  │              │  │  ▶ N pinned messages (rooms only, if any)       │   │
-│  │  Rooms       │  ├─────────────────────────────────────────────────┤   │
-│  │  # general  ◀│  │                                                 │   │
-│  │  # engineer  │  │  message stream                                 │   │
-│  │  # design    │  │                                                 │   │
-│  │              │  │                                                 │   │
-│  ├──────────────┤  │                                                 │   │
-│  │  Messages    │  │                                                 │   │
-│  │  ● Bob       │  │                                                 │   │
-│  │  Carol    (2)│  │  ── alice is typing... ─────────────────────    │   │
-│  │  Project A   │  │                                                 │   │
-│  ├──────────────┤  ├─────────────────────────────────────────────────┤   │
-│  │  DMs         │  │ > input                                         │   │
-│  │  ● Dave    ✓ │  └─────────────────────────────────────────────────┘   │
-│  └──────────────┘                                                        │
+│  ┌─ Sidebar ────┐  ┌──────────────────────────────────────────────────┐  │
+│  │              │  │   #general                                        │  │
+│  │  Rooms       │  │   General chat — please be nice                   │  │
+│  │  # general  ◀│  │                                                   │  │
+│  │  # engineer  │  │  ▶ N pinned messages (rooms only, if any)         │  │
+│  │  # design    │  ├───────────────────────────────────────────────────┤  │
+│  │              │  │                                                   │  │
+│  ├──────────────┤  │  message stream                                   │  │
+│  │  Messages    │  │                                                   │  │
+│  │  ● Bob       │  │                                                   │  │
+│  │  Carol    (2)│  │  ── alice is typing... ─────────────────────      │  │
+│  │  Project A   │  │                                                   │  │
+│  ├──────────────┤  ├───────────────────────────────────────────────────┤  │
+│  │  DMs         │  │ > input                                           │  │
+│  │  ● Dave    ✓ │  └───────────────────────────────────────────────────┘  │
+│  └──────────────┘                                                         │
 │                                                                           │
 │  E2E encrypted · 3 members · epoch 12                          alice ●   │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Messages pane header (Phase 18).** The messages pane shows a two-line header pinned at the top:
+- **Line 1** — bold context title. Room display name in room contexts, group name in group contexts, other party's display name in 1:1 DMs. Falls back to "no room selected" when nothing is selected.
+- **Line 2** — dim italic room topic. **Rooms only.** Omitted entirely for groups, 1:1 DMs, and rooms that have no topic set. When present, it shows the topic value the server served in the most recent `room_list` refresh (via `RoomInfo.Topic`).
+
+Phase 18 shipped the display-only path: the client already persists topics in the local `rooms` table (Phase 7b) and the server sends them on every `room_list`. Phase 18 just wires that data through to the TUI via `Client.DisplayRoomTopic(roomID)` → `MessagesModel.SetRoomTopic`. Changing a topic post-creation (via a CLI verb) and broadcasting a live update (`room_updated` event) is deferred to the Admin CLI audit phase.
+
+Header line 1 uses the `searchHeaderStyle` (bold, accent-colored) for visual consistency with the info panel title bar. Line 2 uses `helpDescStyle` (muted, dim italic) to visually subordinate the topic to the room name — the name is the primary identifier, the topic is context. A blank line separates the header from the message stream below.
 
 **Server tabs:** top bar shows tabs for each configured server. Active tab is highlighted. Connection dot to the left of the active server name. `Ctrl+1`/`Ctrl+2`/etc or click to switch servers. Single server = no tabs, just the server name.
 
@@ -408,7 +416,7 @@ Click or arrow keys to select. Type to filter emoji by name. `1`-`8` quick-selec
 │  messages, or /delete to remove        │
 │  from your view.                       │
 │                                        │
-│  Topic: General chat                   │
+│  Topic: General chat — please be nice  │
 │                                        │
 │  Muted: [off]  (press m to toggle)     │
 │                                        │
@@ -423,6 +431,8 @@ Click or arrow keys to select. Type to filter emoji by name. `1`-`8` quick-selec
 │  Enter=message  m=mute  Esc=close      │
 └────────────────────────────────────────┘
 ```
+
+The `Topic:` line (Phase 18) is populated from the client's local `rooms` table via `Client.DisplayRoomTopic(roomID)`. When the room has no topic set, the line is omitted entirely — the existing `if i.topic != ""` guard has been in the render code since v0.1.0; Phase 18 just populates the field. Topic updates are picked up on reconnect (when the server re-sends `room_list`); live updates via `room_updated` broadcast are deferred to the Admin CLI audit phase.
 
 ### Room Info Panel (retired state)
 

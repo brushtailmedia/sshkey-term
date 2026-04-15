@@ -145,6 +145,7 @@ func (h HelpModel) View(width, height int) string {
 		{cmd: "/leave", desc: "leave room or group DM"},
 		{cmd: "/delete", desc: "delete conversation from your view"},
 		{cmd: "/mute", desc: "toggle mute"},
+		{cmd: "/topic", desc: "show room topic (rooms only)"},
 		{cmd: "/settings", desc: "open settings"},
 		{cmd: "/unverify <user>", desc: "remove verification"},
 		{cmd: "/pending", desc: "pending keys (admin)"},

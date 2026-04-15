@@ -162,6 +162,7 @@ All five admin verbs are scoped to the current group. Each runs a local pre-chec
 | Command | Context | Action |
 |---|---|---|
 | `/search [query]` | Any | Open search overlay (FTS5 if available, LIKE fallback) |
+| `/topic` | Room only | Show the current room topic in the status bar (read-only). Groups and 1:1 DMs show "only available in rooms". Rooms with no topic set show "has no topic set". Changing a topic is deferred to a future phase. |
 | `/help` | Any | Show available commands. In a group context where you are admin, admin verbs are included; elsewhere they are hidden (context-aware filtering). |
 | `/settings` | Any | Open settings panel |
 | `/verify [user]` | Any | Show safety number for user verification |

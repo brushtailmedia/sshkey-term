@@ -581,6 +581,58 @@ func TestRoomUpsertAndGet(t *testing.T) {
 	}
 }
 
+// Phase 18: GetRoomTopic read path for the two-line messages header
+// and info panel topic line. Empty-string semantics (not raw-ID
+// fallback) so the render layer can omit the topic line cleanly.
+func TestGetRoomTopic_ReturnsTopic(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.UpsertRoom("room_topic1", "general", "General chat — please be nice", 3); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	topic := s.GetRoomTopic("room_topic1")
+	if topic != "General chat — please be nice" {
+		t.Errorf("GetRoomTopic = %q, want %q", topic, "General chat — please be nice")
+	}
+}
+
+func TestGetRoomTopic_NoRow_ReturnsEmpty(t *testing.T) {
+	s := openTestStore(t)
+	// Room that was never upserted → no row in rooms table.
+	if topic := s.GetRoomTopic("room_does_not_exist"); topic != "" {
+		t.Errorf("GetRoomTopic on missing room = %q, want empty string", topic)
+	}
+}
+
+func TestGetRoomTopic_EmptyTopic_ReturnsEmpty(t *testing.T) {
+	s := openTestStore(t)
+	// Room exists but has no topic set — this is the common case for
+	// topicless rooms. Should return "" not fall back to anything.
+	if err := s.UpsertRoom("room_notopic", "quiet", "", 1); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if topic := s.GetRoomTopic("room_notopic"); topic != "" {
+		t.Errorf("GetRoomTopic on topicless room = %q, want empty string", topic)
+	}
+}
+
+func TestGetRoomTopic_UpdatedOnSecondUpsert(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.UpsertRoom("room_upd", "eng", "Original topic", 2); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if topic := s.GetRoomTopic("room_upd"); topic != "Original topic" {
+		t.Errorf("initial topic = %q, want %q", topic, "Original topic")
+	}
+	// Re-upsert with a new topic (simulates the client receiving a
+	// refreshed room_list after the server-side topic changed).
+	if err := s.UpsertRoom("room_upd", "eng", "Updated topic", 2); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	if topic := s.GetRoomTopic("room_upd"); topic != "Updated topic" {
+		t.Errorf("updated topic = %q, want %q", topic, "Updated topic")
+	}
+}
+
 // -- FTS5 availability --
 
 func TestHasFTS_Unencrypted(t *testing.T) {

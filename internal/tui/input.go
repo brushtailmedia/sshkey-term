@@ -281,6 +281,15 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		if arg != "" {
 			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg}
 		}
+	case "/topic":
+		// Phase 18: read-only display of the current room's topic.
+		// Rooms only — groups have no topics by design, 1:1 DMs have
+		// neither. The app layer surfaces the topic (or "no topic set"
+		// fallback) via the status bar. Writing a new topic is
+		// deferred to Phase 16 with the CLI audit + room_updated
+		// broadcast work. This is purely a local read; no server
+		// interaction.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Room: room, Group: group, DM: dm}
 	}
 }
 

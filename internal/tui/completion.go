@@ -196,6 +196,8 @@ func completeCommands(prefix string) *CompletionModel {
 		// Phase 14 creation
 		{Text: "/groupcreate ", Display: "/groupcreate", Description: "create group DM"},
 		{Text: "/dmcreate ", Display: "/dmcreate", Description: "create 1:1 DM"},
+		// Phase 18 topic (read-only; rooms only)
+		{Text: "/topic", Display: "/topic", Description: "show room topic"},
 	}
 
 	query := strings.ToLower(prefix)

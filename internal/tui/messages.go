@@ -154,6 +154,7 @@ type MessagesModel struct {
 	room           string
 	group          string
 	dm             string
+	roomTopic      string // Phase 18: current room topic, rendered in the two-line header above the stream. Empty for groups/DMs/topicless rooms.
 	cursor         int  // selected message index (-1 = none)
 	scrollOffset   int
 	typingUsers    map[string]time.Time // user -> last typing time
@@ -212,6 +213,7 @@ func (m *MessagesModel) SetContext(room, group, dm string) {
 	m.room = room
 	m.group = group
 	m.dm = dm
+	m.roomTopic = "" // Phase 18: caller should call SetRoomTopic after when the new context is a room with a topic
 	m.messages = nil
 	m.cursor = -1
 	m.scrollOffset = 0
@@ -230,6 +232,21 @@ func (m *MessagesModel) SetContext(room, group, dm string) {
 	for k := range m.typingUsers {
 		delete(m.typingUsers, k)
 	}
+}
+
+// SetRoomTopic stores the current room topic for rendering in the two-line
+// header above the message stream. Phase 18. Empty string omits the topic
+// line entirely — groups and 1:1 DMs always pass "" since they have no
+// topics. Rooms without a topic also pass "".
+func (m *MessagesModel) SetRoomTopic(topic string) {
+	m.roomTopic = topic
+}
+
+// RoomTopic returns the current room topic (read-only accessor used by
+// /topic slash command). Empty string when no topic is set or the context
+// is not a room.
+func (m *MessagesModel) RoomTopic() string {
+	return m.roomTopic
 }
 
 // SetLeft marks the current context as archived (read-only). When true,
@@ -1016,7 +1033,15 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 func (m MessagesModel) View(width, height int, focused bool) string {
 	var b strings.Builder
 
-	// Header
+	// Header (Phase 18). Two lines pinned at the top of the messages
+	// pane inside the rounded border:
+	//   - Line 1: context title — room display name, group name, other
+	//     party's display name (1:1 DMs via resolveName), or fallback
+	//   - Line 2: room topic in dim italic — rooms only, omitted when
+	//     empty or when the context is a group / 1:1 DM / no-room
+	// Plus a blank separator line before the message stream begins.
+	// The header re-renders on every View() call so topic changes from
+	// reconnect (server re-sends room_list) are picked up automatically.
 	title := m.room
 	if title != "" && m.resolveRoomName != nil {
 		title = m.resolveRoomName(title)
@@ -1027,15 +1052,36 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 	if title == "" && m.dm != "" {
 		// For 1:1 DMs, use the DM ID as the title — the app layer will
 		// resolve it to the other party's display name via resolveName.
-		title = m.dm
+		if m.resolveName != nil {
+			title = m.resolveName(m.dm)
+		} else {
+			title = m.dm
+		}
 	}
 	if title == "" {
 		title = "no room selected"
 	}
 
+	// Line 1: bold title. searchHeaderStyle is already used by the info
+	// panel for analogous "title bar" rendering so it stays visually
+	// consistent across overlays.
+	b.WriteString(searchHeaderStyle.Render(" " + title))
+	b.WriteString("\n")
+
+	// Line 2: topic, rooms only, omitted when empty. helpDescStyle is
+	// the dim-italic muted style used elsewhere for secondary context.
+	headerLines := 2 // line 1 + blank separator
+	if m.room != "" && m.roomTopic != "" {
+		b.WriteString(helpDescStyle.Render(" " + m.roomTopic))
+		b.WriteString("\n")
+		headerLines = 3 // line 1 + line 2 + blank separator
+	}
+	b.WriteString("\n") // blank separator before the message stream
+
 	// Visible messages — bottom-aligned by default, but shifts up to
 	// keep the cursor visible when the user scrolls with keyboard/mouse.
-	visibleHeight := height - 2 // borders
+	// Subtract header lines so scroll math accounts for the pinned header.
+	visibleHeight := height - 2 - headerLines // borders + header
 	start := 0
 	if len(m.messages) > visibleHeight {
 		start = len(m.messages) - visibleHeight

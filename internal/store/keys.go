@@ -350,6 +350,26 @@ func (s *Store) GetRoomName(id string) string {
 	return name
 }
 
+// GetRoomTopic returns the topic for a room nanoid ID, or an empty string
+// if the room has no topic set (or is not in the local cache yet). Parallel
+// to GetRoomName — the server serves topics via RoomInfo.Topic on every
+// room_list refresh, and UpsertRoom persists them into the local rooms
+// table. Phase 18 wires this read path through to the TUI so the topic
+// renders in the messages header and info panel.
+//
+// Empty-string semantics (vs GetRoomName's raw-ID fallback): an unknown
+// room returns "" not the raw ID, because the render layer uses
+// `if topic != ""` to decide whether to show the topic line at all.
+// Showing a raw nanoid as the "topic" would be worse than showing nothing.
+func (s *Store) GetRoomTopic(id string) string {
+	var topic string
+	err := s.db.QueryRow(`SELECT topic FROM rooms WHERE id = ?`, id).Scan(&topic)
+	if err != nil {
+		return ""
+	}
+	return topic
+}
+
 // MarkRoomLeft marks a room as "left" (archived) on the client. The room
 // stays in the local DB and sidebar but is rendered read-only. Called when
 // the server confirms the user has left (via room_left echo).

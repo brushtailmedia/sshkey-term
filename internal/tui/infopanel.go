@@ -58,11 +58,19 @@ func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[stri
 	i.cursor = 0
 	i.left = false
 	i.retired = false
+	i.topic = "" // Phase 18: populated below via DisplayRoomTopic
+	i.name = ""
 	if c != nil {
 		if st := c.Store(); st != nil {
 			i.left = st.IsRoomLeft(room)
 			i.retired = st.IsRoomRetired(room)
 		}
+		// Phase 18: populate the topic field that the existing render
+		// code at line ~380 has been guarding with `if i.topic != ""`
+		// since v0.1.0 but never had data in until now. Read through
+		// DisplayRoomTopic so the call chain is uniform with the
+		// messages header which uses the same resolver.
+		i.topic = c.DisplayRoomTopic(room)
 	}
 
 	// Start with an empty member list — populated by SetRoomMembers when
