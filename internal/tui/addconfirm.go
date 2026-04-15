@@ -78,7 +78,7 @@ func (m AddConfirmModel) View(width int) string {
 		groupName = "this group"
 	}
 	b.WriteString("  Add " + errorStyle.Render(m.targetName) + " to " + errorStyle.Render(groupName) + "?\n\n")
-	b.WriteString("  They will see new messages from this point forward.\n")
+	b.WriteString("  " + m.targetName + " will see new messages from this point forward.\n")
 	b.WriteString("  They cannot decrypt messages sent before they were added.\n\n")
 	b.WriteString("  [y] Add  [n] Cancel\n")
 	return dialogStyle.Width(width - 4).Render(b.String())

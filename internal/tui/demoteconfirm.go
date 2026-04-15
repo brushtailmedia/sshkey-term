@@ -97,7 +97,7 @@ func (m DemoteConfirmModel) View(width int) string {
 		}
 	}
 	b.WriteString("\n")
-	b.WriteString("  They will lose the ability to add, remove, promote,\n")
+	b.WriteString("  " + m.targetName + " will lose the ability to add, remove, promote,\n")
 	b.WriteString("  or demote members. They remain a regular member of\n")
 	b.WriteString("  the group.\n\n")
 	b.WriteString("  The server will reject this if it would leave the\n")

@@ -91,8 +91,8 @@ func (m KickConfirmModel) View(width int) string {
 		b.WriteString(helpDescStyle.Render(fmt.Sprintf("  After: %d %s will remain.\n", remaining, membersLabel)))
 	}
 	b.WriteString("\n")
-	b.WriteString("  They will receive a notification that they were removed.\n")
-	b.WriteString("  They lose access to new messages in this group.\n")
+	b.WriteString("  " + m.targetName + " will receive a notification that they were removed.\n")
+	b.WriteString("  They will lose access to new messages in this group.\n")
 	b.WriteString("  Remaining members see a system message.\n\n")
 	b.WriteString("  [y] Remove  [n] Cancel\n")
 	return dialogStyle.Width(width - 4).Render(b.String())

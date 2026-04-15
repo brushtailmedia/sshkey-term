@@ -62,6 +62,16 @@ func (c *Client) storeRoomMessage(raw json.RawMessage) {
 }
 
 // storeGroupMessage decrypts and stores a group DM message in the local DB.
+//
+// Defense in depth for the new-member pre-join history gate: if decrypt
+// fails, drop the row entirely rather than persist an empty-body ghost.
+// The server-side filter (syncGroup + handleHistory joined_at gate) is
+// the source fix — this client-side drop catches any path where the
+// server ever sends a row we can't decrypt, which for a post-fix server
+// only happens if something regresses. A pre-join message has no
+// wrapped_key for the new member, so DecryptGroupMessage returns an
+// error and we skip InsertMessage entirely. Mirrors storeReaction's
+// "can't decrypt — don't persist garbage" pattern.
 func (c *Client) storeGroupMessage(raw json.RawMessage) {
 	if c.store == nil {
 		return
@@ -72,38 +82,34 @@ func (c *Client) storeGroupMessage(raw json.RawMessage) {
 		return
 	}
 
-	body := ""
-	replyTo := ""
-	var mentions []string
+	payload, err := c.DecryptGroupMessage(msg.WrappedKeys, msg.Payload)
+	if err != nil {
+		// No wrapped key for us, or key material missing — drop the
+		// row rather than leak metadata via an empty-body insert.
+		return
+	}
+
+	c.checkReplay(msg.From, payload.DeviceID, "", msg.Group, payload.Seq)
 
 	var attachments []store.StoredAttachment
-
-	payload, err := c.DecryptGroupMessage(msg.WrappedKeys, msg.Payload)
-	if err == nil {
-		body = payload.Body
-		replyTo = payload.ReplyTo
-		mentions = payload.Mentions
-		c.checkReplay(msg.From, payload.DeviceID, "", msg.Group, payload.Seq)
-
-		for _, a := range payload.Attachments {
-			attachments = append(attachments, store.StoredAttachment{
-				FileID:     a.FileID,
-				Name:       a.Name,
-				Size:       a.Size,
-				Mime:       a.Mime,
-				DecryptKey: a.FileKey, // group DMs: already base64-encoded per-file K_file
-			})
-		}
+	for _, a := range payload.Attachments {
+		attachments = append(attachments, store.StoredAttachment{
+			FileID:     a.FileID,
+			Name:       a.Name,
+			Size:       a.Size,
+			Mime:       a.Mime,
+			DecryptKey: a.FileKey, // group DMs: already base64-encoded per-file K_file
+		})
 	}
 
 	c.store.InsertMessage(store.StoredMessage{
 		ID:          msg.ID,
 		Sender:      msg.From,
-		Body:        body,
+		Body:        payload.Body,
 		TS:          msg.TS,
 		Group:       msg.Group,
-		ReplyTo:     replyTo,
-		Mentions:    mentions,
+		ReplyTo:     payload.ReplyTo,
+		Mentions:    payload.Mentions,
 		Attachments: attachments,
 	})
 }

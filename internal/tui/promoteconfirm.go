@@ -71,9 +71,9 @@ func (m PromoteConfirmModel) View(width int) string {
 	b.WriteString(searchHeaderStyle.Render(" Promote to admin?"))
 	b.WriteString("\n\n")
 	b.WriteString("  Promote " + errorStyle.Render(m.targetName) + " to admin?\n\n")
-	b.WriteString("  They can add, remove, promote, and demote any member\n")
-	b.WriteString("  (including you). All admins are peers — there is no\n")
-	b.WriteString("  protected tier.\n\n")
+	b.WriteString("  " + m.targetName + " will be able to add, remove, promote, and demote\n")
+	b.WriteString("  any member (including you). All admins are peers — there\n")
+	b.WriteString("  is no protected tier.\n\n")
 	b.WriteString("  [y] Promote  [n] Cancel\n")
 	return dialogStyle.Width(width - 4).Render(b.String())
 }
