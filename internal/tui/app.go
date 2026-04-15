@@ -84,6 +84,18 @@ type App struct {
 	// Phase 14 read-only overlays (/audit, /members, /admins)
 	auditOverlay       AuditOverlayModel
 	membersOverlay    MembersOverlayModel
+	// Phase 14 last-admin inline promote picker — shown when the
+	// server rejects /leave or /delete with ErrForbidden due to the
+	// caller being the only admin of a group that has other members.
+	lastAdminPicker    LastAdminPickerModel
+	// Tracks whether the pending /leave or /delete was actually a
+	// /delete — set by the LeaveConfirmMsg and DeleteGroupConfirmMsg
+	// handlers just before the wire send, cleared on next send or on
+	// successful echo. If ErrForbidden (last-admin) arrives while
+	// this is set, the picker is opened with TriggerDelete matching
+	// the original request.
+	pendingLastAdminGroup  string
+	pendingLastAdminDelete bool
 	// Phase 14 /undo state: last kick the local user performed.
 	// If /undo runs within undoWindow seconds, the kicked user is
 	// re-added via add_to_group. Cleared on any other admin action
@@ -371,6 +383,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.membersOverlay, cmd = a.membersOverlay.Update(msg)
 			return a, cmd
 		}
+		// Phase 14 last-admin picker intercepts all keys when active
+		if a.lastAdminPicker.IsVisible() {
+			var cmd tea.Cmd
+			a.lastAdminPicker, cmd = a.lastAdminPicker.Update(msg)
+			return a, cmd
+		}
 
 		// Phase 14 in-group admin verb dialogs intercept all keys
 		if a.addConfirm.IsVisible() {
@@ -543,6 +561,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "?":
 			if a.focus != FocusInput {
+				// Phase 14: same context-aware help filter as the
+				// /help slash command path.
+				showAdmin := false
+				if a.messages.group != "" {
+					showAdmin = a.isLocalAdminOfGroup(a.messages.group)
+				}
+				a.help.SetContext(showAdmin)
 				a.help.Toggle()
 				return a, nil
 			}
@@ -590,6 +615,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.client.RequestRoomMembers(a.messages.room)
 				}
 				a.input.SetMembers(a.activeMemberEntries())
+				a.input.SetNonMembers(a.activeNonMemberEntries())
 			}
 			return a, nil
 
@@ -707,6 +733,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						a.client.RequestRoomMembers(a.messages.room)
 					}
 					a.input.SetMembers(a.activeMemberEntries())
+				a.input.SetNonMembers(a.activeNonMemberEntries())
 				}
 				a.sendReadReceipt()
 			}
@@ -981,7 +1008,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// "group_left" echo before touching local state. The confirmation
 		// handler (case "group_left" below) does the DB write, sidebar
 		// refresh, messages-view flip, and status bar update.
+		//
+		// Phase 14: track the request so that a subsequent ErrForbidden
+		// (last-admin rejection) can open the inline promote picker
+		// with the right TriggerDelete flag.
 		if a.client != nil && msg.Group != "" {
+			a.pendingLastAdminGroup = msg.Group
+			a.pendingLastAdminDelete = false
 			if err := a.client.Enc().Encode(map[string]string{
 				"type":  "leave_group",
 				"group": msg.Group,
@@ -1118,11 +1151,50 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Idempotent: if the user has already left the group via /leave,
 		// the server still records the deletion intent and echoes back,
 		// so the same purge path runs.
+		//
+		// Phase 14: track as pending last-admin candidate with
+		// TriggerDelete=true so ErrForbidden opens the picker with
+		// the right follow-up.
 		if a.client != nil && msg.Group != "" {
+			a.pendingLastAdminGroup = msg.Group
+			a.pendingLastAdminDelete = true
 			if err := a.client.DeleteGroup(msg.Group); err != nil {
 				a.statusBar.SetError("Delete failed: " + err.Error())
 			}
 		}
+		return a, nil
+
+	case LastAdminPickerMsg:
+		// Phase 14: user picked a successor in the last-admin
+		// picker. Send promote_group_admin → then the original
+		// leave_group or delete_group. Server serializes writes so
+		// the leave/delete lands after the promote, satisfying the
+		// invariant. Clear pending state.
+		if a.client == nil || msg.Group == "" || msg.Successor == "" {
+			a.pendingLastAdminGroup = ""
+			a.pendingLastAdminDelete = false
+			return a, nil
+		}
+		if err := a.client.PromoteGroupAdmin(msg.Group, msg.Successor, false); err != nil {
+			a.statusBar.SetError("Promote failed: " + err.Error())
+			a.pendingLastAdminGroup = ""
+			a.pendingLastAdminDelete = false
+			return a, nil
+		}
+		if msg.TriggerDelete {
+			if err := a.client.DeleteGroup(msg.Group); err != nil {
+				a.statusBar.SetError("Delete failed: " + err.Error())
+			}
+		} else {
+			if err := a.client.Enc().Encode(map[string]string{
+				"type":  "leave_group",
+				"group": msg.Group,
+			}); err != nil {
+				a.statusBar.SetError("Leave failed: " + err.Error())
+			}
+		}
+		a.pendingLastAdminGroup = ""
+		a.pendingLastAdminDelete = false
 		return a, nil
 
 	case DeleteRoomConfirmMsg:
@@ -1533,6 +1605,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Set up member list for @completion
 			a.memberPanel.Refresh(a.client.Rooms()[0], "", a.client, a.sidebar.online)
 			a.input.SetMembers(a.activeMemberEntries())
+				a.input.SetNonMembers(a.activeNonMemberEntries())
 		}
 
 		a.statusBar.SetUser(a.client.DisplayName(a.client.UserID()), a.client.IsAdmin())
@@ -1664,6 +1737,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.addConfirm.IsVisible() || a.kickConfirm.IsVisible() || a.promoteConfirm.IsVisible() ||
 		a.demoteConfirm.IsVisible() || a.transferConfirm.IsVisible() ||
 		a.auditOverlay.IsVisible() || a.membersOverlay.IsVisible() ||
+		a.lastAdminPicker.IsVisible() ||
 		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
 		return a, nil
 	}
@@ -1737,6 +1811,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 						a.client.RequestRoomMembers(a.messages.room)
 					}
 					a.input.SetMembers(a.activeMemberEntries())
+				a.input.SetNonMembers(a.activeNonMemberEntries())
 				}
 				a.sendReadReceipt()
 			}
@@ -1957,6 +2032,7 @@ func (a *App) switchToSidebarSelection() {
 			a.client.RequestRoomMembers(a.messages.room)
 		}
 		a.input.SetMembers(a.activeMemberEntries())
+				a.input.SetNonMembers(a.activeNonMemberEntries())
 	}
 	a.sendReadReceipt()
 }
@@ -1977,6 +2053,67 @@ func (a *App) activeMemberEntries() []MemberEntry {
 		}
 		out = append(out, m)
 	}
+	return out
+}
+
+// buildLastAdminCandidates returns the non-admin, non-self, non-retired
+// members of a group — the pool of valid successor candidates for the
+// last-admin inline promote picker. Used by the error handler when
+// ErrForbidden (last-admin) arrives.
+func (a *App) buildLastAdminCandidates(groupID string) []pickerMember {
+	if a.client == nil {
+		return nil
+	}
+	self := a.client.UserID()
+	var out []pickerMember
+	for _, uid := range a.client.GroupMembers(groupID) {
+		if uid == self {
+			continue
+		}
+		if a.client.IsGroupAdmin(groupID, uid) {
+			continue
+		}
+		if retired, _ := a.client.IsRetired(uid); retired {
+			continue
+		}
+		out = append(out, pickerMember{
+			UserID:      uid,
+			DisplayName: a.client.DisplayName(uid),
+		})
+	}
+	return out
+}
+
+// activeNonMemberEntries is Phase 14's companion to activeMemberEntries.
+// Returns the users the client knows about (via the profile cache)
+// who are NOT currently members of the active group. Used to feed
+// /add completion — the target of /add is by definition not yet a
+// member. Empty in non-group contexts. Filters out retired users
+// and the local user themselves.
+func (a *App) activeNonMemberEntries() []MemberEntry {
+	if a.client == nil || a.messages.group == "" {
+		return nil
+	}
+	inGroup := make(map[string]bool)
+	for _, uid := range a.client.GroupMembers(a.messages.group) {
+		inGroup[uid] = true
+	}
+	var out []MemberEntry
+	a.client.ForEachProfile(func(p *protocol.Profile) {
+		if p.User == a.client.UserID() {
+			return
+		}
+		if inGroup[p.User] {
+			return
+		}
+		if retired, _ := a.client.IsRetired(p.User); retired {
+			return
+		}
+		out = append(out, MemberEntry{
+			UserID:      p.User,
+			DisplayName: p.DisplayName,
+		})
+	})
 	return out
 }
 
@@ -2142,6 +2279,15 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		}
 		a.settings.Show(a.appConfig, a.configDir, username, a.serverIdx)
 	case "/help":
+		// Phase 14: context-aware /help — show admin commands only
+		// when the local user is an admin of the currently-active
+		// group. In room/DM contexts the admin verbs are hidden
+		// regardless since they're group-only anyway.
+		showAdmin := false
+		if sc.Group != "" {
+			showAdmin = a.isLocalAdminOfGroup(sc.Group)
+		}
+		a.help.SetContext(showAdmin)
 		a.help.Toggle()
 	case "/pending":
 		if a.client == nil {
@@ -2600,7 +2746,8 @@ func (a *App) handleGroupAdminCommand(sc *SlashCommandMsg) {
 			a.leaveConfirm.Show(sc.Group, groupName)
 			return
 		}
-		a.kickConfirm.Show(sc.Group, groupName, targetID, targetName)
+		memberCount := len(a.client.GroupMembers(sc.Group))
+		a.kickConfirm.Show(sc.Group, groupName, targetID, targetName, memberCount)
 	case "/promote":
 		if a.client.IsGroupAdmin(sc.Group, targetID) {
 			a.statusBar.SetError(targetName + " is already an admin")
@@ -2612,7 +2759,9 @@ func (a *App) handleGroupAdminCommand(sc *SlashCommandMsg) {
 			a.statusBar.SetError(targetName + " is not an admin")
 			return
 		}
-		a.demoteConfirm.Show(sc.Group, groupName, targetID, targetName)
+		adminCount := len(a.client.GroupAdmins(sc.Group))
+		targetIsSelf := targetID == a.client.UserID()
+		a.demoteConfirm.Show(sc.Group, groupName, targetID, targetName, adminCount, targetIsSelf)
 	case "/transfer":
 		alreadyAdmin := a.client.IsGroupAdmin(sc.Group, targetID)
 		a.transferConfirm.Show(sc.Group, groupName, targetID, targetName, alreadyAdmin)
@@ -2913,6 +3062,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			if a.memberPanel.IsVisible() && a.messages.room == room {
 				a.memberPanel.SetRoomMembers(members, a.client, a.sidebar.online)
 				a.input.SetMembers(a.activeMemberEntries())
+				a.input.SetNonMembers(a.activeNonMemberEntries())
 			}
 		}
 	case "device_revoked":
@@ -3241,7 +3391,8 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		// local store, populated groupMembers / groupAdmins, and
 		// called MarkGroupRejoined. Here we add the group to the
 		// sidebar immediately and surface a toast-style status bar
-		// message so the user knows what happened.
+		// message + OS-level desktop notification so the user knows
+		// what happened even if the client isn't focused.
 		var m protocol.GroupAddedTo
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			a.sidebar.AddGroup(protocol.GroupInfo{
@@ -3256,6 +3407,10 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			}
 			addedBy := a.resolveDisplayName(m.AddedBy)
 			a.statusBar.SetError(addedBy + " added you to '" + groupName + "'")
+			// OS-level notification — fires even when the terminal
+			// isn't focused. Same helper used for room/DM message
+			// notifications. Title = the actor, body = the action.
+			SendDesktopNotification(addedBy, "added you to group '"+groupName+"'")
 		}
 	case "add_group_result", "remove_group_result", "promote_admin_result", "demote_admin_result":
 		// Phase 14: server ACKs for the admin verb the local user
@@ -3530,6 +3685,41 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		if m.Code == "username_taken" || m.Code == "invalid_profile" {
 			a.statusBar.SetError("Name change failed: " + m.Message)
 		}
+		// Phase 14 last-admin picker: when ErrForbidden arrives with
+		// the "last admin" message AND we have a pending /leave or
+		// /delete on this group, open the inline promote picker so
+		// the user can select a successor. The picker then sends
+		// promote + leave/delete in sequence.
+		if m.Code == "forbidden" && a.pendingLastAdminGroup != "" &&
+			strings.Contains(m.Message, "last admin") {
+			group := a.pendingLastAdminGroup
+			triggerDelete := a.pendingLastAdminDelete
+			a.pendingLastAdminGroup = ""
+			a.pendingLastAdminDelete = false
+			if a.client != nil {
+				candidates := a.buildLastAdminCandidates(group)
+				a.lastAdminPicker.Show(group, a.lookupGroupName(group), triggerDelete, candidates)
+			}
+			return nil
+		}
+		// Phase 14 stale-cache heuristic: when the server returns
+		// ErrUnknownGroup for the currently-active group, the most
+		// likely cause is that the local user's admin status changed
+		// (demoted on another device) between the last group_list and
+		// the attempted admin action. The raw "you are not a member"
+		// is misleading in that case — the user IS a member, just no
+		// longer an admin. Show a hint pointing at the info panel so
+		// they can refresh their view. Only fires when the group is
+		// still in our local store as an active (non-left) group,
+		// which rules out the legitimate "I was removed" case (that
+		// would have marked the group as left via group_left echo).
+		if m.Code == "unknown_group" && a.messages.group != "" {
+			if st := a.client.Store(); st != nil {
+				if !st.IsGroupLeft(a.messages.group) {
+					a.statusBar.SetError("Your admin status may have changed — try /groupinfo to refresh")
+				}
+			}
+		}
 	case "server_shutdown":
 		var m protocol.ServerShutdown
 		json.Unmarshal(msg.Raw, &m)
@@ -3695,6 +3885,9 @@ func (a App) View() string {
 	}
 	if a.membersOverlay.IsVisible() {
 		return a.membersOverlay.View(a.width)
+	}
+	if a.lastAdminPicker.IsVisible() {
+		return a.lastAdminPicker.View(a.width)
 	}
 	// Phase 14 in-group admin verb dialogs
 	if a.addConfirm.IsVisible() {

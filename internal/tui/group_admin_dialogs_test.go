@@ -93,7 +93,7 @@ func TestAddConfirm_ViewContainsTargetAndGroup(t *testing.T) {
 
 func TestKickConfirm_YEmitsMsgWithFields(t *testing.T) {
 	m := KickConfirmModel{}
-	m.Show("group_x", "Project X", "usr_bob", "Bob")
+	m.Show("group_x", "Project X", "usr_bob", "Bob", 5)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if cmd == nil {
 		t.Fatal("y should emit KickConfirmMsg")
@@ -109,7 +109,7 @@ func TestKickConfirm_YEmitsMsgWithFields(t *testing.T) {
 
 func TestKickConfirm_EscCancelsNoEmit(t *testing.T) {
 	m := KickConfirmModel{}
-	m.Show("group_x", "Project X", "usr_bob", "Bob")
+	m.Show("group_x", "Project X", "usr_bob", "Bob", 5)
 	m, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if m.IsVisible() || cmd != nil {
 		t.Errorf("Esc should hide and not emit, got visible=%v cmd=%v", m.IsVisible(), cmd)
@@ -118,12 +118,21 @@ func TestKickConfirm_EscCancelsNoEmit(t *testing.T) {
 
 func TestKickConfirm_ViewContainsRemoveLanguage(t *testing.T) {
 	m := KickConfirmModel{}
-	m.Show("group_x", "Project X", "usr_bob", "Bob")
+	m.Show("group_x", "Project X", "usr_bob", "Bob", 5)
 	view := m.View(80)
 	for _, frag := range []string{"Remove member", "Bob", "[y] Remove", "[n] Cancel"} {
 		if !strings.Contains(view, frag) {
 			t.Errorf("view missing fragment %q", frag)
 		}
+	}
+}
+
+func TestKickConfirm_ViewShowsRemainingMemberCount(t *testing.T) {
+	m := KickConfirmModel{}
+	m.Show("group_x", "Project X", "usr_bob", "Bob", 5)
+	view := m.View(80)
+	if !strings.Contains(view, "4 members will remain") {
+		t.Errorf("view should show resulting member count, got %q", view)
 	}
 }
 
@@ -160,7 +169,7 @@ func TestPromoteConfirm_ViewContainsImplicationText(t *testing.T) {
 
 func TestDemoteConfirm_YEmitsMsgWithFields(t *testing.T) {
 	m := DemoteConfirmModel{}
-	m.Show("group_x", "Project X", "usr_bob", "Bob")
+	m.Show("group_x", "Project X", "usr_bob", "Bob", 2, false)
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if cmd == nil {
 		t.Fatal("y should emit DemoteConfirmMsg")

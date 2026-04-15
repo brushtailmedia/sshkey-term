@@ -42,6 +42,15 @@ func (c *CompletionModel) Items() []CompletionItem {
 
 // Complete returns completion items for the current input.
 // Returns nil if no completion is active.
+//
+// Phase 14: when the input starts with an admin verb (/add, /kick,
+// /promote, /demote, /transfer, /role), @-mentions complete against
+// the CURRENT GROUP's member list rather than the full mention
+// pool. This prevents admins from trying to kick someone who isn't
+// in the group (which would fail with ErrUnknownGroup post-check).
+// For /add specifically, the target is NOT yet a member, so the
+// opposite filter applies — complete against everyone EXCEPT the
+// current group's members.
 func Complete(input string, cursorPos int, members []MemberEntry) *CompletionModel {
 	if cursorPos == 0 || len(input) == 0 {
 		return nil
@@ -66,6 +75,68 @@ func Complete(input string, cursorPos int, members []MemberEntry) *CompletionMod
 	default:
 		return nil
 	}
+}
+
+// CompleteWithContext is the Phase 14 variant of Complete that takes
+// additional context about the current command being typed. It
+// applies member-scoped filtering for admin verbs:
+//
+//   - /kick, /promote, /demote, /transfer, /role → only current
+//     group members (these verbs require the target to BE a member)
+//   - /add → only users who are NOT current group members (add
+//     target must not already be a member)
+//   - All other commands fall through to regular @-mention completion
+//
+// groupMembers is the member list of the currently-active group.
+// nonMemberPool is the broader profile pool used for /add completion.
+// Empty groupMembers or empty pool disables the respective filter.
+func CompleteWithContext(input string, cursorPos int, groupMembers []MemberEntry, nonMemberPool []MemberEntry) *CompletionModel {
+	if cursorPos == 0 || len(input) == 0 {
+		return nil
+	}
+	start := cursorPos - 1
+	for start > 0 && input[start-1] != ' ' {
+		start--
+	}
+	word := input[start:cursorPos]
+	if len(word) < 2 {
+		return nil
+	}
+
+	// Command completion (first word).
+	if strings.HasPrefix(word, "/") && start == 0 {
+		return completeCommands(word)
+	}
+
+	// @-mention completion — check if this is the argument slot of
+	// an admin verb and pick the right data source.
+	if strings.HasPrefix(word, "@") {
+		verb := leadingCommand(input)
+		switch verb {
+		case "/kick", "/promote", "/demote", "/transfer", "/role":
+			// Current-group members only.
+			return completeMentions(word, groupMembers)
+		case "/add":
+			// Non-members only (target must not already be in the group).
+			return completeMentions(word, nonMemberPool)
+		default:
+			return completeMentions(word, groupMembers)
+		}
+	}
+	return nil
+}
+
+// leadingCommand extracts the leading slash command from an input
+// line, or returns "" if the line doesn't start with one. Used by
+// CompleteWithContext to detect admin-verb completion contexts.
+func leadingCommand(input string) string {
+	if !strings.HasPrefix(input, "/") {
+		return ""
+	}
+	if space := strings.IndexByte(input, ' '); space > 0 {
+		return input[:space]
+	}
+	return input
 }
 
 func completeMentions(prefix string, members []MemberEntry) *CompletionModel {
@@ -97,7 +168,7 @@ func completeCommands(prefix string) *CompletionModel {
 		{Text: "/react ", Display: "/react", Description: "add reaction"},
 		{Text: "/pin", Display: "/pin", Description: "pin message"},
 		{Text: "/delete", Display: "/delete", Description: "delete message"},
-		{Text: "/rename ", Display: "/rename", Description: "rename group"},
+		{Text: "/rename ", Display: "/rename", Description: "rename group (admin)"},
 		{Text: "/upload ", Display: "/upload", Description: "upload file"},
 		{Text: "/verify ", Display: "/verify", Description: "verify user"},
 		{Text: "/unverify ", Display: "/unverify", Description: "remove verification"},
@@ -108,6 +179,23 @@ func completeCommands(prefix string) *CompletionModel {
 		{Text: "/pending", Display: "/pending", Description: "pending keys (admin)"},
 		{Text: "/mykey", Display: "/mykey", Description: "copy public key"},
 		{Text: "/help", Display: "/help", Description: "show help"},
+		// Phase 14 admin verbs
+		{Text: "/add ", Display: "/add", Description: "add member (admin)"},
+		{Text: "/kick ", Display: "/kick", Description: "remove member (admin)"},
+		{Text: "/promote ", Display: "/promote", Description: "promote to admin"},
+		{Text: "/demote ", Display: "/demote", Description: "demote from admin"},
+		{Text: "/transfer ", Display: "/transfer", Description: "promote + leave"},
+		// Phase 14 status commands
+		{Text: "/members", Display: "/members", Description: "list members"},
+		{Text: "/admins", Display: "/admins", Description: "list admins"},
+		{Text: "/role ", Display: "/role", Description: "show user's role"},
+		{Text: "/whoami", Display: "/whoami", Description: "show your role"},
+		{Text: "/groupinfo", Display: "/groupinfo", Description: "group info panel"},
+		{Text: "/audit", Display: "/audit", Description: "recent admin actions"},
+		{Text: "/undo", Display: "/undo", Description: "revert last kick (30s)"},
+		// Phase 14 creation
+		{Text: "/groupcreate ", Display: "/groupcreate", Description: "create group DM"},
+		{Text: "/dmcreate ", Display: "/dmcreate", Description: "create 1:1 DM"},
 	}
 
 	query := strings.ToLower(prefix)

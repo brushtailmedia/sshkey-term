@@ -23,9 +23,24 @@ var (
 		Foreground(lipgloss.Color("#64748B"))
 )
 
-// HelpModel manages the help overlay.
+// HelpModel manages the help overlay. Phase 14 added context-aware
+// rendering: the showAdminCommands flag controls whether in-group
+// admin verbs (/add, /kick, /promote, /demote, /transfer, /rename)
+// appear in the slash-command list. Set by the App based on the
+// local user's admin status in the currently-active group. When the
+// user is not an admin (or not in a group context), admin verbs are
+// hidden so the help list doesn't advertise commands the server
+// would reject anyway.
 type HelpModel struct {
-	visible bool
+	visible           bool
+	showAdminCommands bool
+}
+
+// SetContext updates the help overlay's context-awareness flags.
+// Called from app.go before Show/Toggle so the help list reflects
+// the current group state.
+func (h *HelpModel) SetContext(showAdminCommands bool) {
+	h.showAdminCommands = showAdminCommands
 }
 
 func (h *HelpModel) Toggle() {
@@ -113,20 +128,42 @@ func (h HelpModel) View(width, height int) string {
 		b.WriteString(leftPadded + right + "\n")
 	}
 
-	// Slash commands
-	commands := []struct{ cmd, desc string }{
-		{"/help", "this screen"},
-		{"/search <query>", "search messages"},
-		{"/upload <path>", "upload a file"},
-		{"/verify <user>", "verify safety number"},
-		{"/rename <name>", "rename group DM"},
-		{"/leave", "leave room or group DM"},
-		{"/delete", "delete conversation from your view"},
-		{"/mute", "toggle mute"},
-		{"/settings", "open settings"},
-		{"/unverify <user>", "remove verification"},
-		{"/pending", "pending keys (admin)"},
-		{"/mykey", "copy public key"},
+	// Slash commands. Phase 14: admin-gated verbs are included only
+	// when showAdminCommands is true (local user is an admin of the
+	// currently-active group). Status commands that don't mutate
+	// state (/members, /admins, /role, /whoami, /groupinfo, /audit)
+	// are always shown.
+	type cmdEntry struct {
+		cmd, desc string
+		adminOnly bool
+	}
+	commands := []cmdEntry{
+		{cmd: "/help", desc: "this screen"},
+		{cmd: "/search <query>", desc: "search messages"},
+		{cmd: "/upload <path>", desc: "upload a file"},
+		{cmd: "/verify <user>", desc: "verify safety number"},
+		{cmd: "/leave", desc: "leave room or group DM"},
+		{cmd: "/delete", desc: "delete conversation from your view"},
+		{cmd: "/mute", desc: "toggle mute"},
+		{cmd: "/settings", desc: "open settings"},
+		{cmd: "/unverify <user>", desc: "remove verification"},
+		{cmd: "/pending", desc: "pending keys (admin)"},
+		{cmd: "/mykey", desc: "copy public key"},
+		// Phase 14 status commands (group-context, any member)
+		{cmd: "/members", desc: "list group members"},
+		{cmd: "/admins", desc: "list group admins"},
+		{cmd: "/role <user>", desc: "show a user's role"},
+		{cmd: "/whoami", desc: "show your own role"},
+		{cmd: "/groupinfo", desc: "open group info panel"},
+		{cmd: "/audit [N]", desc: "recent admin actions"},
+		// Phase 14 admin verbs (group-context, admin-only)
+		{cmd: "/add <user>", desc: "add member to group", adminOnly: true},
+		{cmd: "/kick <user>", desc: "remove member from group", adminOnly: true},
+		{cmd: "/promote <user>", desc: "promote member to admin", adminOnly: true},
+		{cmd: "/demote <user>", desc: "demote admin to member", adminOnly: true},
+		{cmd: "/transfer <user>", desc: "promote + leave (hand off)", adminOnly: true},
+		{cmd: "/rename <name>", desc: "rename group DM", adminOnly: true},
+		{cmd: "/undo", desc: "revert last kick (30s)", adminOnly: true},
 	}
 
 	b.WriteString("\n")
@@ -135,6 +172,9 @@ func (h HelpModel) View(width, height int) string {
 	b.WriteString("  " + strings.Repeat("─", 52))
 	b.WriteString("\n")
 	for _, c := range commands {
+		if c.adminOnly && !h.showAdminCommands {
+			continue
+		}
 		b.WriteString("  " + helpKeyStyle.Render(padRight(c.cmd, 20)) + " " + helpDescStyle.Render(c.desc) + "\n")
 	}
 

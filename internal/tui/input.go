@@ -31,6 +31,10 @@ type InputModel struct {
 	lastTypingSent time.Time        // throttle typing indicators
 	completion     *CompletionModel  // active completion popup
 	members        []MemberEntry    // current room/group members for @completion
+	// Phase 14: non-member pool for /add target completion. Populated
+	// alongside members from the client's profile cache, filtered to
+	// users NOT in the current group. Empty in non-group contexts.
+	nonMembers     []MemberEntry
 	pendingCmd     *SlashCommandMsg // slash command needing app-level handling
 	didSend        bool             // true after a message was sent (cleared by DidSend)
 }
@@ -84,10 +88,13 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 
 	switch msg.String() {
 	case "tab":
-		// Trigger completion
+		// Trigger completion. Phase 14: use CompleteWithContext so
+		// admin-verb @-arguments filter to the right data source
+		// (current group members for /kick, /promote, /demote,
+		// /transfer, /role; non-members for /add).
 		text := i.textInput.Value()
 		pos := i.textInput.Position()
-		i.completion = Complete(text, pos, i.members)
+		i.completion = CompleteWithContext(text, pos, i.members, i.nonMembers)
 		return i, nil
 	case "enter":
 		text := strings.TrimSpace(i.textInput.Value())
@@ -301,6 +308,14 @@ type MemberEntry struct {
 // SetMembers updates the member list for @completion.
 func (i *InputModel) SetMembers(members []MemberEntry) {
 	i.members = members
+}
+
+// SetNonMembers updates the non-member pool used by /add completion.
+// Should be called alongside SetMembers when the active context is a
+// group — list of all users the client knows about MINUS those in
+// the current group. Empty in non-group contexts. Phase 14.
+func (i *InputModel) SetNonMembers(nonMembers []MemberEntry) {
+	i.nonMembers = nonMembers
 }
 
 // ExtractMentions scans the message body for @displayName patterns and

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -9,15 +10,19 @@ import (
 // KickConfirmModel is the y/n confirmation dialog for /kick (admin
 // removal from a group). Phase 14.
 //
-// The plan wants richer contextual content here ("Alice joined 2 weeks
-// ago"), but that lives in Chunk 6 alongside the other render polish.
-// This minimum-viable dialog just confirms the action with target name.
+// Phase 14 deferred-items pass: dialog now shows the current member
+// count so the admin sees the impact before confirming. Join date per
+// member would require extending the protocol (server doesn't return
+// joined_at to clients today), so that's skipped — member count is
+// the information-dense summary we can surface without new wire
+// fields.
 type KickConfirmModel struct {
-	visible    bool
-	group      string
-	groupName  string
-	targetID   string
-	targetName string
+	visible     bool
+	group       string
+	groupName   string
+	targetID    string
+	targetName  string
+	memberCount int // total members in the group at Show() time
 }
 
 // KickConfirmMsg is emitted when the user confirms /kick. The app
@@ -27,12 +32,13 @@ type KickConfirmMsg struct {
 	TargetID string
 }
 
-func (m *KickConfirmModel) Show(groupID, groupName, targetID, targetName string) {
+func (m *KickConfirmModel) Show(groupID, groupName, targetID, targetName string, memberCount int) {
 	m.visible = true
 	m.group = groupID
 	m.groupName = groupName
 	m.targetID = targetID
 	m.targetName = targetName
+	m.memberCount = memberCount
 }
 
 func (m *KickConfirmModel) Hide() {
@@ -41,6 +47,7 @@ func (m *KickConfirmModel) Hide() {
 	m.groupName = ""
 	m.targetID = ""
 	m.targetName = ""
+	m.memberCount = 0
 }
 
 func (m *KickConfirmModel) IsVisible() bool {
@@ -74,7 +81,16 @@ func (m KickConfirmModel) View(width int) string {
 	if groupName == "" {
 		groupName = "this group"
 	}
-	b.WriteString("  Remove " + errorStyle.Render(m.targetName) + " from " + errorStyle.Render(groupName) + "?\n\n")
+	b.WriteString("  Remove " + errorStyle.Render(m.targetName) + " from " + errorStyle.Render(groupName) + "?\n")
+	if m.memberCount > 0 {
+		remaining := m.memberCount - 1
+		membersLabel := "members"
+		if remaining == 1 {
+			membersLabel = "member"
+		}
+		b.WriteString(helpDescStyle.Render(fmt.Sprintf("  After: %d %s will remain.\n", remaining, membersLabel)))
+	}
+	b.WriteString("\n")
 	b.WriteString("  They will receive a notification that they were removed.\n")
 	b.WriteString("  They lose access to new messages in this group.\n")
 	b.WriteString("  Remaining members see a system message.\n\n")
