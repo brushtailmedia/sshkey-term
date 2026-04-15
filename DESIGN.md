@@ -93,10 +93,25 @@ CREATE TABLE rooms (
 
 -- Group DMs (cached from server's group_list)
 CREATE TABLE groups (
-    id      TEXT PRIMARY KEY,
-    name    TEXT NOT NULL DEFAULT '',
-    members TEXT NOT NULL DEFAULT '',  -- comma-separated user IDs
-    left_at INTEGER NOT NULL DEFAULT 0
+    id       TEXT PRIMARY KEY,
+    name     TEXT NOT NULL DEFAULT '',
+    members  TEXT NOT NULL DEFAULT '',  -- comma-separated user IDs
+    left_at  INTEGER NOT NULL DEFAULT 0,
+    is_admin INTEGER NOT NULL DEFAULT 0  -- Phase 14: local user is admin of this group
+);
+
+-- Group audit events (Phase 14: populated from live group_event broadcasts
+-- and sync_batch.Events replay; feeds the /audit overlay)
+CREATE TABLE group_events (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id TEXT NOT NULL,
+    event    TEXT NOT NULL,     -- "join" | "leave" | "promote" | "demote" | "rename"
+    user     TEXT NOT NULL,     -- target of the event
+    by       TEXT NOT NULL,     -- acting admin (empty for self-leave/retirement)
+    reason   TEXT NOT NULL,     -- "" | "removed" | "retirement" | "retirement_succession"
+    name     TEXT NOT NULL,     -- new name for rename events
+    quiet    INTEGER NOT NULL,  -- 1 = suppress inline system message
+    ts       INTEGER NOT NULL
 );
 
 -- 1:1 DMs (cached from server's dm_list)
@@ -139,11 +154,14 @@ The `Client` struct (`internal/client/client.go`) maintains several in-memory ca
 |---|---|---|---|
 | `profiles` | `map[string]*protocol.Profile` | `profile` messages during handshake + real-time broadcasts | Overwritten per-user on new `profile` arrival |
 | `groupMembers` | `map[string][]string` | `group_list` + `group_created` | Rebuilt on reconnect from `group_list` |
+| `groupAdmins` (Phase 14) | `map[string]map[string]bool` | `group_list.Admins` + live `group_event{promote,demote}` + `sync_batch.Events` replay | Rebuilt on reconnect from `group_list`, updated live on broadcasts |
 | `dms` | `map[string][2]string` | `dm_list` + `dm_created` | Rebuilt on reconnect from `dm_list` |
 | `retired` | `map[string]string` | `retired_users` catchup + `user_retired` real-time + `profile` with `retired: true` | Append-only (retirement is monotonic) |
 | `epochKeys` | `map[string]map[int64][]byte` | `epoch_key` messages + `sync_batch` epoch keys | Append-only (new epochs added, old ones never removed) |
 | `currentEpoch` | `map[string]int64` | `epoch_key` messages | Overwritten when a newer epoch arrives for the same room |
 | `seqCounters` | `map[string]int64` | Loaded from `seq_marks` table on startup | Updated on every received message (high-water mark) |
+
+**Phase 14 admin accessors:** `Client.GroupAdmins(groupID) []string` returns the sorted admin list for a group; `Client.IsGroupAdmin(groupID, userID) bool` is the point query used by the TUI pre-check before sending admin verbs. `Client.FindUserByName(name) string` resolves a display name to a user ID — used by `/add`, `/kick`, and friends to map `@alice` arguments to `usr_abc123`.
 
 **Startup sequence:** On connect, the client receives the handshake messages in order (see PROTOCOL.md handshake section). Each handler populates its cache AND persists to the local DB where applicable. On reconnect, the same sequence runs — server sends only what changed since `last_synced`.
 
@@ -160,23 +178,47 @@ All slash commands are parsed in `internal/tui/input.go` `handleCommand()`. They
 | Command | Context | Action |
 |---|---|---|
 | `/typing` | Room, group, DM | Sends typing indicator to server |
-| `/rename <name>` | Group only | Sends `rename_group` to server immediately |
+| `/rename <name>` | Group only (admin) | Pre-checks local `is_admin`; sends `rename_group` if admin, otherwise shows a friendly status bar rejection |
 
 ### App-level dialogs (routed via `SlashCommandMsg`)
 
 | Command | Context | Action |
 |---|---|---|
-| `/leave` | Room, group | Opens confirmation dialog, sends `leave_room` or `leave_group` on confirm |
+| `/leave` | Room, group | Opens confirmation dialog, sends `leave_room` or `leave_group` on confirm. Groups: if the local user is the sole admin and the group has other members, the last-admin promote picker opens instead. |
 | `/leave` | DM | Rejected — status bar shows "/leave is not available for 1:1 DMs — use /delete" |
-| `/delete` | Room, group, DM | Opens context-aware confirmation dialog (active vs retired wording for rooms), sends appropriate delete verb on confirm |
+| `/delete` | Room, group, DM | Opens context-aware confirmation dialog (active vs retired wording for rooms), sends appropriate delete verb on confirm. Groups: same last-admin picker interception as `/leave`. |
 | `/verify <user>` | Any | Opens safety number verification overlay |
 | `/unverify <user>` | Any | Clears verification status, status bar confirmation |
 | `/search` | Any | Opens search overlay |
 | `/settings` | Any | Opens settings overlay |
-| `/help` | Any | Opens help screen |
+| `/help` | Any | Opens help screen (context-aware: admin command block shown only in groups where the user is an admin) |
 | `/pending` | Any (admin) | Opens pending key requests panel |
 | `/mykey` | Any | Shows current user's public key + fingerprint |
 | `/upload <path>` | Room, group, DM | Initiates file upload flow |
+
+### Group admin verbs (Phase 14) — dialog-mediated
+
+| Command | Context | Action |
+|---|---|---|
+| `/add @user` | Group (admin) | Opens `AddConfirmModel`; on confirm sends `add_to_group` |
+| `/kick @user` | Group (admin) | Opens `KickConfirmModel` with current member count; on confirm sends `remove_from_group` and records the kick for `/undo` |
+| `/promote @user` | Group (admin) | Opens `PromoteConfirmModel`; on confirm sends `promote_group_admin` |
+| `/demote @user` | Group (admin) | Opens `DemoteConfirmModel` with pre-demote admin count; on confirm sends `demote_group_admin` |
+| `/transfer @user` | Group (admin) | Opens `TransferConfirmModel`; on confirm sends `promote_group_admin` then `leave_group` atomically. If target is already an admin, flow collapses to just leaving. |
+
+All five pre-check the local `is_admin` flag before opening the dialog. Non-admin attempts produce an inline status-bar rejection before hitting the wire. The actual membership/admin check is enforced server-side on each verb — the client pre-check is UX polish, not security.
+
+### Group status commands (Phase 14) — local-only overlays
+
+| Command | Context | Action |
+|---|---|---|
+| `/members` | Group | Read-only overlay listing members with ★ admin markers |
+| `/admins` | Group | Read-only overlay pre-filtered to admins only |
+| `/role @user` | Group | Status bar: "Bob is an admin" / "Bob is a regular member" |
+| `/whoami` | Group | Status bar: "You are an admin of Project Alpha" / "You are a regular member" |
+| `/groupinfo` | Group | Opens the info panel (Ctrl+I equivalent) |
+| `/audit [N]` | Group | Read-only overlay, reads recent rows from local `group_events` table |
+| `/undo` | Group (admin) | Reverts the local user's most recent kick within 30 seconds by sending `add_to_group` for the kicked target |
 
 ### Local toggle (no server interaction)
 
@@ -186,7 +228,7 @@ All slash commands are parsed in `internal/tui/input.go` `handleCommand()`. They
 
 ### Wait-for-echo pattern
 
-All commands that mutate server state follow the same pattern: send the request, do NOT touch local state, wait for the server's echo message (`room_left`, `group_left`, `dm_left`, `room_deleted`, `group_deleted`), THEN update local state. This ensures multi-device consistency — if the server rejects the request, no local state was corrupted.
+All commands that mutate server state follow the same pattern: send the request, do NOT touch local state, wait for the server's echo message (`room_left`, `group_left`, `dm_left`, `room_deleted`, `group_deleted`, `add_group_result`, `remove_group_result`, `promote_admin_result`, `demote_admin_result`), THEN update local state. This ensures multi-device consistency — if the server rejects the request, no local state was corrupted.
 
 ---
 
@@ -368,3 +410,9 @@ Scenario: User A deletes the DM at T=100 (cutoff = 100). B sends a message at T=
 When a user `/leave`s a room on one device, other devices learn about it indirectly: the server's `room_list` on reconnect omits the room. The client's `room_list` handler walks its locally-active rooms and marks any missing from the server's response as `left_at = now`.
 
 This is a known architectural quirk — it works but is fragile because "not in the server list" can mean five different things (self-leave, self-delete, admin-kicked, retirement-removal, group-deleted-by-last-member) and the client cannot distinguish them. Phase 20 plans to replace this with server-authoritative `left_rooms` / `left_groups` sidecars.
+
+### `storeGroupMessage` defense in depth
+
+When a group message arrives but `DecryptGroupMessage` returns an error (no wrapped key for the local user, or key material missing), `storeGroupMessage` drops the row entirely rather than calling `InsertMessage` with an empty body. This mirrors `storeReaction`'s existing "can't decrypt — don't persist garbage" pattern and catches the edge case where a server regression sends a pre-join group message: the wrapped-key slot doesn't exist for the new member, decrypt fails, row drops.
+
+The primary defence against pre-join message leakage is the server-side `joined_at` gate in `syncGroup` and `handleHistory`; this client-side drop is the second layer. See the server's `groups_admin.md` "Pre-join history gate" section for the full write-up.

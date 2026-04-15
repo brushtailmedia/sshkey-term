@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Security
+- **Client-side defense in depth for the pre-join history gate** — `storeGroupMessage` in `internal/client/persist.go` now drops rows on `DecryptGroupMessage` failure instead of inserting an empty-body ghost. Primary defence is the server-side `joined_at` gate in `syncGroup`/`handleHistory`; this client drop catches any future path where the server regresses and sends a pre-join row. A pre-join group message has no wrapped key for the new member, so decrypt fails and the row is dropped silently. Mirrors the existing `storeReaction` "can't decrypt — don't persist garbage" pattern. See the server's `groups_admin.md` "Pre-join history gate" section for the full two-layer design.
+
 ### Changed
 - **Group DMs gained an in-group admin model (Phase 14)** — matches the server-side reversal of the "immutable peer DMs" decision. Group creators become the first admin; any admin can add/remove/promote/demote members. New `/add`, `/kick`, `/promote`, `/demote`, `/transfer` slash commands with confirmation dialogs. See `groups_admin.md` in the server repo for the full design.
 - **Info panel per-member admin flag** now reads from the in-memory group admin set (populated by `group_list` catchup + live `group_event{promote,demote}` broadcasts) instead of the global `profile.Admin` flag (which tracks server-wide admin status, unrelated to per-group governance).
@@ -32,6 +35,14 @@
 - **`group_added_to` handler** — when an admin adds the local user to an existing group, the client inserts the group into local state immediately and surfaces a toast-style status bar notification ("alice added you to 'Project X'").
 - **`/undo` 30-second kick revert** — tracks the last kick the local user performed; `/undo` within the window re-adds via `add_to_group`. Exactly one kick tracked, no stack.
 - **Protocol type mirrors** — nine new message types in `sshkey-term/internal/protocol/messages.go` (`AddToGroup`, `RemoveFromGroup`, `PromoteGroupAdmin`, `DemoteGroupAdmin`, four result echoes, and `GroupAddedTo`), plus extensions to `GroupEvent` (`By`/`Name`/`Quiet`), `GroupLeft` (`By`), `GroupCreated` (`Admins`), `GroupInfo` (`Admins`), `RenameGroup` (`Quiet`), `SyncBatch` (`Events`).
+- **Phase 14 deferred-items pass (post-Chunk-7)**:
+  - **Desktop notification for `group_added_to`** — toast-style notification when an admin adds the local user to an existing group, consistent with room-add notifications.
+  - **Stale-cache heuristic on `ErrUnknownGroup`** — when a request to a cached group fails with "unknown group", the client schedules a fresh `group_list` request on the next tick to refresh the cache, avoiding stuck state after a silent remove.
+  - **Rich dialog content** — `KickConfirmModel` now shows the current member count ("After: N members will remain"); `DemoteConfirmModel` shows the pre-demote admin count and warns when the resulting count is 1. `AddConfirmModel`, `PromoteConfirmModel`, `KickConfirmModel`, `DemoteConfirmModel` all use the target's display name in the first consequence line ("Bob will receive a notification") instead of the generic pronoun.
+  - **Context-aware `/help`** — `help.SetContext()` toggles the visibility of the admin command block based on whether the local user is an admin of the current group. Admins in groups see `/add`, `/kick`, `/promote`, `/demote`, `/transfer`, `/audit`, `/undo`, `/members`, `/admins`, `/role`, `/whoami`, `/groupinfo` in the help screen; everyone else sees the clean default list.
+  - **Group-member-scoped `@` autocomplete** — `CompleteWithContext()` detects the leading verb and routes the completion source: `/kick`, `/promote`, `/demote`, `/transfer`, `/role` complete against **current members**; `/add` completes against **non-members**. Plain `@` outside a verb uses the default member list.
+  - **Last-admin inline promote picker** — `LastAdminPickerModel` intercepts `/leave` and `/delete` when the local user is the sole admin of a group that has other members. Lists candidates, promotes the selection, then continues with the original leave/delete flow. The sole-member carve-out is respected — a solo admin with no other members leaves or deletes directly without picker interception.
+- **`TestHandleRemoveFromGroup_LastMemberCleanupOnKickedSoleMember`** — regression test ensuring that kicking the last remaining member runs the same last-member cleanup as a self-leave (deletes the group conversation row and unlinks the per-group DB file).
 - `rooms` table in client DB for room metadata persistence (id, name, topic, members)
 - `DisplayRoomName()` resolver — reads from local DB, falls back to raw ID
 - `resolveRoomName` callbacks in sidebar, messages header, quickswitch, infopanel, notifications

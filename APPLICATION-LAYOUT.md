@@ -93,13 +93,14 @@ Three sections: Rooms, Messages (group DMs), DMs (1:1).
 
 ```
 ├─ Messages ──┤
-│  ● Project A  │   ← group DM with name, online dot
-│  ● Team Chat  │   ← group DM with name
+│  ★ ● Project A│   ← group DM with name; ★ = you are an admin of this group
+│  ● Team Chat  │   ← group DM with name (you are a regular member)
 │  D, Eve, Fr   │   ← group DM without name, truncated member list
 │  Old Group [retired] (left)│  ← member retired + user left
 ```
 
 - Group DMs show the conversation name, or truncated member list if no name
+- **`★` admin marker (Phase 14)** — muted star glyph before the group name when the local user is an admin of that group. Updates live on `group_event{promote,demote}` via the `resolveIsLocalAdmin` callback; persisted in `groups.is_admin` so the indicator survives restarts.
 - Online indicator (●) if any member is online
 - `[retired]` marker — shown when any member of the group has a retired account
 - `(left)` marker — user self-left, greyed
@@ -182,8 +183,16 @@ Looks clean ^
   ── alice renamed the group to "Project Alpha" ──
   ── bob left the group ──
   ── bob was removed from the group by alice ──
+  ── alice added bob to the group ──
+  ── alice promoted bob to admin ──
+  ── alice removed admin from bob ──
+  ── alice added bob, carol, and dave to the group ──   (coalesced)
   ── this room was archived by an admin ──
 ```
+
+**Group event rendering (Phase 14).** All five `group_event` variants (`join`, `leave`, `promote`, `demote`, `rename`) render as system messages. The `by` field shows the acting admin ("alice promoted bob"), or is omitted for self-leave, retirement, and retirement-succession paths. The `quiet` flag suppresses inline rendering but still updates member/admin lists and persists to the local `group_events` table (visible in `/audit`).
+
+**Event coalescing.** Consecutive same-admin same-verb events within 10 seconds collapse into one system message ("alice added bob, carol, and dave"). Applies to `join`, `promote`, `demote`, and `leave` with `reason="removed"`; never coalesces self-leave, retirement, or `rename`. Individual events are still persisted un-coalesced.
 
 ### Deleted message (tombstone)
 
@@ -360,18 +369,21 @@ Click or arrow keys to select. Type to filter emoji by name. `1`-`8` quick-selec
 │                                        │
 │  Members (3):                          │
 │   [Admins]                             │
-│    ● alice (you)                       │
+│    ● alice (you) ★                     │
 │   [Members]                            │
 │    ● bob                               │
 │    ○ carol                             │
 │                                        │
 │  Enter=message  m=mute  Esc=close      │
+│  A=add  K=kick  P=promote  X=demote    │  (admin only)
 └────────────────────────────────────────┘
 ```
 
 - Members split into [Admins] and [Members] subsections, admins first
+- **`★` marker** on admin rows (Phase 14). The local admin set is sourced from `group_list` catchup + live `group_event{promote,demote}` broadcasts + offline `sync_batch.Events` replay.
 - Online/offline dot per member
 - Arrow-key focusable member rows, Enter opens DM or member menu
+- **Admin verb shortcuts** (Phase 14, group contexts only, admin only): `A`=add, `K`=kick, `P`=promote, `X`=demote on a focused member row. Each opens the corresponding confirmation dialog.
 - /leave and /delete hint at top (context-aware: active, left, retired)
 
 ### Group DM Info Panel (left state)
@@ -582,6 +594,147 @@ Same shape as Delete DM, with group-specific wording.
 │  [Esc] Cancel                        │
 └─────────────────────────────────────┘
 ```
+
+### Group admin confirmation dialogs (Phase 14)
+
+Five dialogs for the admin verbs — `AddConfirmModel`, `KickConfirmModel`, `PromoteConfirmModel`, `DemoteConfirmModel`, `TransferConfirmModel`. All five share the `y` / `Enter` / `n` / `Esc` convention and open over the current context without changing focus.
+
+**Add member:**
+
+```
+┌─ Add member? ───────────────────────┐
+│                                      │
+│  Add Bob to Project Alpha?           │
+│                                      │
+│  Bob will see new messages from this │
+│  point forward.                      │
+│  They cannot decrypt messages sent   │
+│  before they were added.             │
+│                                      │
+│  [y] Add  [n] Cancel                 │
+└─────────────────────────────────────┘
+```
+
+**Remove member (kick):**
+
+```
+┌─ Remove member? ────────────────────┐
+│                                      │
+│  Remove Bob from Project Alpha?      │
+│  After: 4 members will remain.       │
+│                                      │
+│  Bob will receive a notification     │
+│  that they were removed.             │
+│  They will lose access to new        │
+│  messages in this group.             │
+│  Remaining members see a system      │
+│  message.                            │
+│                                      │
+│  [y] Remove  [n] Cancel              │
+└─────────────────────────────────────┘
+```
+
+Post-kick member count comes from the local in-memory cache at dialog open time. The server may reject the kick if the target is no longer a member — no wire round-trip needed for the count display.
+
+**Promote to admin:**
+
+```
+┌─ Promote to admin? ─────────────────┐
+│                                      │
+│  Promote Bob to admin?               │
+│                                      │
+│  Bob will be able to add, remove,    │
+│  promote, and demote any member      │
+│  (including you). All admins are     │
+│  peers — there is no protected tier. │
+│                                      │
+│  [y] Promote  [n] Cancel             │
+└─────────────────────────────────────┘
+```
+
+**Demote admin:**
+
+```
+┌─ Demote admin? ─────────────────────┐
+│                                      │
+│  Demote Bob from admin?              │
+│  After: Project Alpha will have 1    │
+│  admin (you).                        │
+│  If you retire your account, the     │
+│  oldest remaining member will be     │
+│  auto-promoted as successor.         │
+│                                      │
+│  Bob will lose the ability to add,   │
+│  remove, promote, or demote members. │
+│  They remain a regular member of     │
+│  the group.                          │
+│                                      │
+│  The server will reject this if it   │
+│  would leave the group with zero     │
+│  admins.                             │
+│                                      │
+│  [y] Demote  [n] Cancel              │
+└─────────────────────────────────────┘
+```
+
+The "After: N admins remaining" line is computed from the local admin count before the demote. When the resulting count would be 1 (and the target is not the caller), the dialog also explains the retirement succession path.
+
+**Transfer admin (atomic promote-then-leave):**
+
+```
+┌─ Transfer and leave? ───────────────┐
+│                                      │
+│  Promote Bob to admin and then       │
+│  leave Project Alpha?                │
+│                                      │
+│  This is a two-step atomic handoff:  │
+│  Bob becomes an admin, then you      │
+│  leave the group.                    │
+│                                      │
+│  [y] Transfer  [n] Cancel            │
+└─────────────────────────────────────┘
+```
+
+If Bob is already an admin, the dialog text flips to "Bob is already an admin. Leave the group?" and the action becomes just a leave.
+
+### Last-admin promote picker (Phase 14)
+
+When a sole admin runs `/leave` or `/delete` on a group that has other members, this picker opens instead of the standard leave/delete confirmation. The user picks a successor who is promoted before the leave completes.
+
+```
+┌─ Choose a new admin ────────────────┐
+│                                      │
+│  You are the only admin of           │
+│  Project Alpha. Choose a member to   │
+│  promote before you leave.           │
+│                                      │
+│  ▶ bob                               │
+│    carol                             │
+│    dave                              │
+│                                      │
+│  Enter=promote and leave  Esc=cancel │
+└─────────────────────────────────────┘
+```
+
+List contains all non-admin members. Arrow keys navigate; Enter promotes the selected member then continues with the original leave/delete flow; Esc cancels (user stays in the group). The sole-member carve-out applies: if the group has only one member (the caller), the picker is skipped and `/leave` or `/delete` runs directly.
+
+### `/audit` overlay (Phase 14)
+
+```
+┌─ Audit — Project Alpha ─────────────┐
+│                                      │
+│  alice added bob       2h ago        │
+│  alice promoted bob    2h ago        │
+│  alice renamed the group             │
+│    "Project Alpha"     1h ago        │
+│  bob demoted carol     45m ago       │
+│  alice removed dave    10m ago       │
+│                                      │
+│  5 events · Esc=close                │
+└─────────────────────────────────────┘
+```
+
+Read-only overlay populated from the local `group_events` table. Default limit is 10; `/audit 50` bumps it. The events are the same rows replayed via `sync_batch.Events` on reconnect, so an offline admin catching up sees the full history on next connect.
 
 ---
 
@@ -1017,9 +1170,15 @@ Results show sender, timestamp, room/group context, and a snippet with the match
 │  Slash Commands: /leave /delete /rename /upload /verify /search      │
 │  /settings /help /pending /mykey /mute /unverify                     │
 │                                                                       │
+│  Group Admin (when you are admin of the current group):              │
+│  /add /kick /promote /demote /transfer /audit /undo                  │
+│  /members /admins /role /whoami /groupinfo                           │
+│                                                                       │
 │  Press Esc to close                                                   │
 └───────────────────────────────────────────────────────────────────────┘
 ```
+
+**Context-aware filtering (Phase 14).** The admin command block is only shown when the current context is a group DM AND the local user is an admin of that group. In rooms, 1:1 DMs, or groups where the user is a regular member, the admin block is hidden to reduce clutter. The toggle is driven by `help.SetContext()` on every context switch.
 
 ---
 
@@ -1096,6 +1255,8 @@ Background:       terminal default
 | System messages | muted `#64748B` | italic |
 | [retired] markers | muted `#64748B` | faint |
 | (left) / (retired) sidebar markers | muted `#64748B` | faint |
+| `★` sidebar admin marker (Phase 14) | muted `#64748B` | faint |
+| `★` info-panel admin marker (Phase 14) | muted `#64748B` | faint |
 | **Interactive** | | |
 | Selected sidebar item | accent `#7C3AED` | bg highlight |
 | Unread badge `(2)` | accent `#7C3AED` | bold |
