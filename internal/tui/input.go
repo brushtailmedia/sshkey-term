@@ -34,9 +34,18 @@ type InputModel struct {
 	// Phase 14: non-member pool for /add target completion. Populated
 	// alongside members from the client's profile cache, filtered to
 	// users NOT in the current group. Empty in non-group contexts.
-	nonMembers     []MemberEntry
-	pendingCmd     *SlashCommandMsg // slash command needing app-level handling
-	didSend        bool             // true after a message was sent (cleared by DidSend)
+	nonMembers []MemberEntry
+	pendingCmd *SlashCommandMsg // slash command needing app-level handling
+	didSend    bool             // true after a message was sent (cleared by DidSend)
+	// Phase 15: edit mode state. editMode is true when the user has
+	// pressed Up-arrow on an empty input and populated it with the body
+	// of a previously-sent message. editTarget is the message ID being
+	// edited. On Enter in edit mode the app dispatches the edit via
+	// Client.EditRoomMessage / EditGroupMessage / EditDMMessage based
+	// on the active context; on Esc the input clears and edit mode
+	// exits. editTarget is also cleared on context switch by the app.
+	editMode   bool
+	editTarget string
 }
 
 func NewInput() InputModel {
@@ -152,6 +161,50 @@ func (i *InputModel) SetReply(msgID, previewText string) {
 // (e.g., to check if a slash command is pending before allowing send).
 func (i InputModel) Value() string {
 	return i.textInput.Value()
+}
+
+// IsEmpty reports whether the input buffer contains any text. Used by
+// the app-layer Up-arrow handler to decide whether to enter edit mode
+// (only triggers on an empty buffer so normal cursor-up behavior in a
+// text editor isn't hijacked).
+func (i InputModel) IsEmpty() bool {
+	return i.textInput.Value() == ""
+}
+
+// EnterEditMode populates the input buffer with the given message body
+// and marks the input as editing the given message ID. Called by the
+// app-layer Up-arrow handler after finding the user's most recent
+// editable message in the current context (Phase 15).
+func (i *InputModel) EnterEditMode(msgID, body string) {
+	i.editMode = true
+	i.editTarget = msgID
+	i.textInput.SetValue(body)
+	i.textInput.SetCursor(len(body))
+}
+
+// ExitEditMode clears edit state without touching the input buffer.
+// Used by Enter (after dispatching the edit) and by context-switch
+// cleanup. Callers that also want to clear the buffer should call
+// ClearInput after this.
+func (i *InputModel) ExitEditMode() {
+	i.editMode = false
+	i.editTarget = ""
+}
+
+// ClearInput resets the text buffer to empty. Phase 15 cleanup helper.
+func (i *InputModel) ClearInput() {
+	i.textInput.Reset()
+}
+
+// IsEditing reports whether the input is currently in edit mode.
+func (i InputModel) IsEditing() bool {
+	return i.editMode
+}
+
+// EditTarget returns the message ID being edited (empty string when
+// not in edit mode).
+func (i InputModel) EditTarget() string {
+	return i.editTarget
 }
 
 func (i *InputModel) clearReply() {
@@ -386,6 +439,12 @@ func (i InputModel) View(width int, focused bool) string {
 			preview = preview[:width-23] + "..."
 		}
 		b.WriteString(replyRefStyle.Render(" ↳ replying to: " + preview))
+		b.WriteString("\n")
+	}
+
+	// Phase 15: edit mode indicator, same style as the reply indicator.
+	if i.editMode {
+		b.WriteString(replyRefStyle.Render(" ✎ editing message — Esc to cancel"))
 		b.WriteString("\n")
 	}
 

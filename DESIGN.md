@@ -228,6 +228,23 @@ All five pre-check the local `is_admin` flag before opening the dialog. Non-admi
 |---|---|---|
 | `/topic` | Room | Status bar: "#general — General chat, please be nice" or "#general has no topic set". In group/DM contexts, rejects with "/topic is only available in rooms". Pure local read via `Client.DisplayRoomTopic`; no server interaction. Changing a topic (`/topic <new text>`) is deferred to the Admin CLI audit phase. |
 
+### Message editing (Phase 15) — input-layer key bindings
+
+The edit shortcut lives on the input layer rather than the slash command table because it's invoked by a key press (`Up`) on an empty input, not by typing a command. Three app-layer hooks wire it together:
+
+| Hook | Action |
+|---|---|
+| `Up` on empty `FocusInput` (and context is not archived / DM-retired) | `tryEnterEditMode` scans backwards through the in-memory message list for the user's most recent non-deleted message; if found, `InputModel.EnterEditMode(msgID, body)` populates the buffer and flips `editMode = true` |
+| `Enter` while `InputModel.IsEditing()` | `dispatchEdit` routes to `Client.EditRoomMessage` / `EditGroupMessage` / `EditDMMessage` based on active context; buffer clears, edit mode exits |
+| `Esc` while `InputModel.IsEditing()` | Clear buffer, exit edit mode, no dispatch |
+| Any context switch (sidebar nav, quick switch, search jump) | `applyRoomTopic` also calls `ExitEditMode` + `ClearInput` so a half-finished edit never dispatches to the wrong conversation |
+
+**Preserve-and-replace pattern.** The three `Client.EditXMessage` methods all fetch the original decrypted message from the local store and copy `ReplyTo`, `Attachments`, `Previews` verbatim into the new payload before re-encrypting. `Mentions` are re-extracted from the new body (the new body is the authoritative source for highlight rendering + notification targeting). The server never sees these payload-internal fields — preservation is 100% client-side.
+
+**Key preservation for attachments.** Rooms: `FileEpoch` stays pinned to the original upload epoch so the file is still decryptable even when the edit targets the current epoch in the grace window. Groups/DMs: `FileKey` (K_file) is independent of K_msg and is copied verbatim, so a fresh K_msg on edit doesn't invalidate existing attachment decryption.
+
+**Error handling.** `edit_window_expired` and `edit_not_most_recent` errors from the server surface as status bar messages and cleanly exit edit mode; the input buffer is cleared so the user can retype. Byte-identical `unknown_room` / `unknown_group` / `unknown_dm` responses appear as the generic "not a member" error — the server never leaks "that message doesn't belong to you" or "that message is deleted" to a probing client.
+
 ### Local toggle (no server interaction)
 
 | Command | Context | Action |

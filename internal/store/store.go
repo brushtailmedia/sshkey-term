@@ -133,7 +133,8 @@ func (s *Store) init() error {
 			raw_payload     TEXT NOT NULL DEFAULT '',
 			deleted         INTEGER NOT NULL DEFAULT 0,
 			deleted_by      TEXT NOT NULL DEFAULT '',
-			attachments     TEXT NOT NULL DEFAULT ''
+			attachments     TEXT NOT NULL DEFAULT '',
+			edited_at       INTEGER NOT NULL DEFAULT 0
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room, ts) WHERE room != '';

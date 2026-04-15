@@ -395,6 +395,12 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		c.storeRoomMessage(raw)
 	case "group_message":
 		c.storeGroupMessage(raw)
+	case "edited":
+		c.storeEditedRoomMessage(raw)
+	case "group_edited":
+		c.storeEditedGroupMessage(raw)
+	case "dm_edited":
+		c.storeEditedDMMessage(raw)
 	case "group_created":
 		var g protocol.GroupCreated
 		if err := json.Unmarshal(raw, &g); err == nil {

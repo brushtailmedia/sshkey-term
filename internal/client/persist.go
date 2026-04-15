@@ -161,7 +161,105 @@ func (c *Client) storeDMMessage(raw json.RawMessage) {
 	})
 }
 
+// storeEditedRoomMessage applies an `edited` broadcast to the local DB.
+// Phase 15. Decrypts the new payload with the epoch key, extracts the
+// new body, and calls UpdateMessageEdited which replaces the body +
+// edited_at and clears any locally cached reactions on that message ID
+// (per Decision log Q12: client-side unconditional clear on receipt).
+//
+// Signature is NOT verified server-side and this client does not
+// verify on receipt either — matches the unverified pass-through for
+// normal sends. Per Decision log Q13, server-side verification is
+// deferred to a future cross-cutting hardening pass.
+//
+// If decryption fails, the row is left untouched (no corruption of
+// the stored body). Matches the defensive "can't decrypt — don't
+// persist garbage" pattern elsewhere in this file.
+func (c *Client) storeEditedRoomMessage(raw json.RawMessage) {
+	if c.store == nil {
+		return
+	}
+	var msg protocol.Edited
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+	payload, err := c.DecryptRoomMessage(msg.Room, msg.Epoch, msg.Payload)
+	if err != nil {
+		// Decryption failed — either we don't have the epoch key for
+		// this edit (unlikely since the original was readable) or the
+		// server sent a malformed payload. Leave the stored row alone.
+		return
+	}
+	if _, err := c.store.UpdateMessageEdited(msg.ID, payload.Body, msg.EditedAt); err != nil {
+		c.logger.Warn("UpdateMessageEdited (room) failed", "id", msg.ID, "error", err)
+	}
+}
+
+// storeEditedGroupMessage applies a `group_edited` broadcast. The
+// payload is decrypted using the caller's wrapped_keys entry from the
+// edit envelope (the new K_msg the author wrapped for the current
+// member set).
+func (c *Client) storeEditedGroupMessage(raw json.RawMessage) {
+	if c.store == nil {
+		return
+	}
+	var msg protocol.GroupEdited
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+	payload, err := c.DecryptGroupMessage(msg.WrappedKeys, msg.Payload)
+	if err != nil {
+		return
+	}
+	if _, err := c.store.UpdateMessageEdited(msg.ID, payload.Body, msg.EditedAt); err != nil {
+		c.logger.Warn("UpdateMessageEdited (group) failed", "id", msg.ID, "error", err)
+	}
+}
+
+// storeEditedDMMessage applies a `dm_edited` broadcast. The payload
+// is decrypted using the caller's wrapped_keys entry.
+func (c *Client) storeEditedDMMessage(raw json.RawMessage) {
+	if c.store == nil {
+		return
+	}
+	var msg protocol.DMEdited
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+	payload, err := c.DecryptDMMessage(msg.WrappedKeys, msg.Payload)
+	if err != nil {
+		return
+	}
+	if _, err := c.store.UpdateMessageEdited(msg.ID, payload.Body, msg.EditedAt); err != nil {
+		c.logger.Warn("UpdateMessageEdited (dm) failed", "id", msg.ID, "error", err)
+	}
+}
+
 // storeReaction decrypts and persists a reaction to the local DB.
+//
+// Phase 15 follow-up: drop reactions whose parent message is not in
+// the local store OR has been tombstoned. Three paths can produce
+// such orphans absent the check:
+//
+//  1. Race with delete: the server-side guard in handleReact
+//     (`isReactableMessage`) closes the race on the authoritative
+//     side, but clients processing an earlier snapshot may still
+//     receive a reaction broadcast for a message they've just
+//     tombstoned locally.
+//  2. Reaction on an out-of-cache message: the client never loaded
+//     the parent (narrow history window, message predates this
+//     device's join, etc.) but a react broadcast arrives anyway
+//     because other clients with wider context know the parent.
+//  3. Malformed server broadcast: future bug produces a reaction
+//     with a msgID that doesn't resolve locally.
+//
+// In all three cases the TUI would silently drop the reaction at
+// render time (`addReactionRecord` walks the loaded-messages list
+// and no-ops when no row matches), but the reaction row still lands
+// in the local `reactions` table and orphans there forever. The
+// guard here drops the reaction at insert time so the local store
+// stays clean. Matches the "can't decrypt — don't persist garbage"
+// defensive pattern below and the server-side tombstone guard.
 func (c *Client) storeReaction(raw json.RawMessage) {
 	if c.store == nil {
 		return
@@ -169,6 +267,17 @@ func (c *Client) storeReaction(raw json.RawMessage) {
 
 	var r protocol.Reaction
 	if err := json.Unmarshal(raw, &r); err != nil {
+		return
+	}
+
+	// Drop orphan reactions before any expensive work (decrypt,
+	// profile lookup). If the parent message isn't in the local
+	// store or is already tombstoned, the reaction has nowhere to
+	// land — skip silently. The store.ErrNoRows case is the
+	// "parent not cached" scenario and is just as invalid as a
+	// tombstoned parent for reaction-attachment purposes.
+	parent, err := c.store.GetMessageByID(r.ID)
+	if err != nil || parent == nil || parent.Deleted {
 		return
 	}
 

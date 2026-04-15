@@ -59,6 +59,7 @@ type DisplayMessage struct {
 	From     string // display name for rendering
 	Body     string // decrypted body (or "(encrypted)" if not decryptable)
 	TS       int64
+	EditedAt int64 // Phase 15: 0 if never edited, else server's edit wall clock (for "(edited)" marker)
 	Room     string
 	Group    string
 	DM       string
@@ -328,6 +329,7 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 			From:        from,
 			Body:        s.Body,
 			TS:          s.TS,
+			EditedAt:    s.EditedAt, // Phase 15
 			Room:        s.Room,
 			Group:       s.Group,
 			DM:          s.DM,
@@ -773,6 +775,67 @@ func (m *MessagesModel) MarkDeleted(id, deletedBy string) {
 	}
 }
 
+// ApplyEdit updates an in-memory DisplayMessage's body and edited_at
+// when an `edited` / `group_edited` / `dm_edited` envelope arrives.
+// Phase 15. Also clears reaction state on the edited message ID per
+// Decision log Q12: clients unconditionally clear reactions when
+// they receive an edit event, matching the server-side reaction
+// delete that happened in the same transaction as the payload replace.
+// Mentions are re-extracted from the new body for highlight rendering.
+// Safe to call with an ID that isn't in the loaded message list — it's
+// a no-op in that case (the store was updated separately by the
+// dispatch path and will pick up the new row on next LoadFromDB).
+func (m *MessagesModel) ApplyEdit(id, newBody string, editedAt int64) {
+	for i, msg := range m.messages {
+		if msg.ID != id {
+			continue
+		}
+		// Clean up reaction tracker entries — matches the MarkDeleted
+		// reaction cleanup pattern. Keeps the package-level tracker
+		// consistent with the rendered state.
+		for _, byEmoji := range msg.ReactionsByUser {
+			for _, ids := range byEmoji {
+				for _, rid := range ids {
+					delete(reactionTracker, rid)
+				}
+			}
+		}
+		m.messages[i].Body = newBody
+		m.messages[i].EditedAt = editedAt
+		m.messages[i].ReactionsByUser = nil
+		// Re-extract mentions from the new body for highlight rendering.
+		// Simple scan — matches the client-side extractor in client/edit.go.
+		m.messages[i].Mentions = extractMentionsInline(newBody)
+		return
+	}
+}
+
+// extractMentionsInline is a TUI-local copy of the client's mention
+// extractor. Keeps the TUI layer self-contained (no cross-package
+// dependency into internal/client just for a one-liner scan).
+func extractMentionsInline(body string) []string {
+	var mentions []string
+	for i := 0; i < len(body); i++ {
+		if body[i] != '@' {
+			continue
+		}
+		j := i + 1
+		for j < len(body) {
+			c := body[j]
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+				j++
+				continue
+			}
+			break
+		}
+		if j > i+1 {
+			mentions = append(mentions, body[i+1:j])
+		}
+		i = j - 1
+	}
+	return mentions
+}
+
 func (m *MessagesModel) AddReaction(r protocol.Reaction) {
 	// Legacy — use AddReactionDecrypted instead. Records with "?" as the
 	// emoji since decryption info isn't available here.
@@ -1155,9 +1218,24 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 					header += " " + helpDescStyle.Render("[retired]")
 				}
 				header += "  " + timestampStyle.Render(ts)
+				// Phase 15: "(edited)" marker in dim style next to
+				// the timestamp when the message has been edited.
+				// EditedAt is 0 on unedited rows (default), non-zero
+				// after the server echoed an `edited` event.
+				if msg.EditedAt > 0 {
+					header += " " + helpDescStyle.Render("(edited)")
+				}
 				line = " " + header + "\n" + body
 			} else {
-				line = body
+				// Consecutive-message grouping: header is hidden, but
+				// if THIS message is edited we still want the marker
+				// to show so the user can tell at a glance. Render
+				// the marker as a trailing annotation on the body.
+				if msg.EditedAt > 0 {
+					line = body + " " + helpDescStyle.Render("(edited)")
+				} else {
+					line = body
+				}
 			}
 
 			if isMentioned {

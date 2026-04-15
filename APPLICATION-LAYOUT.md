@@ -140,6 +140,17 @@ alice  10:32 AM
 Hey everyone, the deploy looks good
 ```
 
+### Edited message (Phase 15)
+
+```
+alice  10:32 AM (edited)
+Hey everyone, the deploy looks good (migration applied cleanly)
+```
+
+The `(edited)` marker in dim style next to the timestamp indicates the message has been edited since it was sent. The marker appears on any message where `edited_at > 0`. The original send timestamp is preserved (the message stays in its original stream position); `edited_at` is shown only via the marker, not as a separate timestamp. Clients that want to surface the edit time explicitly ("edited 3:06 PM") could do so — today's design is minimal.
+
+When consecutive messages from the same sender are visually grouped (header hidden for messages within 5 minutes), the `(edited)` marker attaches as a trailing annotation on the edited message's body so the user can still tell at a glance which one was edited.
+
 ### Message from a retired user
 
 ```
@@ -229,6 +240,17 @@ Deploy checklist: 1. Run migrations 2. Clear...
 ```
 
 Appears above the input bar. Expires after 5 seconds. Three or more typists collapse to a count.
+
+### Edit mode indicator (Phase 15)
+
+When the input is in edit mode (Up-arrow on empty input populated the buffer with a previously-sent message), an indicator appears above the text input, same style as the reply indicator:
+
+```
+ ✎ editing message — Esc to cancel
+> Hey everyone, the deploy looks good (migration applied cleanly)█
+```
+
+Enter dispatches the edit envelope for the tracked message ID and exits edit mode. Esc clears the buffer and exits edit mode without dispatching. Any context switch (sidebar navigation, quick switch, search jump, slash command routing to a different context) also exits edit mode so a half-finished edit never dispatches to the wrong conversation.
 
 ### Read-only banners
 

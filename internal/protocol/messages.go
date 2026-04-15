@@ -79,14 +79,37 @@ type Message struct {
 	Payload   string   `json:"payload"`
 	FileIDs   []string `json:"file_ids,omitempty"`
 	Signature string   `json:"signature"`
+	EditedAt  int64    `json:"edited_at,omitempty"` // Phase 15
+}
+
+// Edit — room message edit envelope (Phase 15 client → server).
+type Edit struct {
+	Type      string `json:"type"` // "edit"
+	ID        string `json:"id"`
+	Room      string `json:"room"`
+	Epoch     int64  `json:"epoch"`
+	Payload   string `json:"payload"`
+	Signature string `json:"signature"`
+}
+
+// Edited — room edit broadcast (Phase 15 server → client).
+type Edited struct {
+	Type      string   `json:"type"` // "edited"
+	ID        string   `json:"id"`
+	From      string   `json:"from"`
+	Room      string   `json:"room"`
+	TS        int64    `json:"ts"`
+	Epoch     int64    `json:"epoch"`
+	Payload   string   `json:"payload"`
+	FileIDs   []string `json:"file_ids,omitempty"`
+	Signature string   `json:"signature"`
+	EditedAt  int64    `json:"edited_at"`
 }
 
 // Group DMs
 //
-// 1:1 DMs are NOT supported in this protocol version — they will land in
-// chunk C of the Phase 11 refactor with their own type set (`create_dm`,
-// `dm`, `dm_left`, etc.). Until then, "DM" in client code always refers
-// to a multi-party group DM.
+// (Pre-Phase-11 comment about DMs not being supported has been deleted —
+// 1:1 DMs landed in Phase 11 with their own type family. See `DM` below.)
 
 type CreateGroup struct {
 	Type    string   `json:"type"`
@@ -121,6 +144,31 @@ type GroupMessage struct {
 	Payload     string            `json:"payload"`
 	FileIDs     []string          `json:"file_ids,omitempty"`
 	Signature   string            `json:"signature"`
+	EditedAt    int64             `json:"edited_at,omitempty"` // Phase 15
+}
+
+// EditGroup — group DM edit envelope (Phase 15 client → server).
+type EditGroup struct {
+	Type        string            `json:"type"` // "edit_group"
+	ID          string            `json:"id"`
+	Group       string            `json:"group"`
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	Signature   string            `json:"signature"`
+}
+
+// GroupEdited — group DM edit broadcast (Phase 15 server → client).
+type GroupEdited struct {
+	Type        string            `json:"type"` // "group_edited"
+	ID          string            `json:"id"`
+	From        string            `json:"from"`
+	Group       string            `json:"group"`
+	TS          int64             `json:"ts"`
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	FileIDs     []string          `json:"file_ids,omitempty"`
+	Signature   string            `json:"signature"`
+	EditedAt    int64             `json:"edited_at"`
 }
 
 type LeaveGroup struct {
@@ -430,6 +478,31 @@ type DM struct {
 	Payload     string            `json:"payload"`
 	FileIDs     []string          `json:"file_ids,omitempty"`
 	Signature   string            `json:"signature"`
+	EditedAt    int64             `json:"edited_at,omitempty"` // Phase 15
+}
+
+// EditDM — 1:1 DM edit envelope (Phase 15 client → server).
+type EditDM struct {
+	Type        string            `json:"type"` // "edit_dm"
+	ID          string            `json:"id"`
+	DM          string            `json:"dm"`
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	Signature   string            `json:"signature"`
+}
+
+// DMEdited — 1:1 DM edit broadcast (Phase 15 server → client).
+type DMEdited struct {
+	Type        string            `json:"type"` // "dm_edited"
+	ID          string            `json:"id"`
+	From        string            `json:"from"`
+	DM          string            `json:"dm"`
+	TS          int64             `json:"ts"`
+	WrappedKeys map[string]string `json:"wrapped_keys"`
+	Payload     string            `json:"payload"`
+	FileIDs     []string          `json:"file_ids,omitempty"`
+	Signature   string            `json:"signature"`
+	EditedAt    int64             `json:"edited_at"`
 }
 
 type LeaveDM struct {
@@ -900,6 +973,17 @@ type Error struct {
 	Message string `json:"message"`
 	Ref     string `json:"ref,omitempty"`
 }
+
+// Phase 15 error code constants for edit handler responses. Exported
+// so app-layer code can branch on them without string-literal churn
+// when the server mirrors for new codes. Only the two surfaced codes
+// are exported — the byte-identical "not_authorized" / "deleted" codes
+// are collapsed into ErrUnknownX responses on the wire and are never
+// observed directly by the client.
+const (
+	ErrEditNotMostRecent = "edit_not_most_recent"
+	ErrEditWindowExpired = "edit_window_expired"
+)
 
 // Decrypted payload (client-side only — this is what's inside the encrypted payload field)
 

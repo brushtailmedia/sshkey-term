@@ -594,6 +594,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				// Clear UI state
 				a.messages.SetContext("", "", "")
+				a.onContextSwitch()
 				a.sidebar.SetRooms(nil)
 				a.sidebar.SetGroups(nil)
 				a.pinnedBar = PinnedBarModel{}
@@ -725,7 +726,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Check if sidebar selected a new room/conversation
 			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group {
 				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
-				a.applyRoomTopic()
+				a.onContextSwitch()
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
@@ -760,6 +761,52 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				default:
 					return a, nil
 				}
+			}
+			// Phase 15 edit mode entry: Up-arrow on an empty input in
+			// an active (not left, not retired) context populates the
+			// input with the user's most recent editable message body
+			// and flips the input into edit mode. On Enter we dispatch
+			// an edit envelope instead of a send. Esc cancels.
+			//
+			// Gated by:
+			//   - input is empty (don't hijack normal editor cursor nav)
+			//   - input is not already in edit mode
+			//   - context is not archived (IsLeft || IsRoomRetired)
+			//   - no DM-with-retired-partner banner
+			//   - the user has at least one non-deleted message in the
+			//     current context
+			if msg.String() == "up" && a.input.IsEmpty() && !a.input.IsEditing() &&
+				!a.messages.IsLeft() && !a.messages.IsRoomRetired() && a.client != nil {
+				if a.tryEnterEditMode() {
+					return a, nil
+				}
+				// Otherwise fall through to normal up-arrow handling.
+			}
+			// Phase 15 edit mode Esc handling: if we're in edit mode and
+			// the user presses Esc, clear the buffer and exit edit mode
+			// without dispatching anything.
+			if msg.String() == "esc" && a.input.IsEditing() {
+				a.input.ExitEditMode()
+				a.input.ClearInput()
+				return a, nil
+			}
+			// Phase 15 edit mode Enter dispatch: if we're in edit mode
+			// and the user presses Enter with non-empty content, send
+			// the edit envelope for the tracked target instead of a
+			// normal send.
+			if msg.String() == "enter" && a.input.IsEditing() {
+				text := strings.TrimSpace(a.input.Value())
+				if text == "" {
+					// Empty body on edit is invalid — same as sending an
+					// empty message. Exit edit mode silently.
+					a.input.ExitEditMode()
+					a.input.ClearInput()
+					return a, nil
+				}
+				a.dispatchEdit(a.input.EditTarget(), text)
+				a.input.ExitEditMode()
+				a.input.ClearInput()
+				return a, nil
 			}
 			// Block input on archived contexts (user has /leave'd a room or
 			// group, OR the room has been retired by an admin). Allow
@@ -1359,7 +1406,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.DM != "" {
 			a.messages.SetContext("", "", msg.DM)
 		}
-		a.applyRoomTopic()
+		a.onContextSwitch()
 		a.syncMessagesLeftState()
 		a.messages.LoadFromDB(a.client)
 		a.messages.ScrollToMessage(msg.MessageID)
@@ -1602,7 +1649,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.infoPanel.resolveRoomName = a.client.DisplayRoomName
 		if len(a.client.Rooms()) > 0 {
 			a.messages.SetContext(a.client.Rooms()[0], "", "")
-			a.applyRoomTopic()
+			a.onContextSwitch()
 			a.syncMessagesLeftState()
 			a.messages.LoadFromDB(a.client)
 			// Set up member list for @completion
@@ -1806,7 +1853,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			// Switch to selected room/conversation
 			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group {
 				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
-				a.applyRoomTopic()
+				a.onContextSwitch()
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
 				if a.memberPanel.IsVisible() {
@@ -1925,19 +1972,118 @@ func (a *App) setUnreadDividerAfter(lastReadID string) {
 	}
 }
 
-// applyRoomTopic pushes the current context's room topic into the
-// messages model so the two-line header can render it (Phase 18). Called
-// from every call site that runs SetContext with a non-empty room. Safe
-// to call with group/DM contexts — the resolver returns empty for those
-// and SetRoomTopic("") omits the topic line cleanly. Also safe when the
-// client is nil (first-run wizard or pre-connect): messages model just
-// renders line 1 only until the next context switch.
-func (a *App) applyRoomTopic() {
+// onContextSwitch runs every app-layer side effect that must fire
+// when the messages context changes — sidebar navigation, quick
+// switch, search jump, inline creation flows, or terminal context
+// clears triggered by `room_deleted` / `group_deleted` / `dm_left` /
+// `room_retired` broadcasts and by self-leave echoes. Called AFTER
+// `a.messages.SetContext(...)` at every call site so the messages
+// model already reflects the new context when the side effects run.
+//
+// Side effects in order:
+//
+//   1. **Exit edit mode** if the user had a half-finished edit in the
+//      previous context. Dispatching that edit after a context switch
+//      would either land in the wrong conversation (if the new context
+//      is active) or silently no-op (if the new context is empty),
+//      both of which are bad user experience. The buffer is cleared
+//      along with the edit flag so the user doesn't ship an orphaned
+//      body on their next keystroke. Phase 15.
+//
+//   2. **Apply the new room's topic** (or clear it in non-room
+//      contexts). Reads from the local DB via
+//      `Client.DisplayRoomTopic` and pushes the result into the
+//      messages model so the two-line pane header renders the current
+//      topic. Safe to call with group / DM / empty contexts — the
+//      resolver returns empty and `SetRoomTopic("")` omits the topic
+//      line cleanly. Also safe when the client is nil (first-run
+//      wizard or pre-connect): the messages model renders the title
+//      line only until the next context switch. Phase 18.
+//
+// This helper REPLACES the older `applyRoomTopic` — which only ran
+// the topic-resolution step and had edit-mode cleanup piggybacked
+// onto it. Piggybacking was a bug waiting to happen because the
+// cleared-context call sites (`SetContext("", "", "")` for a deleted
+// or retired room, left group, etc.) never called `applyRoomTopic`,
+// so edit mode was left hanging with a stale target in a
+// now-non-existent context.  Every SetContext site now calls this
+// single helper, which closes the gap.
+func (a *App) onContextSwitch() {
+	// (1) Exit edit mode on every context switch.
+	if a.input.IsEditing() {
+		a.input.ExitEditMode()
+		a.input.ClearInput()
+	}
+	// (2) Apply the new room's topic (or clear it).
 	if a.client == nil || a.messages.room == "" {
 		a.messages.SetRoomTopic("")
 		return
 	}
 	a.messages.SetRoomTopic(a.client.DisplayRoomTopic(a.messages.room))
+}
+
+// tryEnterEditMode scans backwards through the loaded messages for
+// the user's most recent non-deleted message in the current context.
+// If found, populates the input buffer with that message's body and
+// flips the input into edit mode, tracking the message ID so the
+// subsequent Enter dispatches an edit envelope instead of a normal
+// send. Phase 15. Returns true if edit mode was entered (handled the
+// key press) or false if no editable message exists (key falls
+// through to normal up-arrow handling).
+//
+// The scan uses the in-memory message list, not the store helper, so
+// it respects whatever the user is currently viewing — if they've
+// scrolled back through history and the local list has older rows,
+// the "most recent" is still the highest TS row in the visible list.
+func (a *App) tryEnterEditMode() bool {
+	selfID := a.client.UserID()
+	if selfID == "" {
+		return false
+	}
+	// Scan backwards: most recent first. Skip deleted rows and system
+	// messages (which have IsSystem == true). The first non-deleted
+	// message from the local user is the edit target.
+	for i := len(a.messages.messages) - 1; i >= 0; i-- {
+		msg := a.messages.messages[i]
+		if msg.IsSystem || msg.Deleted {
+			continue
+		}
+		if msg.FromID != selfID {
+			continue
+		}
+		// Found the user's most recent editable message.
+		a.input.EnterEditMode(msg.ID, msg.Body)
+		return true
+	}
+	return false
+}
+
+// dispatchEdit sends the appropriate edit verb for the current
+// context. Called from the FocusInput Enter handler when the input
+// is in edit mode. Dispatches to EditRoomMessage / EditGroupMessage
+// / EditDMMessage based on which of messages.room / messages.group /
+// messages.dm is non-empty. Client validates and sends; server
+// validates and either broadcasts an `edited` echo (which the
+// dispatch path applies to local state) or returns an error (which
+// the error handler surfaces to the status bar).
+func (a *App) dispatchEdit(msgID, newBody string) {
+	if a.client == nil || msgID == "" {
+		return
+	}
+	var err error
+	switch {
+	case a.messages.room != "":
+		err = a.client.EditRoomMessage(msgID, a.messages.room, newBody)
+	case a.messages.group != "":
+		err = a.client.EditGroupMessage(msgID, a.messages.group, newBody)
+	case a.messages.dm != "":
+		err = a.client.EditDMMessage(msgID, a.messages.dm, newBody)
+	default:
+		return
+	}
+	if err != nil {
+		a.statusBar.SetError("Edit failed: " + err.Error())
+	}
 }
 
 // syncMessagesLeftState updates the messages model's "left" and
@@ -2043,7 +2189,7 @@ func (a *App) switchToSidebarSelection() {
 		return
 	}
 	a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
-	a.applyRoomTopic()
+	a.onContextSwitch()
 	a.syncMessagesLeftState()
 	a.messages.LoadFromDB(a.client)
 	if a.memberPanel.IsVisible() {
@@ -3050,6 +3196,35 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		var m protocol.Deleted
 		json.Unmarshal(msg.Raw, &m)
 		a.messages.MarkDeleted(m.ID, m.DeletedBy)
+	case "edited":
+		// Phase 15: room message edit broadcast. The client layer has
+		// already decrypted and persisted the new body + edited_at to
+		// the store via storeEditedRoomMessage. Here we apply the
+		// change to the in-memory DisplayMessage so the currently-open
+		// message view updates without a LoadFromDB round-trip.
+		var e protocol.Edited
+		if err := json.Unmarshal(msg.Raw, &e); err == nil && a.client != nil {
+			// Decrypt again in the TUI path so we have the plaintext
+			// body for the in-memory update. Cheap — the payload is
+			// already unwrapped in memory at this point.
+			if payload, derr := a.client.DecryptRoomMessage(e.Room, e.Epoch, e.Payload); derr == nil {
+				a.messages.ApplyEdit(e.ID, payload.Body, e.EditedAt)
+			}
+		}
+	case "group_edited":
+		var e protocol.GroupEdited
+		if err := json.Unmarshal(msg.Raw, &e); err == nil && a.client != nil {
+			if payload, derr := a.client.DecryptGroupMessage(e.WrappedKeys, e.Payload); derr == nil {
+				a.messages.ApplyEdit(e.ID, payload.Body, e.EditedAt)
+			}
+		}
+	case "dm_edited":
+		var e protocol.DMEdited
+		if err := json.Unmarshal(msg.Raw, &e); err == nil && a.client != nil {
+			if payload, derr := a.client.DecryptDMMessage(e.WrappedKeys, e.Payload); derr == nil {
+				a.messages.ApplyEdit(e.ID, payload.Body, e.EditedAt)
+			}
+		}
 	case "user_retired":
 		var m protocol.UserRetired
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
@@ -3305,6 +3480,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			a.sidebar.RemoveGroup(m.Group)
 			if a.messages.group == m.Group {
 				a.messages.SetContext("", "", "")
+				a.onContextSwitch()
 			}
 		}
 	case "deleted_groups":
@@ -3319,6 +3495,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				a.sidebar.RemoveGroup(groupID)
 				if a.messages.group == groupID {
 					a.messages.SetContext("", "", "")
+					a.onContextSwitch()
 				}
 			}
 		}
@@ -3380,6 +3557,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			a.sidebar.RemoveRoom(m.Room)
 			if a.messages.room == m.Room {
 				a.messages.SetContext("", "", "")
+				a.onContextSwitch()
 			}
 		}
 	case "deleted_rooms":
@@ -3394,6 +3572,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				a.sidebar.RemoveRoom(roomID)
 				if a.messages.room == roomID {
 					a.messages.SetContext("", "", "")
+					a.onContextSwitch()
 				}
 			}
 		}
@@ -3565,6 +3744,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			a.sidebar.RemoveDM(dl.DM)
 			if a.messages.dm == dl.DM {
 				a.messages.SetContext("", "", "")
+				a.onContextSwitch()
 			}
 		}
 	case "reaction":
@@ -3730,6 +3910,22 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		// prominently so the user knows their name change failed
 		if m.Code == "username_taken" || m.Code == "invalid_profile" {
 			a.statusBar.SetError("Name change failed: " + m.Message)
+		}
+		// Phase 15 edit errors: if an edit_window_expired or
+		// edit_not_most_recent error arrives while the input is in
+		// edit mode, surface a friendly status bar message and exit
+		// edit mode so the user isn't left in a stuck state. The
+		// buffer is preserved so they can paste it into a fresh
+		// message if they want.
+		if m.Code == protocol.ErrEditWindowExpired && a.input.IsEditing() {
+			a.statusBar.SetError("Edit window expired — delete the message and send a new one instead")
+			a.input.ExitEditMode()
+			a.input.ClearInput()
+		}
+		if m.Code == protocol.ErrEditNotMostRecent && a.input.IsEditing() {
+			a.statusBar.SetError("You can only edit your most recent message in this conversation")
+			a.input.ExitEditMode()
+			a.input.ClearInput()
 		}
 		// Phase 14 last-admin picker: when ErrForbidden arrives with
 		// the "last admin" message AND we have a pending /leave or

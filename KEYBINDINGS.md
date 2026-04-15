@@ -89,8 +89,10 @@ When a sole admin runs `/leave` or `/delete` on a group with other members, the 
 
 | Key | macOS | Action |
 |---|---|---|
-| `Enter` | `Enter` | Send message (or execute slash command) |
+| `Enter` | `Enter` | Send message (or execute slash command). If the input is in edit mode, dispatches the appropriate edit verb instead. |
 | `Tab` | `Tab` | Accept top tab-completion suggestion |
+| `Up` | `Up` | **Phase 15**: on an empty input in an active (not left, not retired) context, enters edit mode with the user's most recent non-deleted message pre-populated. Enter dispatches the edit; Esc cancels. Only fires when the input is empty — normal cursor navigation in multi-line mode is unaffected. |
+| `Esc` | `Esc` | **Phase 15**: if in edit mode, clears the buffer and exits edit mode without dispatching. Otherwise moves focus to the sidebar. |
 | `Ctrl+A` | `Cmd+A` | Select all text in input |
 | `Ctrl+U` | `Cmd+U` | Clear input |
 | `Ctrl+V` | `Cmd+V` | Paste (text or file path for upload) |
