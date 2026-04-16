@@ -1198,6 +1198,65 @@ Arrow keys navigate, `Enter` on items with `[▶]` opens edit mode. "Manage devi
 
 ---
 
+## Add Server Dialog (Settings → [Add server])
+
+The add-server dialog has two modes: the **form** (name / host / port / SSH key path) and the **generate-key sub-view** reached via `Ctrl+G`. The same dialog is used when adding a second (or Nth) server post-wizard.
+
+### Form mode
+
+```
+┌─ Add Server ───────────────────────┐
+│                                    │
+│  Name: │Work█                      │
+│                                    │
+│  Host: │work.example.com           │
+│                                    │
+│  Port: │2222                       │
+│                                    │
+│  SSH key path: │~/.ssh/id_ed25519 │
+│                                    │
+│  Existing Ed25519 keys (click to use):
+│  ~/.ssh/id_ed25519                 │
+│  ~/.ssh/work_ed25519               │
+│                                    │
+│  Tab=next field  Ctrl+G=generate   │
+│  new key  Enter=add  Esc=cancel    │
+└────────────────────────────────────┘
+```
+
+`Ctrl+G` switches to the generate sub-view. Clicking a scanned key in the list populates the `SSH key path` field directly.
+
+### Generate-key sub-view (Ctrl+G from the form)
+
+```
+┌─ Generate New Key ─────────────────┐
+│                                    │
+│  Save to:                          │
+│  │~/.sshkey-chat/keys/id_ed25519█ │
+│                                    │
+│  Passphrase (recommended):         │
+│  │●●●●●●●●●●●●●●                  │
+│  ! borderline — cracked in hours   │  ← live strength hint (amber)
+│                                    │
+│  Confirm passphrase:               │
+│  │●●●●●●●●●●●●●●                  │
+│                                    │
+│  ⚠ A passphrase protects your key │
+│    if your device is stolen. Back  │
+│    the key up after generating —   │
+│    the server cannot recover it.   │
+│                                    │
+│  Tab=next field  Enter=generate    │
+│  Esc=back                          │
+└────────────────────────────────────┘
+```
+
+**Same live-hint treatment as the wizard's Generate Key step** (see *Step 4 — Generate Key* above for the full tier table and length-gate behavior). One context difference: in addition to the display name, the add-server dialog also passes the **hostname** from the form's `Host` field as zxcvbn context. So a passphrase containing `work.example.com` or its substrings gets penalized — users often reach for the server name when picking a passphrase, and the context catches that failure mode.
+
+On a successful generate, the new key's fingerprint is shown in the form mode as a `✓ Key generated — back it up` notice and the `SSH key path` field is pre-populated. `Esc` from the generate sub-view returns to the form without generating.
+
+---
+
 ## Search Overlay (Ctrl+F or /search)
 
 ```
