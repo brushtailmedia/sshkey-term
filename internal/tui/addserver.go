@@ -8,6 +8,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/brushtailmedia/sshkey-term/internal/keygen"
 )
 
 // addServerMode distinguishes the form and generate sub-views.
@@ -34,6 +36,12 @@ type AddServerModel struct {
 	genFocused int
 	genErr     string
 	genNotice  string // shown in form view after successful generation
+
+	// Phase 16 Gap 4: zxcvbn warn-and-confirm state. When the user
+	// submits a borderline passphrase (warn tier), we display the
+	// warning and stash the passphrase here. If they re-submit with
+	// the same value unchanged, treat it as confirmation and proceed.
+	weakPassConfirmed string
 }
 
 // AddServerMsg is sent when the user confirms adding a server.
@@ -240,6 +248,33 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 			a.genErr = "Passphrases don't match"
 			return a, nil
 		}
+
+		// Phase 16 Gap 4: zxcvbn passphrase strength check. Same
+		// three-tier policy as the wizard:
+		//   - block tier: hard error, user must change passphrase
+		//   - warn tier: show warning, set weakPassConfirmed; if the
+		//     user re-submits with the same value, proceed
+		//   - silent pass: proceed immediately
+		// Empty passphrase is allowed (matches existing behavior;
+		// generates an unencrypted key).
+		if pass != "" {
+			result := keygen.ValidateUserPassphraseWithContext(pass, nil)
+			switch {
+			case result.Blocked:
+				a.genErr = result.Message
+				a.weakPassConfirmed = ""
+				return a, nil
+			case result.Warning != "":
+				if a.weakPassConfirmed != pass {
+					a.weakPassConfirmed = pass
+					a.genErr = result.Warning + " (press Enter again to use it anyway, or edit the passphrase to try a stronger one)"
+					return a, nil
+				}
+				// User has already seen the warning and re-submitted
+				// with the same passphrase — fall through to keygen.
+			}
+		}
+		a.weakPassConfirmed = ""
 
 		// Don't silently overwrite an existing file
 		expanded := path

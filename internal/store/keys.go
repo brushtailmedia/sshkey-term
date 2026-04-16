@@ -339,6 +339,29 @@ func (s *Store) UpsertRoom(id, name, topic string, members int) error {
 	return err
 }
 
+// UpdateRoomNameTopic updates only the name and topic columns on an
+// existing room row, leaving members untouched. Phase 16 Gap 1 — used
+// by the room_updated event handler when an admin runs `sshkey-ctl
+// update-topic` or `sshkey-ctl rename-room` on the server.
+//
+// We don't reuse UpsertRoom here because the room_updated event
+// carries no member count, and overwriting members with 0 would
+// silently break the sidebar's member-count display until the next
+// room_list refresh. UPDATE-only avoids that hazard.
+//
+// Returns nil silently if the room doesn't exist locally — the
+// client may receive a room_updated event for a room it hasn't
+// fetched yet (e.g. just-promoted admin who joined a room they
+// weren't in before). The next room_list refresh will catch up.
+func (s *Store) UpdateRoomNameTopic(id, name, topic string) error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(
+		`UPDATE rooms SET name = ?, topic = ?, updated_at = ? WHERE id = ?`,
+		name, topic, now, id,
+	)
+	return err
+}
+
 // GetRoomName returns the display name for a room nanoid ID.
 // Returns the raw ID if not found (graceful fallback).
 func (s *Store) GetRoomName(id string) string {

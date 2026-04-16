@@ -785,6 +785,29 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			}
 			c.logger.Info("room retired", "room", rr.Room, "display_name", rr.DisplayName)
 		}
+	case "room_updated":
+		// Phase 16 Gap 1: broadcast from the server's
+		// runRoomUpdatesProcessor when an admin runs `sshkey-ctl
+		// update-topic` or `sshkey-ctl rename-room`. Carries the FULL
+		// post-change room state {DisplayName, Topic} so the client
+		// can apply the event with a single UPDATE on the local
+		// rooms row. One handler covers both verbs — whichever field
+		// changed gets reflected on the next render; the unchanged
+		// field is overwritten with its current value (a no-op).
+		//
+		// The sidebar and info panel use GetRoomName / GetRoomTopic
+		// which read from this same rooms table, so the next render
+		// pass picks up the new values automatically. No extra
+		// invalidation needed.
+		var ru protocol.RoomUpdated
+		if err := json.Unmarshal(raw, &ru); err == nil {
+			if c.store != nil {
+				if err := c.store.UpdateRoomNameTopic(ru.Room, ru.DisplayName, ru.Topic); err != nil {
+					c.logger.Warn("UpdateRoomNameTopic on room_updated", "room", ru.Room, "error", err)
+				}
+			}
+			c.logger.Info("room updated", "room", ru.Room, "display_name", ru.DisplayName, "topic", ru.Topic)
+		}
 	case "retired_rooms":
 		// Phase 12: offline-catchup list sent during the connect
 		// handshake listing every retired room the user is still a
@@ -987,6 +1010,26 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			// Record retirement; keep historical profile intact so signature
 			// verification still works against messages from before retirement.
 			c.retired[ur.User] = time.Unix(ur.Ts, 0).UTC().Format(time.RFC3339)
+			c.mu.Unlock()
+		}
+	case "user_unretired":
+		// Phase 16 Gap 1: inverse of user_retired. The server fires
+		// this when an admin runs `sshkey-ctl unretire-user` to
+		// reverse a mistaken retirement. We delete the user from
+		// c.retired so the [retired] marker is flushed from sidebar
+		// labels, info panels, and message headers on the next
+		// render. The user's profile entry stays intact — only the
+		// retired-state cache is updated.
+		//
+		// Note: this does NOT restore room/group/DM memberships.
+		// The unretirement is intentionally minimal — operators
+		// re-add memberships via add-to-room or in-group /add. If
+		// the user reconnects after being unretired, the normal
+		// handshake flow will re-populate any active context.
+		var uu protocol.UserUnretired
+		if err := json.Unmarshal(raw, &uu); err == nil {
+			c.mu.Lock()
+			delete(c.retired, uu.User)
 			c.mu.Unlock()
 		}
 	case "retired_users":

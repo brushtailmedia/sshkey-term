@@ -419,6 +419,23 @@ type RetiredRoomsList struct {
 	Rooms []RoomRetired `json:"rooms"`
 }
 
+// RoomUpdated is broadcast to connected members when an admin runs
+// `sshkey-ctl update-topic` or `sshkey-ctl rename-room`. Phase 16
+// Gap 1 — the server pushes a fresh snapshot of the affected room's
+// display name and topic, and the client applies it by upserting
+// its local rooms-table row.
+//
+// One event type covers both verbs: whichever field actually
+// changed gets reflected on the next render; the unchanged field is
+// overwritten with its current value (a no-op). The client doesn't
+// need to know which CLI verb produced the event.
+type RoomUpdated struct {
+	Type        string `json:"type"`         // "room_updated"
+	Room        string `json:"room"`         // room nanoid
+	DisplayName string `json:"display_name"` // post-change display name
+	Topic       string `json:"topic"`        // post-change topic
+}
+
 // DeleteRoom is the client-initiated request to remove a room from
 // the user's view. Parallel to DeleteGroup. The server runs the leave
 // flow, records a deleted_rooms sidecar row for multi-device catchup,
@@ -874,6 +891,24 @@ type RetireMe struct {
 }
 
 type UserRetired struct {
+	Type string `json:"type"`
+	User string `json:"user"`
+	Ts   int64  `json:"ts"`
+}
+
+// UserUnretired is the inverse of UserRetired — broadcast when an
+// admin runs `sshkey-ctl unretire-user` to reverse a mistaken
+// retirement. The client deletes the user from c.retired so the
+// [retired] marker is flushed from sidebar labels, info panels, and
+// message headers. Phase 16 Gap 1.
+//
+// What this does NOT signal: that the user has been re-added to any
+// rooms or groups. The retirement cascade removed the user from
+// every shared context, and unretirement is intentionally minimal —
+// it only flips the flag. Operators must manually re-add the user
+// via add-to-room or in-group /add. The broadcast simply tells
+// clients to stop rendering the [retired] decoration.
+type UserUnretired struct {
 	Type string `json:"type"`
 	User string `json:"user"`
 	Ts   int64  `json:"ts"`

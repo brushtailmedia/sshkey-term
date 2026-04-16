@@ -119,6 +119,72 @@ func TestProfileUnretiredClears(t *testing.T) {
 	}
 }
 
+// TestUserUnretiredEvent verifies that processing a user_unretired
+// event clears the user from the retired cache. Phase 16 Gap 1.
+//
+// The flow: server fires user_unretired when an admin runs
+// `sshkey-ctl unretire-user`, and the client's handleInternal must
+// `delete(c.retired, user)` so the [retired] marker is flushed from
+// sidebar labels, info panels, and message headers on next render.
+func TestUserUnretiredEvent(t *testing.T) {
+	c := New(Config{})
+	defer c.Close()
+
+	// Mark alice retired first (precondition).
+	c.handleInternal("user_retired", json.RawMessage(`{"type":"user_retired","user":"alice","ts":1712345678}`))
+	if retired, _ := c.IsRetired("alice"); !retired {
+		t.Fatal("precondition: alice should be retired")
+	}
+
+	// Process the unretirement event.
+	c.handleInternal("user_unretired", json.RawMessage(`{"type":"user_unretired","user":"alice","ts":1712999999}`))
+
+	if retired, _ := c.IsRetired("alice"); retired {
+		t.Error("alice should NOT be retired after user_unretired event")
+	}
+}
+
+// TestUserUnretiredEvent_UnknownUser verifies that processing a
+// user_unretired event for a user the client doesn't know about
+// (never had in the retired cache) is a safe no-op. Forward-compat
+// rule — the client should gracefully ignore events for users it
+// doesn't track.
+func TestUserUnretiredEvent_UnknownUser(t *testing.T) {
+	c := New(Config{})
+	defer c.Close()
+
+	// Should not panic, should not change state.
+	c.handleInternal("user_unretired", json.RawMessage(`{"type":"user_unretired","user":"ghost","ts":1712999999}`))
+
+	// ghost was never retired; still isn't.
+	if retired, _ := c.IsRetired("ghost"); retired {
+		t.Error("unknown user should not be marked retired by an unretired event")
+	}
+}
+
+// TestUserUnretiredEvent_DoesNotAffectOtherUsers verifies that
+// unretiring one user doesn't accidentally clear other users from
+// the retired cache.
+func TestUserUnretiredEvent_DoesNotAffectOtherUsers(t *testing.T) {
+	c := New(Config{})
+	defer c.Close()
+
+	// Retire alice and bob.
+	c.handleInternal("user_retired", json.RawMessage(`{"type":"user_retired","user":"alice","ts":1712345678}`))
+	c.handleInternal("user_retired", json.RawMessage(`{"type":"user_retired","user":"bob","ts":1712345679}`))
+
+	// Unretire only alice.
+	c.handleInternal("user_unretired", json.RawMessage(`{"type":"user_unretired","user":"alice","ts":1712999999}`))
+
+	// alice cleared, bob still retired.
+	if retired, _ := c.IsRetired("alice"); retired {
+		t.Error("alice should not be retired after unretire")
+	}
+	if retired, _ := c.IsRetired("bob"); !retired {
+		t.Error("bob should still be retired (only alice was unretired)")
+	}
+}
+
 // TestDeviceRevokedHandlerNoPanic verifies the device_revoked case doesn't
 // crash the client (it's a no-op at the client layer — UI handles it).
 func TestDeviceRevokedHandlerNoPanic(t *testing.T) {
