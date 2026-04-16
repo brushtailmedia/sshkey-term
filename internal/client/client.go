@@ -1275,6 +1275,15 @@ func (c *Client) DisplayRoomTopic(roomID string) string {
 	return ""
 }
 
+// SetStoreForTesting attaches a store to the Client from an external
+// package. Production code sets c.store during New() / Connect() flows;
+// this helper exists so tests in other packages (e.g. tui) can exercise
+// methods that read through the store without spinning up a full SSH
+// connection. Do not call from production code.
+func SetStoreForTesting(c *Client, s *store.Store) {
+	c.store = s
+}
+
 // GroupMembers returns the member list for a group DM.
 func (c *Client) GroupMembers(groupID string) []string {
 	c.mu.RLock()
