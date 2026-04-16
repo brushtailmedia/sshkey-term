@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/brushtailmedia/sshkey-term/internal/keygen"
 )
 
 var (
@@ -22,7 +24,38 @@ var (
 
 	errorStyle = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#F59E0B"))
+
+	// Phase 16 Gap 4 live strength hint palette (Phase 18 doc sync
+	// note: used by wizard.go and addserver.go for the one-line
+	// indicator under the passphrase input field):
+	//   - strengthHintBlockStyle: red — hard reject on submit
+	//   - strengthHintWarnStyle: amber — borderline, requires
+	//     press-Enter-again confirmation on submit
+	//   - strengthHintPassStyle: green dim — passes silently
+	strengthHintBlockStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#EF4444"))
+	strengthHintWarnStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#F59E0B"))
+	strengthHintPassStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#22C55E"))
 )
+
+// renderStrengthHint formats a keygen.LiveHint for display under a
+// passphrase input field. Returns an empty string for HintHidden so
+// the caller can concatenate unconditionally without testing the
+// tier. Used by wizard.go viewKeyGenerate and addserver.go viewGen.
+func renderStrengthHint(h keygen.LiveHint) string {
+	switch h.Tier {
+	case keygen.HintBlock:
+		return strengthHintBlockStyle.Render(h.Text)
+	case keygen.HintWarn:
+		return strengthHintWarnStyle.Render(h.Text)
+	case keygen.HintPass:
+		return strengthHintPassStyle.Render(h.Text)
+	default:
+		return ""
+	}
+}
 
 // StatusBarModel manages the bottom status bar.
 type StatusBarModel struct {

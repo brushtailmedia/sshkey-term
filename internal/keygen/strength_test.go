@@ -81,8 +81,8 @@ func TestValidateUserPassphrase_WarnTierExample(t *testing.T) {
 	if r.Warning == "" {
 		t.Error("expected warn tier to produce a Warning message")
 	}
-	if r.Warning != "" && !strings.Contains(r.Warning, "Continue") {
-		t.Errorf("warn message should ask 'Continue anyway?', got: %q", r.Warning)
+	if r.Warning != "" && !strings.Contains(r.Warning, "cracked in") {
+		t.Errorf("warn message should describe crack time, got: %q", r.Warning)
 	}
 }
 
@@ -136,9 +136,6 @@ func TestValidateUserPassphrase_WarnTier_ContractCheck(t *testing.T) {
 		r := ValidateUserPassphrase(pass)
 		if !r.Blocked && r.Warning != "" {
 			foundWarn = true
-			if !strings.Contains(r.Warning, "Continue") {
-				t.Errorf("warn message should ask 'Continue anyway?', got: %q", r.Warning)
-			}
 			if !strings.Contains(r.Warning, "cracked in") {
 				t.Errorf("warn message should mention crack time, got: %q", r.Warning)
 			}

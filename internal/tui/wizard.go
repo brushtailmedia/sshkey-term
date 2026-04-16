@@ -67,6 +67,13 @@ type WizardModel struct {
 	// proceed. If they edit the passphrase first, the warning resets.
 	weakPassConfirmed string
 
+	// Live strength hint — recomputed on every keystroke in the keygen
+	// step. Shown as a compact one-line indicator under the passphrase
+	// field once the passphrase meets MinPassphraseLength. Hidden
+	// below the floor to kill "weak, weak, weak" rolling noise while
+	// the user is still typing.
+	strengthHint keygen.LiveHint
+
 	// Import
 	importInput textinput.Model
 
@@ -343,6 +350,13 @@ func (w WizardModel) updateKeyGenerate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case 2:
 		w.genConfirm, cmd = w.genConfirm.Update(msg)
 	}
+	// Recompute the live strength hint after any input update — the
+	// user might have edited the passphrase field (case 1) or the
+	// display name context via a previous wizard step. Cheap enough
+	// to run on every keystroke (zxcvbn is sub-millisecond for short
+	// strings) and keeps the indicator in sync with what the user
+	// sees.
+	w.strengthHint = keygen.LivePassphraseHint(w.genPassInput.Value(), []string{w.chosenName})
 	return w, cmd
 }
 
@@ -381,7 +395,7 @@ func (w WizardModel) doGenerateKey() (tea.Model, tea.Cmd) {
 				// stash it and show the warning. Next submit with
 				// the same value will be treated as confirmation.
 				w.weakPassConfirmed = pass
-				w.err = result.Warning + " (press Enter again to use it anyway, or edit the passphrase to try a stronger one)"
+				w.err = result.Warning + " Press Enter again to use it anyway, or edit to try a stronger one."
 				return w, nil
 			}
 			// User has already seen the warning and submitted again
@@ -842,7 +856,16 @@ func (w WizardModel) viewKeyGenerate() string {
 	b.WriteString("  Save to:\n")
 	b.WriteString("  " + w.genPathInput.View() + "\n\n")
 	b.WriteString("  Passphrase (recommended):\n")
-	b.WriteString("  " + w.genPassInput.View() + "\n\n")
+	b.WriteString("  " + w.genPassInput.View() + "\n")
+	// Phase 16 Gap 4: live strength indicator, one line under the
+	// passphrase field. Hidden until the passphrase reaches
+	// MinPassphraseLength (12 chars) so early keystrokes don't show
+	// a rolling "too short" annotation. renderStrengthHint returns
+	// empty for HintHidden, so the caller doesn't need to branch.
+	if hint := renderStrengthHint(w.strengthHint); hint != "" {
+		b.WriteString("  " + hint + "\n")
+	}
+	b.WriteString("\n")
 	b.WriteString("  Confirm passphrase:\n")
 	b.WriteString("  " + w.genConfirm.View() + "\n\n")
 	b.WriteString(helpDescStyle.Render("  ⚠ A passphrase protects your key if your\n  device is stolen. Strongly recommended."))

@@ -42,6 +42,13 @@ type AddServerModel struct {
 	// warning and stash the passphrase here. If they re-submit with
 	// the same value unchanged, treat it as confirmation and proceed.
 	weakPassConfirmed string
+
+	// Live strength hint — recomputed on every keystroke while the
+	// generate-key dialog is open. Rendered as a compact one-line
+	// indicator under the passphrase input, hidden below
+	// MinPassphraseLength. Context includes hostname + display name
+	// (see addServerZxcvbnContext).
+	strengthHint keygen.LiveHint
 }
 
 // AddServerMsg is sent when the user confirms adding a server.
@@ -50,6 +57,25 @@ type AddServerMsg struct {
 	Host string
 	Port int
 	Key  string
+}
+
+// addServerZxcvbnContext collects form-field values to pass to zxcvbn
+// as context strings, so a passphrase containing the display name or
+// hostname the user just typed gets penalized. Mirrors the wizard's
+// ValidateUserPassphraseWithContext call which passes the chosen
+// display name. Port is omitted (low signal; usually just digits).
+//
+// Empty / whitespace-only values are skipped — zxcvbn does exact
+// substring matching, so empty strings would be no-ops but noisy.
+func addServerZxcvbnContext(a AddServerModel) []string {
+	var ctx []string
+	if name := strings.TrimSpace(a.inputs[0].Value()); name != "" {
+		ctx = append(ctx, name)
+	}
+	if host := strings.TrimSpace(a.inputs[1].Value()); host != "" {
+		ctx = append(ctx, host)
+	}
+	return ctx
 }
 
 func NewAddServer() AddServerModel {
@@ -258,7 +284,14 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 		// Empty passphrase is allowed (matches existing behavior;
 		// generates an unencrypted key).
 		if pass != "" {
-			result := keygen.ValidateUserPassphraseWithContext(pass, nil)
+			// Pass hostname + username as zxcvbn context so passphrases
+			// containing either (e.g. "sshkey.example.com" or the
+			// chosen display name) get penalized. Mirrors the wizard's
+			// context-awareness — main form inputs are available here
+			// because the user fills the form before opening the
+			// keygen dialog.
+			context := addServerZxcvbnContext(a)
+			result := keygen.ValidateUserPassphraseWithContext(pass, context)
 			switch {
 			case result.Blocked:
 				a.genErr = result.Message
@@ -267,7 +300,7 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 			case result.Warning != "":
 				if a.weakPassConfirmed != pass {
 					a.weakPassConfirmed = pass
-					a.genErr = result.Warning + " (press Enter again to use it anyway, or edit the passphrase to try a stronger one)"
+					a.genErr = result.Warning + " Press Enter again to use it anyway, or edit to try a stronger one."
 					return a, nil
 				}
 				// User has already seen the warning and re-submitted
@@ -319,6 +352,11 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 
 	var cmd tea.Cmd
 	a.genInputs[a.genFocused], cmd = a.genInputs[a.genFocused].Update(msg)
+	// Recompute the live strength hint after any field update — the
+	// user may have just typed in the passphrase field, or edited the
+	// name / host fields on a previous dialog state change (context
+	// for zxcvbn). Cheap enough to run on every keystroke.
+	a.strengthHint = keygen.LivePassphraseHint(a.genInputs[1].Value(), addServerZxcvbnContext(a))
 	return a, cmd
 }
 
@@ -442,7 +480,16 @@ func (a AddServerModel) viewGenerate(width int) string {
 	genLabels := []string{"Save to", "Passphrase (recommended)", "Confirm passphrase"}
 	for i, label := range genLabels {
 		b.WriteString("  " + label + ":\n")
-		b.WriteString("  " + a.genInputs[i].View() + "\n\n")
+		b.WriteString("  " + a.genInputs[i].View() + "\n")
+		// Phase 16 Gap 4: live strength hint under the passphrase
+		// input (index 1 only). Hidden under MinPassphraseLength —
+		// renderStrengthHint returns an empty string for HintHidden.
+		if i == 1 {
+			if hint := renderStrengthHint(a.strengthHint); hint != "" {
+				b.WriteString("  " + hint + "\n")
+			}
+		}
+		b.WriteString("\n")
 	}
 
 	b.WriteString(helpDescStyle.Render("  ⚠ A passphrase protects your key if your device is stolen.\n  Back the key up after generating — the server cannot recover it."))

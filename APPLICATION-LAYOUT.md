@@ -1041,10 +1041,11 @@ Validates file exists and is Ed25519. Tilde-expanded.
 │  │~/.sshkey-chat/keys/id_ed25519█ │
 │                                    │
 │  Passphrase (recommended):         │
-│  │●●●●●●●●                        │
+│  │●●●●●●●●●●●●●●                  │
+│  ✓ strong                          │  ← live strength hint
 │                                    │
 │  Confirm passphrase:               │
-│  │●●●●●●●●                        │
+│  │●●●●●●●●●●●●●●                  │
 │                                    │
 │  ⚠ A passphrase protects your key │
 │    if your device is stolen.       │
@@ -1055,6 +1056,19 @@ Validates file exists and is Ed25519. Tilde-expanded.
 ```
 
 `Tab` cycles between the three fields. Passphrases must match (both empty = no passphrase, allowed but warned).
+
+**Live strength hint.** The line under the passphrase input updates on every keystroke once the passphrase reaches 12 characters (`keygen.MinPassphraseLength`). Below the floor the hint is hidden — typing the first 11 characters does not show a rolling "too short" annotation because that's noise. Once the floor clears, the hint reflects the tier the user would hit on submit:
+
+| Hint | Color | Tier | Submit behavior |
+|---|---|---|---|
+| *(hidden — no line rendered)* | — | `HintHidden` | Length under 12 chars. |
+| `✗ weak — cracked in seconds` | red | `HintBlock` | Submit rejected; user must change passphrase. Full pattern explanation appears in the error message below the form on submit. |
+| `! borderline — cracked in hours` | amber | `HintWarn` | Submit shows a confirmation prompt: "Press Enter again to use it anyway, or edit to try a stronger one." Re-submit with the same passphrase proceeds. |
+| `✓ strong` / `✓ very strong` | green | `HintPass` | Submit proceeds silently. |
+
+Context-aware: the chosen display name (from the wizard's name step) is passed to zxcvbn so a passphrase containing the user's own name is penalized. The add-server dialog's generate-key path (reached via `Ctrl+G` in Settings → Add Server) reuses the same live-hint layout and additionally passes the server hostname as context, so passphrases containing `chat.example.com` or its substrings are also penalized.
+
+**Text-only on purpose.** No colored strength bar — color comes via a single styled word (`✗` red / `!` amber / `✓` green) rather than a 5-segment bar. Keeps the aesthetic consistent with the rest of the minimal Bubble Tea UI and degrades cleanly on monochrome terminals (the icons + labels stay legible without color). The `sshkey-ctl bootstrap-admin` CLI uses a 5-segment unicode bar instead (`▰▰▰▱▱`) because it runs in arbitrary terminals where color support is unpredictable and the line-based input can't update live — see the server repo's `bootstrap-admin` docs.
 
 ### Step 5 — Back Up Your Key
 
@@ -1220,7 +1234,7 @@ Results show sender, timestamp, room/group context, and a snippet with the match
 │  Ctrl+I    info panel            c    copy message text              │
 │  Ctrl+F    search                g    jump to parent                 │
 │  Ctrl+,    settings              t    thread view                    │
-│  Alt+↑/↓   switch room          o    open attachment                │
+│  Alt+↑/↓   switch room           o    open attachment                │
 │  Tab       cycle focus           s    save attachment                │
 │  Esc       close / back          u    unreact                        │
 │  ?         this help screen                                          │

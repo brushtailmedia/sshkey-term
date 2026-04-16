@@ -75,6 +75,76 @@ func ValidateUserPassphrase(pass string) ValidationResult {
 	return ValidateUserPassphraseWithContext(pass, nil)
 }
 
+// HintTier captures the three visual states of the live strength
+// indicator in the TUI wizard and add-server dialog.
+type HintTier int
+
+const (
+	// HintHidden means the indicator should not render (passphrase is
+	// below MinPassphraseLength — showing weakness for a too-short
+	// passphrase is noisy and obvious).
+	HintHidden HintTier = iota
+	// HintBlock means the passphrase would be hard-rejected on submit.
+	// TUI renders in error style.
+	HintBlock
+	// HintWarn means the passphrase is borderline and would require
+	// confirmation on submit. TUI renders in warning style.
+	HintWarn
+	// HintPass means the passphrase is strong enough to submit
+	// silently. TUI renders in success/dim style.
+	HintPass
+)
+
+// LiveHint is the return type of LivePassphraseHint — a compact
+// summary suitable for rendering under the passphrase input field as
+// the user types. The TUI picks a style based on Tier and renders
+// Text verbatim.
+type LiveHint struct {
+	Tier HintTier
+	Text string
+}
+
+// LivePassphraseHint runs a fast strength check for every-keystroke
+// feedback under the passphrase input. Returns HintHidden when the
+// passphrase is shorter than MinPassphraseLength so the first N
+// keystrokes don't trigger a rolling "weak, weak, weak" indicator.
+// Once the length floor clears, returns a compact label matching the
+// tier the user would hit on submit (block / warn / pass).
+//
+// The text is deliberately shorter than the submit-time validation
+// messages: users re-reading the same long diagnostic on every
+// keystroke is noise. Only the tier indicator, icon, and crack-time
+// estimate appear live; the full pattern explanation is reserved for
+// the submit-time message.
+func LivePassphraseHint(pass string, context []string) LiveHint {
+	if len(pass) < MinPassphraseLength {
+		return LiveHint{Tier: HintHidden}
+	}
+	result := zxcvbn.PasswordStrength(pass, context)
+	crackTime := crackTimeDisplay(result.Guesses)
+	switch {
+	case result.Score < MinUserBlockScore:
+		return LiveHint{
+			Tier: HintBlock,
+			Text: fmt.Sprintf("✗ weak — cracked in %s", crackTime),
+		}
+	case result.Score < MinUserSilentScore:
+		return LiveHint{
+			Tier: HintWarn,
+			Text: fmt.Sprintf("! borderline — cracked in %s", crackTime),
+		}
+	default:
+		label := "strong"
+		if result.Score == 4 {
+			label = "very strong"
+		}
+		return LiveHint{
+			Tier: HintPass,
+			Text: fmt.Sprintf("✓ %s", label),
+		}
+	}
+}
+
 // ValidateUserPassphraseWithContext is like ValidateUserPassphrase
 // but accepts context strings (display name, server hostname) that
 // zxcvbn will penalize if they appear in the passphrase.
@@ -118,13 +188,15 @@ func buildBlockMessage(r zxcvbn.Result) string {
 }
 
 // buildWarnMessage formats a zxcvbn result into a warning message
-// shown when the passphrase is borderline. The message ends with a
-// confirmation prompt ("Continue anyway?") that the TUI surfaces in a
-// y/N modal.
+// shown when the passphrase is borderline. The message is a statement
+// of the weakness; the TUI appends a single confirmation instruction
+// after it (see wizard.go / addserver.go). Keep this function's output
+// free of question marks or "Continue anyway?" phrasing so the combined
+// text doesn't stutter.
 func buildWarnMessage(r zxcvbn.Result) string {
 	crackTime := crackTimeDisplay(r.Guesses)
 	reason := patternExplanation(r.Sequence)
-	return fmt.Sprintf("This passphrase could be cracked in %s — %s. Continue anyway?", crackTime, reason)
+	return fmt.Sprintf("This passphrase could be cracked in %s — %s.", crackTime, reason)
 }
 
 // crackTimeDisplay converts a zxcvbn guesses estimate into a
