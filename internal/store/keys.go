@@ -195,65 +195,21 @@ func (s *Store) GetAllGroups() (map[string][2]string, error) {
 	return result, rows.Err()
 }
 
-// GetActiveGroupIDs returns the IDs of every locally-cached group that
-// the user is still considered an active member of (left_at == 0). Used
-// by the group_list dispatch handler to reconcile against the server's
-// authoritative list — any local active group missing from the server's
-// response means we left it on another device while this one was offline.
-//
-// 1:1 DMs handle the same situation differently: they keep the row alive
-// server-side and carry LeftAtForCaller in dm_list. Groups can't use that
-// pattern because /leave actually removes the user from group_members,
-// so the server has nothing to attach state to. The catchup is a
-// client-side diff against the local cache instead.
-func (s *Store) GetActiveGroupIDs() ([]string, error) {
-	rows, err := s.db.Query(`SELECT id FROM groups WHERE left_at = 0`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
-// GetActiveRoomIDs is the room equivalent of GetActiveGroupIDs. Used by
-// the room_list dispatch handler for the same multi-device offline
-// catchup of /leave (and admin removal — for rooms only). Same pattern,
-// same failure mode if not wired.
-func (s *Store) GetActiveRoomIDs() ([]string, error) {
-	rows, err := s.db.Query(`SELECT id FROM rooms WHERE left_at = 0`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
+// Phase 20 removed GetActiveGroupIDs and GetActiveRoomIDs along with
+// the client-side reconciliation walks that were their only callers.
+// Server is now authoritative via left_rooms / left_groups catchup
+// messages sent on the connect handshake before the respective *_list
+// messages. See Phase 20 (Option D) in refactor_plan.md.
 
 // ArchivedGroup is a group DM the user has left. Returned by
 // GetArchivedGroups so the sidebar can render the entry as read-only even
 // after the server stops sending it in group_list.
 type ArchivedGroup struct {
-	ID      string
-	Name    string
-	Members string // comma-separated member IDs
-	LeftAt  int64
+	ID          string
+	Name        string
+	Members     string // comma-separated member IDs
+	LeftAt      int64
+	LeaveReason string // Phase 20: "" | "removed" | "retirement"
 }
 
 // GetArchivedGroups returns every group DM the user has left (left_at > 0).
@@ -263,7 +219,7 @@ type ArchivedGroup struct {
 // restarts or reconnects. Ordered by id for stable sidebar rendering.
 func (s *Store) GetArchivedGroups() ([]ArchivedGroup, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, members, left_at FROM groups WHERE left_at > 0 ORDER BY id`,
+		`SELECT id, name, members, left_at, leave_reason FROM groups WHERE left_at > 0 ORDER BY id`,
 	)
 	if err != nil {
 		return nil, err
@@ -273,7 +229,7 @@ func (s *Store) GetArchivedGroups() ([]ArchivedGroup, error) {
 	var out []ArchivedGroup
 	for rows.Next() {
 		var g ArchivedGroup
-		if err := rows.Scan(&g.ID, &g.Name, &g.Members, &g.LeftAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Members, &g.LeftAt, &g.LeaveReason); err != nil {
 			return nil, err
 		}
 		out = append(out, g)
@@ -284,19 +240,24 @@ func (s *Store) GetArchivedGroups() ([]ArchivedGroup, error) {
 // MarkGroupLeft marks a group DM as "left" (archived) on the client.
 // The group stays in the local DB and sidebar but is rendered read-only.
 // Call when the server confirms the user has left (via group_left).
-func (s *Store) MarkGroupLeft(groupID string, leftAt int64) error {
+// Phase 20: reason parameter carries the server's authoritative cause
+// ("" | "removed" | "retirement") so the sidebar can render distinct
+// system messages.
+func (s *Store) MarkGroupLeft(groupID string, leftAt int64, reason string) error {
 	_, err := s.db.Exec(
-		`UPDATE groups SET left_at = ? WHERE id = ?`,
-		leftAt, groupID,
+		`UPDATE groups SET left_at = ?, leave_reason = ? WHERE id = ?`,
+		leftAt, reason, groupID,
 	)
 	return err
 }
 
-// MarkGroupRejoined clears the left_at flag on a group DM, returning it to
-// active state. Called when the user is re-added to a group.
+// MarkGroupRejoined clears the left_at AND leave_reason flags on a group
+// DM, returning it to active state. Called when the user is re-added to
+// a group. Phase 20 extended this to also clear leave_reason so the
+// local mirror matches the server's authoritative fresh state.
 func (s *Store) MarkGroupRejoined(groupID string) error {
 	_, err := s.db.Exec(
-		`UPDATE groups SET left_at = 0 WHERE id = ?`,
+		`UPDATE groups SET left_at = 0, leave_reason = '' WHERE id = ?`,
 		groupID,
 	)
 	return err
@@ -395,21 +356,26 @@ func (s *Store) GetRoomTopic(id string) string {
 
 // MarkRoomLeft marks a room as "left" (archived) on the client. The room
 // stays in the local DB and sidebar but is rendered read-only. Called when
-// the server confirms the user has left (via room_left echo).
-func (s *Store) MarkRoomLeft(roomID string, leftAt int64) error {
+// the server confirms the user has left (via room_left echo or left_rooms
+// catchup). Phase 20: reason carries the server's authoritative cause
+// ("" | "removed" | "user_retired") so sidebar rendering can show the
+// right suffix.
+func (s *Store) MarkRoomLeft(roomID string, leftAt int64, reason string) error {
 	_, err := s.db.Exec(
-		`UPDATE rooms SET left_at = ? WHERE id = ?`,
-		leftAt, roomID,
+		`UPDATE rooms SET left_at = ?, leave_reason = ? WHERE id = ?`,
+		leftAt, reason, roomID,
 	)
 	return err
 }
 
-// MarkRoomRejoined clears the left_at flag on a room, returning it to
-// active state. Called when the server's room_list re-includes a room we
-// had marked left (the user was added back via admin CLI).
+// MarkRoomRejoined clears the left_at AND leave_reason flags on a room,
+// returning it to active state. Called when the server's room_list
+// re-includes a room we had marked left (the user was added back via
+// admin CLI). Phase 20 extended this to also clear leave_reason so
+// the local mirror matches the server's authoritative fresh state.
 func (s *Store) MarkRoomRejoined(roomID string) error {
 	_, err := s.db.Exec(
-		`UPDATE rooms SET left_at = 0 WHERE id = ?`,
+		`UPDATE rooms SET left_at = 0, leave_reason = '' WHERE id = ?`,
 		roomID,
 	)
 	return err
@@ -477,12 +443,15 @@ func (s *Store) GetRoomLeftAt(roomID string) int64 {
 // LeftRoom is a room the user has left. Returned by GetLeftRooms so the
 // sidebar can render the entry as read-only even after the server stops
 // sending it in room_list. Mirrors ArchivedGroup for the group flow.
+// Phase 20 added LeaveReason so the sidebar can render distinct
+// suffixes per cause ((left) / (removed) / (retired)).
 type LeftRoom struct {
-	ID      string
-	Name    string
-	Topic   string
-	Members int
-	LeftAt  int64
+	ID          string
+	Name        string
+	Topic       string
+	Members     int
+	LeftAt      int64
+	LeaveReason string // Phase 20: "" | "removed" | "user_retired"
 }
 
 // GetLeftRooms returns every room the user has left (left_at > 0). Used
@@ -492,7 +461,7 @@ type LeftRoom struct {
 // restarts or reconnects. Ordered by id for stable sidebar rendering.
 func (s *Store) GetLeftRooms() ([]LeftRoom, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, topic, members, left_at FROM rooms WHERE left_at > 0 ORDER BY id`,
+		`SELECT id, name, topic, members, left_at, leave_reason FROM rooms WHERE left_at > 0 ORDER BY id`,
 	)
 	if err != nil {
 		return nil, err
@@ -502,7 +471,7 @@ func (s *Store) GetLeftRooms() ([]LeftRoom, error) {
 	var out []LeftRoom
 	for rows.Next() {
 		var r LeftRoom
-		if err := rows.Scan(&r.ID, &r.Name, &r.Topic, &r.Members, &r.LeftAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Topic, &r.Members, &r.LeftAt, &r.LeaveReason); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

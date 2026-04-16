@@ -82,20 +82,46 @@ Three sections: Rooms, Messages (group DMs), DMs (1:1).
 ### Rooms section
 
 ```
-┌─ Rooms ──────┐
-│  # general  ◀│   ← selected (highlighted)
-│  # engineer  │
-│  # design (3)│   ← unread count
+┌─ Rooms ───────────┐
+│  # general       ◀│   ← selected (highlighted)
+│  # engineer       │
+│  # design     (3) │   ← unread count
 │  # old-proj (retired)│  ← retired by admin, greyed, no unread
-│  # archive  (left)   │  ← user left, greyed
+│  # archive  (left)│   ← user self-left on another device, greyed
+│  # banned (removed)│  ← admin removed user, greyed
+│  # defunct (retired)│  ← user's account was retired, greyed
 ```
 
 - `#` prefix for rooms
 - `◀` or highlight for current selection
 - `(N)` unread badge (suppressed for retired and left rooms)
-- `(retired)` marker — room archived by admin, greyed with `archivedStyle`. Takes priority over `(left)` when both flags are set.
-- `(left)` marker — user self-left, greyed with `archivedStyle`
+- `(retired)` (room-level) marker — room archived by admin (Phase 12). Takes priority over leave suffixes when both flags are set.
+- **Phase 20 leave suffixes** — distinct per-reason suffix sourced from the server's authoritative `left_rooms` catchup:
+  - `(left)` — user self-left on another device (`leave_reason=""`)
+  - `(removed)` — admin removed the user via `sshkey-ctl remove-from-room` (`leave_reason="removed"`)
+  - `(retired)` — user's account was retired (`leave_reason="user_retired"`)
+- All greyed with `archivedStyle`.
 - Sorted by config order
+
+### Room transcript — inline system messages (Phase 20)
+
+Room events are rendered inline as system messages, matching the group-side audit UX. The server authors the event on every admin action and sends it via both live `room_event` broadcasts and `SyncBatch.Events` replay on reconnect:
+
+```
+│ ─── Tuesday, April 16 ────────────────────────────
+│ ◼ alice changed the topic to "Q2 planning"
+│ ◼ alice added bob to the room
+│ ◼ bob was removed from the room by an admin
+│ ◼ carol's account was retired
+│ ◼ alice renamed the room to "planning"
+│ ◼ this room was retired by an admin
+│ ─── Today ────────────────────────────────────────
+│ alice: meeting at 3pm
+```
+
+- 5 event types: `leave` (with reason-specific wording), `join`, `topic`, `rename`, `retire`.
+- Server-authored, plaintext metadata (see PROJECT.md — "What the server sees" for the encryption-boundary enumeration). Encrypted at rest on the client via SQLCipher.
+- Pre-join events are filtered server-side via `room_members.joined_at` — new members don't see audit history from before they joined.
 
 ### Messages section (group DMs)
 

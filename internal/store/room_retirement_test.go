@@ -80,7 +80,7 @@ func TestMarkRoomRetired_IndependentFromLeftAt(t *testing.T) {
 	}
 
 	// Now also leave it
-	s.MarkRoomLeft("room_x", 200)
+	s.MarkRoomLeft("room_x", 200, "")
 
 	// Both flags should now be set
 	if !s.IsRoomLeft("room_x") || !s.IsRoomRetired("room_x") {

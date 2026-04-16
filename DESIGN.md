@@ -4,6 +4,28 @@
 
 ---
 
+## Privacy Model (Phase 20)
+
+The local DB is SQLCipher-encrypted at rest on the client, so anything the client stores — including audit events replayed from server sync batches — is encrypted against device theft. Server-side, the same data is plaintext metadata by design (see [PROJECT.md — What the server sees](https://github.com/brushtailmedia/sshkey-chat/blob/main/PROJECT.md#what-the-server-sees-metadata-only) for the four-category enumeration).
+
+Phase 20 shifted `/leave` catchup from client-side inference (diff local active IDs against `room_list` / `group_list`) to server-authoritative state (explicit `left_rooms` / `left_groups` handshake messages with reason codes). The client now mirrors the server's view rather than deriving anything locally — `GetActiveRoomIDs` / `GetActiveGroupIDs` and the reconciliation walks are deleted. Every local write the client does in response to a leave is a straight reflection of what the server told it.
+
+### Server-authoritative leave catchup
+
+- `MarkRoomLeft(roomID, leftAt, reason)` / `MarkGroupLeft(groupID, leftAt, reason)` — called for every context the server reports as left (via live `room_left` / `group_left` echoes, via `left_rooms` / `left_groups` catchup on connect, and via `group_deleted` / `deleted_groups` / `room_deleted` / `deleted_rooms` handlers — those pass `""` for reason since delete is tracked separately).
+- `MarkRoomRejoined(roomID)` / `MarkGroupRejoined(groupID)` — called for every context in the server's `room_list` / `group_list` response. Clears both `left_at` and `leave_reason` so the local mirror matches the server's fresh state when an admin re-adds the user.
+- New `leave_reason` column on the local `rooms` and `groups` tables. Sidebar renders `(left)` / `(removed)` / `(retired)` per reason; status-bar messages branch on the reason for the specific system message ("you were removed from X by an admin", etc.).
+
+### Room audit trail
+
+Phase 20 added a client-side `room_events` table (parallel to the existing `group_events` table). Populated by:
+1. Live `room_event` broadcasts — client's `case "room_event"` handler persists via `RecordRoomEvent`.
+2. Offline replay — `SyncBatch.Events` entries typed as `room_event` route to the same handler via a type-field lookup (server packs group and room events into the same `Events` slice; client distinguishes by `type`).
+
+TUI renders inline system messages in the room transcript for all five event types (`leave` / `join` / `topic` / `rename` / `retire`) with reason-specific wording, matching the group-side audit UX.
+
+---
+
 ## Local Database
 
 Single SQLCipher-encrypted SQLite database per server, stored at `~/.sshkey-chat/<server-host>/messages.db`. Encryption key derived from the SSH private key via HKDF-SHA256. WAL mode enabled, foreign keys enforced.

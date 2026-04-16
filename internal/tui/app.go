@@ -3588,11 +3588,35 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		var m protocol.RoomEvent
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			if m.Room == a.messages.room {
+				// Phase 20: extended event vocabulary with inline
+				// system messages matching the group-side UX.
 				switch m.Event {
 				case "join":
-					a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " joined")
+					if m.By != "" && m.By != m.User {
+						a.messages.AddSystemMessage(
+							a.resolveDisplayName(m.By) + " added " + a.resolveDisplayName(m.User) + " to the room")
+					} else {
+						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " joined")
+					}
 				case "leave":
-					a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " left")
+					switch m.Reason {
+					case "removed":
+						a.messages.AddSystemMessage(
+							a.resolveDisplayName(m.User) + " was removed from the room by an admin")
+					case "user_retired":
+						a.messages.AddSystemMessage(
+							a.resolveDisplayName(m.User) + "'s account was retired")
+					default:
+						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " left")
+					}
+				case "topic":
+					a.messages.AddSystemMessage(
+						a.resolveDisplayName(m.By) + " changed the topic to \"" + m.Name + "\"")
+				case "rename":
+					a.messages.AddSystemMessage(
+						a.resolveDisplayName(m.By) + " renamed the room to \"" + m.Name + "\"")
+				case "retire":
+					a.messages.AddSystemMessage("this room was retired by an admin")
 				}
 			}
 		}
@@ -3767,16 +3791,25 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		for _, raw := range batch.Reactions {
 			a.handleServerMessage(ServerMsg{Type: "reaction", Raw: raw})
 		}
-		// Phase 14: replay group admin events that happened while this
-		// client was offline. Each entry routes through the same
-		// handleServerMessage("group_event", ...) path as live
-		// broadcasts, so persisted replay and live delivery produce
-		// identical state (in-memory admin set updates, store rows,
-		// system message rendering). The server guarantees ordering
-		// via ORDER BY ts ASC, id ASC so replay matches the original
-		// broadcast order.
+		// Phase 14 / Phase 20: replay admin events that happened while
+		// this client was offline. Each entry routes through the same
+		// handleServerMessage path as live broadcasts, so persisted
+		// replay and live delivery produce identical state. The server
+		// guarantees ordering via ORDER BY ts ASC, id ASC.
+		//
+		// Events come from either group_events (Phase 14) or room_events
+		// (Phase 20, bundled with leave catchup). We peek at the "type"
+		// field to route correctly — the server packs group_event and
+		// room_event raw JSON into the same Events slice.
 		for _, raw := range batch.Events {
-			a.handleServerMessage(ServerMsg{Type: "group_event", Raw: raw})
+			eventType, _ := protocol.TypeOf(raw)
+			if eventType == "room_event" {
+				a.handleServerMessage(ServerMsg{Type: "room_event", Raw: raw})
+			} else {
+				// Default to group_event for backward compatibility
+				// with servers that don't emit room_events yet.
+				a.handleServerMessage(ServerMsg{Type: "group_event", Raw: raw})
+			}
 		}
 	case "history_result":
 		var result protocol.HistoryResult

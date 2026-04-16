@@ -463,6 +463,41 @@ type DeletedRoomsList struct {
 	Rooms []string `json:"rooms"`
 }
 
+// Phase 20: server-authoritative multi-device /leave catchup.
+// Mirror of the server-side types — see sshkey-chat's messages.go
+// for the full design commentary. On connect, server sends
+// LeftRoomsList / LeftGroupsList BEFORE RoomList / GroupList so
+// clients have reason codes in hand before reconciling sidebars.
+
+// LeftRoomEntry is one entry in a LeftRoomsList catchup message.
+type LeftRoomEntry struct {
+	Room        string `json:"room"`
+	Reason      string `json:"reason"`                 // "" | "removed" | "user_retired"
+	InitiatedBy string `json:"initiated_by,omitempty"` // admin user_id for "removed", "system" for retirement
+	LeftAt      int64  `json:"left_at"`
+}
+
+// LeftRoomsList is sent on the connect handshake with the most
+// recent leave per (user, room) not superseded by a re-join.
+type LeftRoomsList struct {
+	Type  string          `json:"type"` // "left_rooms"
+	Rooms []LeftRoomEntry `json:"rooms"`
+}
+
+// LeftGroupEntry is one entry in a LeftGroupsList catchup message.
+type LeftGroupEntry struct {
+	Group       string `json:"group"`
+	Reason      string `json:"reason"`                 // "" | "removed" | "retirement"
+	InitiatedBy string `json:"initiated_by,omitempty"` // admin user_id for "removed", "system" for retirement
+	LeftAt      int64  `json:"left_at"`
+}
+
+// LeftGroupsList is the group DM analogue of LeftRoomsList.
+type LeftGroupsList struct {
+	Type   string           `json:"type"` // "left_groups"
+	Groups []LeftGroupEntry `json:"groups"`
+}
+
 // 1:1 DM messages
 
 type CreateDM struct {
@@ -725,12 +760,17 @@ type RoomInfo struct {
 	Members int    `json:"members"`
 }
 
+// RoomEvent is the protocol type for room audit events. Phase 20
+// extended it with By and Name fields (and added topic/rename/retire
+// event values) for the room audit trail.
 type RoomEvent struct {
 	Type   string `json:"type"`
 	Room   string `json:"room"`
-	Event  string `json:"event"`
+	Event  string `json:"event"`            // "join" | "leave" | "topic" | "rename" | "retire"
 	User   string `json:"user"`
-	Reason string `json:"reason,omitempty"` // "" | "admin" | "retirement" | "user_retired"
+	By     string `json:"by,omitempty"`     // Phase 20: acting admin/operator
+	Reason string `json:"reason,omitempty"` // "" | "removed" | "user_retired"
+	Name   string `json:"name,omitempty"`   // Phase 20: new value for "topic" / "rename" events
 }
 
 type GroupList struct {

@@ -194,13 +194,14 @@ func (s *Store) init() error {
 		-- or leave a retired room (both > 0), and the TUI renders them
 		-- differently. name carries the post-retirement suffixed form.
 		CREATE TABLE IF NOT EXISTS rooms (
-			id         TEXT PRIMARY KEY,
-			name       TEXT NOT NULL DEFAULT '',
-			topic      TEXT NOT NULL DEFAULT '',
-			members    INTEGER NOT NULL DEFAULT 0,
-			updated_at INTEGER NOT NULL DEFAULT 0,
-			left_at    INTEGER NOT NULL DEFAULT 0,
-			retired_at INTEGER NOT NULL DEFAULT 0
+			id            TEXT PRIMARY KEY,
+			name          TEXT NOT NULL DEFAULT '',
+			topic         TEXT NOT NULL DEFAULT '',
+			members       INTEGER NOT NULL DEFAULT 0,
+			updated_at    INTEGER NOT NULL DEFAULT 0,
+			left_at       INTEGER NOT NULL DEFAULT 0,
+			retired_at    INTEGER NOT NULL DEFAULT 0,
+			leave_reason  TEXT NOT NULL DEFAULT ''
 		);
 
 		-- Group DMs (local cache of group member lists + names).
@@ -219,11 +220,12 @@ func (s *Store) init() error {
 		-- upsert — promote/demote events land via SetLocalUserGroupAdmin
 		-- so they can't clobber the members list during a normal sync.
 		CREATE TABLE IF NOT EXISTS groups (
-			id       TEXT PRIMARY KEY,
-			name     TEXT NOT NULL DEFAULT '',
-			members  TEXT NOT NULL DEFAULT '',
-			is_admin INTEGER NOT NULL DEFAULT 0,
-			left_at  INTEGER NOT NULL DEFAULT 0
+			id           TEXT PRIMARY KEY,
+			name         TEXT NOT NULL DEFAULT '',
+			members      TEXT NOT NULL DEFAULT '',
+			is_admin     INTEGER NOT NULL DEFAULT 0,
+			left_at      INTEGER NOT NULL DEFAULT 0,
+			leave_reason TEXT NOT NULL DEFAULT ''
 		);
 
 		-- Phase 14: group_events is the local replay/audit table for
@@ -252,6 +254,27 @@ func (s *Store) init() error {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_group_events_group_ts ON group_events(group_id, ts);
+
+		-- Phase 20: room_events is the local replay/audit table for
+		-- room audit events (leave / join / topic / rename / retire).
+		-- Populated by:
+		--   (a) live room_event broadcasts from the server
+		--   (b) offline replay entries from sync_batch.Events on reconnect
+		-- Mirrors group_events in shape but keyed by room_id. Separate
+		-- table (rather than a context-type column on group_events)
+		-- keeps the existing group-side code paths untouched.
+		CREATE TABLE IF NOT EXISTS room_events (
+			id       INTEGER PRIMARY KEY AUTOINCREMENT,
+			room_id  TEXT NOT NULL,
+			event    TEXT NOT NULL,
+			user     TEXT NOT NULL,
+			by       TEXT NOT NULL DEFAULT '',
+			reason   TEXT NOT NULL DEFAULT '',
+			name     TEXT NOT NULL DEFAULT '',
+			ts       INTEGER NOT NULL
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_room_events_room_ts ON room_events(room_id, ts);
 
 		-- 1:1 DMs (local cache of DM partner info).
 		-- left_at = 0 means active; >0 means the user has /delete'd this

@@ -475,26 +475,16 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 				}
 			}
 
-			// Multi-device offline catchup for room /leave (and admin
-			// removal — rooms only): any locally-active room not in the
-			// server's authoritative list means we either left it on
-			// another device while this one was offline, or an admin
-			// removed us. Mark it as left so the sidebar treats it
-			// consistently with the device that initiated the leave.
-			// Same pattern as the group_list reconciliation.
-			serverIDs := make(map[string]bool, len(rl.Rooms))
+			// Phase 20: clear stale left_at / leave_reason for every
+			// room the server still reports as active. This is the
+			// replacement for the old reconciliation walk — server is
+			// now authoritative via left_rooms catchup (delivered
+			// BEFORE room_list on the handshake), so any room present
+			// in this list is by definition active.
 			for _, r := range rl.Rooms {
-				serverIDs[r.ID] = true
-			}
-			if activeIDs, err := c.store.GetActiveRoomIDs(); err == nil {
-				now := time.Now().Unix()
-				for _, id := range activeIDs {
-					if !serverIDs[id] {
-						if err := c.store.MarkRoomLeft(id, now); err != nil {
-							c.logger.Warn("MarkRoomLeft on room_list reconciliation",
-								"room", id, "error", err)
-						}
-					}
+				if err := c.store.MarkRoomRejoined(r.ID); err != nil {
+					c.logger.Warn("MarkRoomRejoined on room_list",
+						"room", r.ID, "error", err)
 				}
 			}
 		}
@@ -534,44 +524,31 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 					}
 				}
 
-				// Multi-device offline catchup for /leave: any locally-
-				// active group (left_at == 0) that's not in the server's
-				// authoritative response means we left it on another
-				// device while this one was offline. Mark it as left so
-				// the sidebar treats it consistently with the device
-				// that initiated the leave (greyed/read-only).
-				//
-				// 1:1 DMs handle this via LeftAtForCaller in dm_list
-				// because the server keeps the row alive after leave;
-				// groups can't use that pattern because /leave actually
-				// removes the user from group_members. The reconciliation
-				// is the client-side analog.
-				//
-				// Composes correctly with the deleted_groups handler:
-				// deleted_groups arrives BEFORE group_list in the
-				// handshake, so by the time we reach this point, any
-				// /delete'd groups have already been marked as left
-				// AND purged. The reconciliation only fires on local
-				// rows that are still active — the genuine /leave-on-
-				// other-device cases.
-				serverIDs := make(map[string]bool, len(gl.Groups))
+				// Phase 20: clear stale left_at / leave_reason for every
+				// group the server still reports as active. Server is
+				// now authoritative via left_groups catchup (delivered
+				// BEFORE group_list on the handshake), so any group in
+				// this list is by definition active.
 				for _, g := range gl.Groups {
-					serverIDs[g.ID] = true
-				}
-				if activeIDs, err := c.store.GetActiveGroupIDs(); err == nil {
-					now := time.Now().Unix()
-					for _, id := range activeIDs {
-						if !serverIDs[id] {
-							if err := c.store.MarkGroupLeft(id, now); err != nil {
-								c.logger.Warn("MarkGroupLeft on group_list reconciliation",
-									"group", id, "error", err)
-							}
-							c.mu.Lock()
-							delete(c.groupMembers, id)
-							c.mu.Unlock()
-						}
+					if err := c.store.MarkGroupRejoined(g.ID); err != nil {
+						c.logger.Warn("MarkGroupRejoined on group_list",
+							"group", g.ID, "error", err)
 					}
 				}
+			}
+		}
+	case "room_event":
+		// Phase 20: persist room audit events (leave/join/topic/rename/
+		// retire) to the local room_events table so sync replay and
+		// live broadcasts produce identical local state. The TUI layer
+		// (app.go) handles inline rendering and coalescing.
+		var re protocol.RoomEvent
+		if err := json.Unmarshal(raw, &re); err == nil && c.store != nil {
+			if err := c.store.RecordRoomEvent(
+				re.Room, re.Event, re.User, re.By, re.Reason, re.Name, time.Now().Unix(),
+			); err != nil {
+				c.logger.Warn("RecordRoomEvent",
+					"room", re.Room, "event", re.Event, "error", err)
 			}
 		}
 	case "group_event":
@@ -706,7 +683,7 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			delete(c.groupMembers, gl.Group)
 			c.mu.Unlock()
 			if c.store != nil {
-				if err := c.store.MarkGroupLeft(gl.Group, time.Now().Unix()); err != nil {
+				if err := c.store.MarkGroupLeft(gl.Group, time.Now().Unix(), gl.Reason); err != nil {
 					c.logger.Warn("failed to mark group left", "group", gl.Group, "error", err)
 				}
 			}
@@ -725,7 +702,9 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			delete(c.groupMembers, gd.Group)
 			c.mu.Unlock()
 			if c.store != nil {
-				if err := c.store.MarkGroupLeft(gd.Group, time.Now().Unix()); err != nil {
+				// group_deleted is a distinct action tracked by the
+				// separate deleted_groups sidecar — not a leave reason.
+				if err := c.store.MarkGroupLeft(gd.Group, time.Now().Unix(), ""); err != nil {
 					c.logger.Warn("MarkGroupLeft on group_deleted", "group", gd.Group, "error", err)
 				}
 				if err := c.store.PurgeGroupMessages(gd.Group); err != nil {
@@ -743,7 +722,9 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			// echo had arrived. Idempotent on already-purged entries.
 			if c.store != nil {
 				for _, groupID := range dgl.Groups {
-					if err := c.store.MarkGroupLeft(groupID, time.Now().Unix()); err != nil {
+					// deleted_groups catchup — delete is a distinct action
+					// tracked by its own sidecar, so no leave reason.
+					if err := c.store.MarkGroupLeft(groupID, time.Now().Unix(), ""); err != nil {
 						c.logger.Warn("MarkGroupLeft on deleted_groups", "group", groupID, "error", err)
 					}
 					if err := c.store.PurgeGroupMessages(groupID); err != nil {
@@ -757,6 +738,34 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 				c.mu.Unlock()
 			}
 		}
+	case "left_rooms":
+		// Phase 20: server-authoritative multi-device leave catchup.
+		// On connect handshake, the server sends the most recent leave
+		// per room for this user (with reason code) BEFORE room_list,
+		// so the sidebar can render the right archived state.
+		var lr protocol.LeftRoomsList
+		if err := json.Unmarshal(raw, &lr); err == nil && c.store != nil {
+			for _, entry := range lr.Rooms {
+				if err := c.store.MarkRoomLeft(entry.Room, entry.LeftAt, entry.Reason); err != nil {
+					c.logger.Warn("MarkRoomLeft on left_rooms catchup",
+						"room", entry.Room, "error", err)
+				}
+			}
+		}
+	case "left_groups":
+		// Phase 20: group DM analogue of left_rooms.
+		var lg protocol.LeftGroupsList
+		if err := json.Unmarshal(raw, &lg); err == nil && c.store != nil {
+			for _, entry := range lg.Groups {
+				if err := c.store.MarkGroupLeft(entry.Group, entry.LeftAt, entry.Reason); err != nil {
+					c.logger.Warn("MarkGroupLeft on left_groups catchup",
+						"group", entry.Group, "error", err)
+				}
+				c.mu.Lock()
+				delete(c.groupMembers, entry.Group)
+				c.mu.Unlock()
+			}
+		}
 	case "room_left":
 		var rl protocol.RoomLeft
 		if err := json.Unmarshal(raw, &rl); err == nil {
@@ -764,7 +773,7 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			// local DB. The room metadata row stays so the sidebar can render
 			// the entry as greyed/read-only on this and subsequent reconnects.
 			if c.store != nil {
-				if err := c.store.MarkRoomLeft(rl.Room, time.Now().Unix()); err != nil {
+				if err := c.store.MarkRoomLeft(rl.Room, time.Now().Unix(), rl.Reason); err != nil {
 					c.logger.Warn("failed to mark room left", "room", rl.Room, "error", err)
 				}
 			}
@@ -839,7 +848,9 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		var rd protocol.RoomDeleted
 		if err := json.Unmarshal(raw, &rd); err == nil {
 			if c.store != nil {
-				if err := c.store.MarkRoomLeft(rd.Room, time.Now().Unix()); err != nil {
+				// room_deleted is a distinct action tracked by the
+				// separate deleted_rooms sidecar — not a leave reason.
+				if err := c.store.MarkRoomLeft(rd.Room, time.Now().Unix(), ""); err != nil {
 					c.logger.Warn("MarkRoomLeft on room_deleted", "room", rd.Room, "error", err)
 				}
 				if err := c.store.PurgeRoomMessages(rd.Room); err != nil {
@@ -859,7 +870,8 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			if c.store != nil {
 				now := time.Now().Unix()
 				for _, roomID := range drl.Rooms {
-					if err := c.store.MarkRoomLeft(roomID, now); err != nil {
+					// deleted_rooms catchup — distinct action, no leave reason.
+					if err := c.store.MarkRoomLeft(roomID, now, ""); err != nil {
 						c.logger.Warn("MarkRoomLeft on deleted_rooms", "room", roomID, "error", err)
 					}
 					if err := c.store.PurgeRoomMessages(roomID); err != nil {
