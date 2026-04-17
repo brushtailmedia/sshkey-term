@@ -1,10 +1,8 @@
 package client
 
 import (
-	"bufio"
 	crand "crypto/rand"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,17 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/brushtailmedia/sshkey-term/internal/crypto"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
-
-// downloadChannelType is the SSH channel subtype the server accepts for
-// per-request download streams (Phase 17 Step 4.f). Must match the
-// server's DownloadChannelType constant exactly — any mismatch results
-// in the server rejecting the channel open with UnknownChannelType.
-const downloadChannelType = "sshkey-chat-download"
 
 // pendingUpload tracks an in-progress upload.
 type pendingUpload struct {
@@ -37,11 +27,17 @@ var (
 	uploads   = make(map[string]*pendingUpload)
 )
 
-// Phase 17 Step 4.f retired the pending-download map and the
-// HandleDownloadStart / HandleDownloadError callbacks. Downloads now
-// open their own SSH channel per request; server replies with
-// download_start / download_error inline on that same channel. No
-// cross-goroutine correlation state is needed.
+// pendingDownload tracks an in-progress download (file_id-keyed).
+type pendingDownload struct {
+	started     chan struct{} // signalled when download_start arrives
+	err         chan error    // signalled when download_error arrives
+	contentHash string        // set by HandleDownloadStart from download_start
+}
+
+var (
+	downloadsMu sync.Mutex
+	downloads   = make(map[string]*pendingDownload)
+)
 
 // UploadFile encrypts and uploads a file using the room's current epoch key.
 // For group DM uploads, use UploadGroupFile instead — it takes a per-file
@@ -233,38 +229,47 @@ func HandleUploadError(uploadID string, err error) {
 	}
 }
 
-// DownloadFile downloads and decrypts a file by opening a dedicated
-// `sshkey-chat-download` SSH channel for this request. Returns the
-// local path on success. Phase 17 Step 4.f — one channel per
-// download, streamed and closed inline.
-//
-// Protocol on the new channel:
-//
-//	Client: write  {"type":"download","file_id":"..."}\n
-//	Server: reply  {"type":"download_start","file_id":...,"size":...,"content_hash":"..."}\n
-//	                OR  {"type":"download_error","file_id":...,"code":...,"message":...}\n (fatal)
-//	Server: stream <binary frame — id_len|id|data_len|data>  (only on success)
-//	Server: reply  {"type":"download_complete","file_id":...}\n (only on success)
-//	Server: close channel
-//
-// Content hash verification is unchanged from the pre-Phase-17-Step-4.f
-// flow — the hash was the end-to-end integrity backstop against bit
-// rot / truncation / transit corruption, and it remains so on the new
-// per-request channel. The hash is computed on the encrypted bytes by
-// the uploader and re-verified by the downloader before anything hits
-// disk.
-//
-// Concurrency: each DownloadFile call opens its own SSH channel, so
-// multiple DownloadFile invocations proceed in parallel (up to the
-// server's per-connection cap — default 3). No client-side mutex
-// needed.
+// HandleDownloadStart is called from handleInternal when download_start
+// arrives. Stores the content hash and signals the matching DownloadFile
+// call that bytes are inbound on Channel 2.
+func HandleDownloadStart(fileID, contentHash string) {
+	downloadsMu.Lock()
+	p, ok := downloads[fileID]
+	if ok {
+		p.contentHash = contentHash
+	}
+	downloadsMu.Unlock()
+	if ok {
+		select {
+		case p.started <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// HandleDownloadError is called from handleInternal when download_error
+// arrives. Signals the matching DownloadFile call to fail fast instead of
+// waiting forever for a binary frame that will never arrive.
+func HandleDownloadError(fileID string, err error) {
+	downloadsMu.Lock()
+	p, ok := downloads[fileID]
+	downloadsMu.Unlock()
+	if ok {
+		select {
+		case p.err <- err:
+		default:
+		}
+	}
+}
+
+// DownloadFile downloads and decrypts a file. Returns the local path.
 func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) {
 	c.mu.RLock()
-	conn := c.conn
+	dlChan := c.downloadChan
 	c.mu.RUnlock()
 
-	if conn == nil {
-		return "", fmt.Errorf("not connected")
+	if dlChan == nil {
+		return "", fmt.Errorf("no download channel")
 	}
 
 	// Determine save directory
@@ -275,87 +280,63 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 	filesDir := filepath.Join(dataDir, "files")
 	os.MkdirAll(filesDir, 0700)
 
-	// Open a fresh SSH channel for this download. Server rejects with
-	// ResourceShortage if we're at the per-connection cap — propagate as
-	// a typed-ish error so callers can surface a "try again" UX.
-	dlCh, reqs, err := conn.OpenChannel(downloadChannelType, nil)
-	if err != nil {
-		return "", fmt.Errorf("open download channel: %w", err)
+	// Register a pending download so Channel 1 can signal download_start
+	// or download_error for this specific file_id.
+	pending := &pendingDownload{
+		started: make(chan struct{}, 1),
+		err:     make(chan error, 1),
 	}
-	go ssh.DiscardRequests(reqs)
-	defer dlCh.Close()
+	downloadsMu.Lock()
+	downloads[fileID] = pending
+	downloadsMu.Unlock()
+	defer func() {
+		downloadsMu.Lock()
+		delete(downloads, fileID)
+		downloadsMu.Unlock()
+	}()
 
-	// Send the download request inline on the new channel.
-	reqLine, err := json.Marshal(protocol.Download{
+	// Serialize downloads on the shared Channel 2: send the request
+	// and read the reply under the same lock, otherwise concurrent
+	// callers would read each other's binary frames off the same
+	// channel. Server writes frames in request order; the client
+	// matches them up positionally.
+	c.downloadChanMu.Lock()
+	defer c.downloadChanMu.Unlock()
+
+	// Send download request
+	err := c.enc.Encode(protocol.Download{
 		Type:   "download",
 		FileID: fileID,
 	})
 	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
-	}
-	reqLine = append(reqLine, '\n')
-	if _, err := dlCh.Write(reqLine); err != nil {
-		return "", fmt.Errorf("send request: %w", err)
+		return "", err
 	}
 
-	// Read the first JSON line — either download_start (success, bytes
-	// follow) or download_error (fatal, channel closes after).
-	reader := bufio.NewReaderSize(dlCh, 4096)
-	firstLine, err := readLineWithDeadline(reader, 30*time.Second, c.done)
-	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
+	// Wait for download_start (server is sending bytes) or download_error
+	// (server rejected the request — fail fast instead of blocking on a
+	// binary frame that will never arrive).
+	select {
+	case <-pending.started:
+	case err := <-pending.err:
+		return "", err
+	case <-c.done:
+		return "", fmt.Errorf("disconnected")
+	case <-time.After(30 * time.Second):
+		return "", fmt.Errorf("download timed out waiting for server")
 	}
 
-	var typeProbe struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(firstLine, &typeProbe); err != nil {
-		return "", fmt.Errorf("parse response type: %w", err)
-	}
-
-	switch typeProbe.Type {
-	case "download_error":
-		var de protocol.DownloadError
-		if err := json.Unmarshal(firstLine, &de); err != nil {
-			return "", fmt.Errorf("parse download_error: %w", err)
-		}
-		return "", fmt.Errorf("%s: %s", de.Code, de.Message)
-
-	case "download_start":
-		// Fall through to stream read below.
-	default:
-		return "", fmt.Errorf("unexpected response type %q", typeProbe.Type)
-	}
-
-	var ds protocol.DownloadStart
-	if err := json.Unmarshal(firstLine, &ds); err != nil {
-		return "", fmt.Errorf("parse download_start: %w", err)
-	}
-	expectedHash := ds.ContentHash
-
-	// Read the binary frame. The bufio.Reader may have buffered past the
-	// newline; pass it as the reader so no bytes are lost.
-	_, data, err := readBinaryFrame(reader)
+	// Read binary frame from Channel 2
+	_, data, err := readBinaryFrame(dlChan)
 	if err != nil {
 		return "", fmt.Errorf("read binary: %w", err)
-	}
-
-	// Read the trailing download_complete line. This is the server's
-	// clean end-of-stream signal; if we don't see it, we consider the
-	// download aborted and abandon the bytes. Skipping verification on
-	// an aborted stream keeps corrupt-but-hash-matching data from ever
-	// reaching disk.
-	completeLine, err := readLineWithDeadline(reader, 30*time.Second, c.done)
-	if err != nil {
-		return "", fmt.Errorf("read completion: %w", err)
-	}
-	if err := json.Unmarshal(completeLine, &typeProbe); err != nil || typeProbe.Type != "download_complete" {
-		return "", fmt.Errorf("unexpected trailer: %s", completeLine)
 	}
 
 	// Verify content hash before writing anything to disk (catches
 	// truncation, bit rot, and transit corruption). The hash was
 	// computed on the encrypted bytes by the uploader.
+	downloadsMu.Lock()
+	expectedHash := pending.contentHash
+	downloadsMu.Unlock()
 	if err := crypto.VerifyContentHash(data, expectedHash); err != nil {
 		return "", fmt.Errorf("download integrity check failed: %w", err)
 	}
@@ -373,30 +354,6 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 	}
 
 	return localPath, nil
-}
-
-// readLineWithDeadline reads one newline-terminated line from r,
-// aborting if done fires or the deadline elapses. Used to read JSON
-// lines off the download channel with a bounded wait so a dead
-// connection / stuck server doesn't hang DownloadFile forever.
-func readLineWithDeadline(r *bufio.Reader, timeout time.Duration, done <-chan struct{}) ([]byte, error) {
-	type result struct {
-		line []byte
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		line, err := r.ReadBytes('\n')
-		ch <- result{line: line, err: err}
-	}()
-	select {
-	case res := <-ch:
-		return res.line, res.err
-	case <-done:
-		return nil, fmt.Errorf("disconnected")
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("timeout")
-	}
 }
 
 // SaveFileAs copies a downloaded file to a user-chosen path.
