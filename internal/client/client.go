@@ -42,14 +42,18 @@ type Config struct {
 }
 
 // Client manages the SSH connection and protocol session.
+//
+// Phase 17 Step 4.f (server-side) retired the shared Channel 2 download
+// model in favor of per-request `sshkey-chat-download` channels — one
+// SSH channel per file download. DownloadFile opens a fresh channel
+// each call; no client-side state tracks a shared download stream.
+// The old `downloadChan` / `downloadChanMu` fields are gone.
 type Client struct {
-	cfg            Config
-	conn           *ssh.Client
-	channel        ssh.Channel
-	downloadChan   ssh.Channel // Channel 2: client reads file bytes from here
-	downloadChanMu sync.Mutex  // serializes concurrent downloads (request+read atomic)
-	uploadChan     ssh.Channel // Channel 3: client writes file bytes here
-	uploadChanMu   sync.Mutex  // serializes concurrent uploads (frame writes must not interleave)
+	cfg          Config
+	conn         *ssh.Client
+	channel      ssh.Channel
+	uploadChan   ssh.Channel // Upload channel: 2nd session channel on the connection
+	uploadChanMu sync.Mutex  // serializes concurrent uploads (frame writes must not interleave)
 	enc            *protocol.Encoder
 	dec            *protocol.Decoder
 	logger         *slog.Logger
@@ -138,7 +142,9 @@ func (c *Client) Connect() error {
 	}
 	c.conn = conn
 
-	// Open Channel 1 (NDJSON protocol)
+	// Open the NDJSON control channel (1st session channel on this
+	// connection). All protocol messages other than file-transfer bytes
+	// flow through here.
 	ch, reqs, err := conn.OpenChannel("session", nil)
 	if err != nil {
 		conn.Close()
@@ -150,16 +156,14 @@ func (c *Client) Connect() error {
 	c.enc = protocol.NewEncoder(ch)
 	c.dec = protocol.NewDecoder(ch)
 
-	// Open Channel 2 (downloads: server writes, client reads) — non-fatal if it fails
-	dlCh, dlReqs, err := conn.OpenChannel("session", nil)
-	if err != nil {
-		c.logger.Warn("failed to open download channel", "error", err)
-	} else {
-		go ssh.DiscardRequests(dlReqs)
-		c.downloadChan = dlCh
-	}
-
-	// Open Channel 3 (uploads: client writes, server reads) — non-fatal if it fails
+	// Open the upload channel (2nd session channel). Long-lived; reused
+	// across the session for upload binary frames. Non-fatal if it fails
+	// — uploads will surface an error, but reads on the control channel
+	// still work.
+	//
+	// Phase 17 Step 4.f: there's no longer a third pre-allocated session
+	// channel for downloads. Downloads use per-request SSH channels of
+	// type `sshkey-chat-download`, opened on demand by DownloadFile.
 	ulCh, ulReqs, err := conn.OpenChannel("session", nil)
 	if err != nil {
 		c.logger.Warn("failed to open upload channel", "error", err)
@@ -958,16 +962,10 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		if err := json.Unmarshal(raw, &ue); err == nil {
 			HandleUploadError(ue.UploadID, fmt.Errorf("%s: %s", ue.Code, ue.Message))
 		}
-	case "download_start":
-		var ds protocol.DownloadStart
-		if err := json.Unmarshal(raw, &ds); err == nil {
-			HandleDownloadStart(ds.FileID, ds.ContentHash)
-		}
-	case "download_error":
-		var de protocol.DownloadError
-		if err := json.Unmarshal(raw, &de); err == nil {
-			HandleDownloadError(de.FileID, fmt.Errorf("%s: %s", de.Code, de.Message))
-		}
+	// Phase 17 Step 4.f: `download_start` and `download_error` are no
+	// longer sent on the control channel. Downloads have their own SSH
+	// channel (`sshkey-chat-download`) and read these messages inline on
+	// that channel — see DownloadFile in filetransfer.go.
 	case "admin_notify":
 		var an protocol.AdminNotify
 		if err := json.Unmarshal(raw, &an); err == nil && an.Event == "pending_key" {
