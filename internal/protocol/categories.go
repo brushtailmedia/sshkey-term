@@ -80,7 +80,8 @@ func CategoryForCode(code string) ErrorCategory {
 		"invalid_upload_id", "invalid_content_hash", "missing_hash",
 		"invalid_context", "invalid_file_id", "invalid_message",
 		"edit_not_authorized", "edit_deleted_message",
-		"malformed", "invalid_id", "payload_too_large", "unknown_verb":
+		"malformed", "invalid_id", "payload_too_large", "unknown_verb",
+		"daily_quota_exceeded": // out-of-phase 2026-04-19 (per-user upload quota)
 		return CategoryC
 
 	// D — privacy-identical rejection

@@ -1041,6 +1041,24 @@ type AdminNotify struct {
 	FirstSeen   string `json:"first_seen"`
 }
 
+// AdminNotifyQuota mirrors the server's per-user upload quota notify
+// shape. Three event kinds (quota_warn / quota_sustained / quota_block)
+// share the User / Date / BytesToday / ThresholdBytes fields; sustained
+// adds BytesYesterday + ConsecutiveDays; block adds BytesAttempted.
+// Out-of-phase server work 2026-04-19; client-side mirror added at the
+// same time so admins running the TUI see these events parsed correctly.
+type AdminNotifyQuota struct {
+	Type            string `json:"type"`
+	Event           string `json:"event"`
+	User            string `json:"user"`
+	Date            string `json:"date"`
+	BytesToday      int64  `json:"bytes_today"`
+	ThresholdBytes  int64  `json:"threshold_bytes"`
+	BytesYesterday  int64  `json:"bytes_yesterday,omitempty"`
+	ConsecutiveDays int    `json:"consecutive_days,omitempty"`
+	BytesAttempted  int64  `json:"bytes_attempted,omitempty"`
+}
+
 // Pending keys management (admin-only)
 
 type ListPendingKeys struct {
@@ -1094,6 +1112,12 @@ type Error struct {
 const (
 	ErrEditNotMostRecent = "edit_not_most_recent"
 	ErrEditWindowExpired = "edit_window_expired"
+
+	// Out-of-phase 2026-04-19 (originally Phase 25): per-user daily
+	// upload quota exceeded. Client surfaces the message verbatim;
+	// the server-rendered text already includes the configured block
+	// threshold ("5 GB" or whatever the operator set).
+	ErrDailyQuotaExceeded = "daily_quota_exceeded"
 )
 
 // Decrypted payload (client-side only — this is what's inside the encrypted payload field)
