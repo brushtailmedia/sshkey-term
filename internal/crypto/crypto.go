@@ -224,6 +224,92 @@ func VerifyDM(pubKey ed25519.PublicKey, payloadBytes []byte, conversation string
 	return ed25519.Verify(pubKey, msg, sig)
 }
 
+// SignRoomEdit signs a room message edit envelope. Distinct from
+// SignRoom in two ways: (1) the canonical form binds the signature to a
+// specific msg.ID via a length-prefixed msgID field, preventing a
+// compromised server from replaying A's past signed `(payload, room,
+// epoch)` across different msgIDs to rewrite history via the edit path;
+// (2) a domain-separation tag (`"edit_room:"`) guarantees that a
+// signature produced by SignRoom can never cross-verify as a SignRoomEdit
+// signature regardless of how the attacker constructs inputs.
+//
+// Canonical form:
+//
+//	Sign("edit_room:" || uint32_be(len(msgID)) || msgID || payload_bytes || room_utf8 || epoch_big_endian_uint64)
+//
+// Phase 21 item 3 — defense-in-depth against the substitution attack
+// made newly exploitable by Phase 15's `edited` broadcasts overwriting
+// existing message rows. See refactor_plan.md Phase 21 scope item 3 for
+// the full attack analysis.
+func SignRoomEdit(privKey ed25519.PrivateKey, msgID string, payloadBytes []byte, room string, epoch int64) []byte {
+	msg := buildRoomEditCanonical(msgID, payloadBytes, room, epoch)
+	return ed25519.Sign(privKey, msg)
+}
+
+// VerifyRoomEdit verifies a room message edit signature against the
+// SignRoomEdit canonical form. Returns false if the signature was
+// produced by SignRoom (send-path), bound to a different msgID, or
+// otherwise mismatches.
+func VerifyRoomEdit(pubKey ed25519.PublicKey, msgID string, payloadBytes []byte, room string, epoch int64, sig []byte) bool {
+	msg := buildRoomEditCanonical(msgID, payloadBytes, room, epoch)
+	return ed25519.Verify(pubKey, msg, sig)
+}
+
+// SignDMEdit signs a DM/group edit envelope with msgID binding. Used
+// for both 1:1 DMs and group DMs (same canonical form shape — the
+// `conversation` parameter carries either the DM ID or the group ID,
+// and wrappedKeys differs by context so signatures don't cross over).
+//
+// Canonical form:
+//
+//	Sign("edit_dm:" || uint32_be(len(msgID)) || msgID || payload_bytes || conversation_id_utf8 || wrapped_keys_canonical)
+//
+// Phase 21 item 3.
+func SignDMEdit(privKey ed25519.PrivateKey, msgID string, payloadBytes []byte, conversation string, wrappedKeys map[string]string) []byte {
+	msg := buildDMEditCanonical(msgID, payloadBytes, conversation, wrappedKeys)
+	return ed25519.Sign(privKey, msg)
+}
+
+// VerifyDMEdit verifies a DM/group edit signature.
+func VerifyDMEdit(pubKey ed25519.PublicKey, msgID string, payloadBytes []byte, conversation string, wrappedKeys map[string]string, sig []byte) bool {
+	msg := buildDMEditCanonical(msgID, payloadBytes, conversation, wrappedKeys)
+	return ed25519.Verify(pubKey, msg, sig)
+}
+
+// buildRoomEditCanonical constructs the SignRoomEdit / VerifyRoomEdit
+// input bytes. Shared helper so Sign and Verify cannot drift.
+func buildRoomEditCanonical(msgID string, payloadBytes []byte, room string, epoch int64) []byte {
+	const tag = "edit_room:"
+	out := make([]byte, 0, len(tag)+4+len(msgID)+len(payloadBytes)+len(room)+8)
+	out = append(out, tag...)
+	var idLen [4]byte
+	binary.BigEndian.PutUint32(idLen[:], uint32(len(msgID)))
+	out = append(out, idLen[:]...)
+	out = append(out, []byte(msgID)...)
+	out = append(out, payloadBytes...)
+	out = append(out, []byte(room)...)
+	var epochBytes [8]byte
+	binary.BigEndian.PutUint64(epochBytes[:], uint64(epoch))
+	out = append(out, epochBytes[:]...)
+	return out
+}
+
+// buildDMEditCanonical constructs the SignDMEdit / VerifyDMEdit input
+// bytes. Shared so Sign and Verify cannot drift.
+func buildDMEditCanonical(msgID string, payloadBytes []byte, conversation string, wrappedKeys map[string]string) []byte {
+	const tag = "edit_dm:"
+	out := make([]byte, 0, len(tag)+4+len(msgID)+len(payloadBytes)+len(conversation)+len(wrappedKeys)*100)
+	out = append(out, tag...)
+	var idLen [4]byte
+	binary.BigEndian.PutUint32(idLen[:], uint32(len(msgID)))
+	out = append(out, idLen[:]...)
+	out = append(out, []byte(msgID)...)
+	out = append(out, payloadBytes...)
+	out = append(out, []byte(conversation)...)
+	out = append(out, wrappedKeysCanonical(wrappedKeys)...)
+	return out
+}
+
 // wrappedKeysCanonical returns wrapped key values concatenated in sorted username order.
 func wrappedKeysCanonical(wrappedKeys map[string]string) []byte {
 	usernames := make([]string, 0, len(wrappedKeys))

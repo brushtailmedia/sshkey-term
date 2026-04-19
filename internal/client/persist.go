@@ -1,12 +1,48 @@
 package client
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 
+	"github.com/brushtailmedia/sshkey-term/internal/crypto"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
+
+// pubKeyForUser resolves a user's Ed25519 public key for signature
+// verification on inbound broadcasts. Lookup order:
+//  1. Self — use our own key directly (we trust our send path).
+//  2. Live profile cache (`c.profiles`) — most authoritative, populated
+//     on every connect handshake via `profile` events.
+//  3. Pinned-keys store fallback — covers the offline/cold-start window
+//     before the profile broadcast arrives for a given user.
+//
+// Returns nil if the user is not known. Callers MUST treat nil as a
+// verification failure (drop the broadcast) — verify-or-drop is the
+// contract on which Phase 21 item 3's edit-path protection rests.
+func (c *Client) pubKeyForUser(userID string) ed25519.PublicKey {
+	if userID == c.UserID() {
+		return c.privKey.Public().(ed25519.PublicKey)
+	}
+	c.mu.RLock()
+	profile := c.profiles[userID]
+	c.mu.RUnlock()
+	if profile != nil && profile.PubKey != "" {
+		if pub, err := crypto.ParseSSHPubKey(profile.PubKey); err == nil {
+			return pub
+		}
+	}
+	if c.store != nil {
+		_, _, pubkeyStr := c.store.GetPinnedKeyFull(userID)
+		if pubkeyStr != "" {
+			if pub, err := crypto.ParseSSHPubKey(pubkeyStr); err == nil {
+				return pub
+			}
+		}
+	}
+	return nil
+}
 
 // storeRoomMessage decrypts and stores a room message in the local DB.
 func (c *Client) storeRoomMessage(raw json.RawMessage) {
@@ -167,10 +203,14 @@ func (c *Client) storeDMMessage(raw json.RawMessage) {
 // edited_at and clears any locally cached reactions on that message ID
 // (per Decision log Q12: client-side unconditional clear on receipt).
 //
-// Signature is NOT verified server-side and this client does not
-// verify on receipt either — matches the unverified pass-through for
-// normal sends. Per Decision log Q13, server-side verification is
-// deferred to a future cross-cutting hardening pass.
+// Phase 21 item 3 — verifies the edit signature against the new
+// msgID-bound canonical form (crypto.VerifyRoomEdit) BEFORE applying.
+// A compromised server cannot replay a past signed payload of sender A
+// against a different msgID to rewrite history: the signature is now
+// cryptographically bound to `(msgID, payload, room, epoch)` and a
+// mismatch drops the broadcast silently. Verify-or-drop contract — if
+// we can't resolve the sender's pubkey (rare — profile broadcast
+// normally precedes traffic on every connect) we also drop.
 //
 // If decryption fails, the row is left untouched (no corruption of
 // the stored body). Matches the defensive "can't decrypt — don't
@@ -183,6 +223,33 @@ func (c *Client) storeEditedRoomMessage(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
+
+	// Verify signature before applying — prevents compromised-server
+	// history rewrite via signature-replay. Phase 21 item 3.
+	pubKey := c.pubKeyForUser(msg.From)
+	if pubKey == nil {
+		c.logger.Warn("edit signature drop — unknown sender pubkey",
+			"context", "room", "id", msg.ID, "from", msg.From)
+		return
+	}
+	payloadBytes, err := base64.StdEncoding.DecodeString(msg.Payload)
+	if err != nil {
+		c.logger.Warn("edit signature drop — payload not base64",
+			"context", "room", "id", msg.ID)
+		return
+	}
+	sigBytes, err := base64.StdEncoding.DecodeString(msg.Signature)
+	if err != nil {
+		c.logger.Warn("edit signature drop — signature not base64",
+			"context", "room", "id", msg.ID)
+		return
+	}
+	if !crypto.VerifyRoomEdit(pubKey, msg.ID, payloadBytes, msg.Room, msg.Epoch, sigBytes) {
+		c.logger.Warn("edit signature drop — verification failed",
+			"context", "room", "id", msg.ID, "from", msg.From)
+		return
+	}
+
 	payload, err := c.DecryptRoomMessage(msg.Room, msg.Epoch, msg.Payload)
 	if err != nil {
 		// Decryption failed — either we don't have the epoch key for
@@ -198,7 +265,8 @@ func (c *Client) storeEditedRoomMessage(raw json.RawMessage) {
 // storeEditedGroupMessage applies a `group_edited` broadcast. The
 // payload is decrypted using the caller's wrapped_keys entry from the
 // edit envelope (the new K_msg the author wrapped for the current
-// member set).
+// member set). Verifies the msgID-bound edit signature before applying
+// (Phase 21 item 3).
 func (c *Client) storeEditedGroupMessage(raw json.RawMessage) {
 	if c.store == nil {
 		return
@@ -207,6 +275,31 @@ func (c *Client) storeEditedGroupMessage(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
+
+	pubKey := c.pubKeyForUser(msg.From)
+	if pubKey == nil {
+		c.logger.Warn("edit signature drop — unknown sender pubkey",
+			"context", "group", "id", msg.ID, "from", msg.From)
+		return
+	}
+	payloadBytes, err := base64.StdEncoding.DecodeString(msg.Payload)
+	if err != nil {
+		c.logger.Warn("edit signature drop — payload not base64",
+			"context", "group", "id", msg.ID)
+		return
+	}
+	sigBytes, err := base64.StdEncoding.DecodeString(msg.Signature)
+	if err != nil {
+		c.logger.Warn("edit signature drop — signature not base64",
+			"context", "group", "id", msg.ID)
+		return
+	}
+	if !crypto.VerifyDMEdit(pubKey, msg.ID, payloadBytes, msg.Group, msg.WrappedKeys, sigBytes) {
+		c.logger.Warn("edit signature drop — verification failed",
+			"context", "group", "id", msg.ID, "from", msg.From)
+		return
+	}
+
 	payload, err := c.DecryptGroupMessage(msg.WrappedKeys, msg.Payload)
 	if err != nil {
 		return
@@ -217,7 +310,8 @@ func (c *Client) storeEditedGroupMessage(raw json.RawMessage) {
 }
 
 // storeEditedDMMessage applies a `dm_edited` broadcast. The payload
-// is decrypted using the caller's wrapped_keys entry.
+// is decrypted using the caller's wrapped_keys entry. Verifies the
+// msgID-bound edit signature before applying (Phase 21 item 3).
 func (c *Client) storeEditedDMMessage(raw json.RawMessage) {
 	if c.store == nil {
 		return
@@ -226,6 +320,31 @@ func (c *Client) storeEditedDMMessage(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
 	}
+
+	pubKey := c.pubKeyForUser(msg.From)
+	if pubKey == nil {
+		c.logger.Warn("edit signature drop — unknown sender pubkey",
+			"context", "dm", "id", msg.ID, "from", msg.From)
+		return
+	}
+	payloadBytes, err := base64.StdEncoding.DecodeString(msg.Payload)
+	if err != nil {
+		c.logger.Warn("edit signature drop — payload not base64",
+			"context", "dm", "id", msg.ID)
+		return
+	}
+	sigBytes, err := base64.StdEncoding.DecodeString(msg.Signature)
+	if err != nil {
+		c.logger.Warn("edit signature drop — signature not base64",
+			"context", "dm", "id", msg.ID)
+		return
+	}
+	if !crypto.VerifyDMEdit(pubKey, msg.ID, payloadBytes, msg.DM, msg.WrappedKeys, sigBytes) {
+		c.logger.Warn("edit signature drop — verification failed",
+			"context", "dm", "id", msg.ID, "from", msg.From)
+		return
+	}
+
 	payload, err := c.DecryptDMMessage(msg.WrappedKeys, msg.Payload)
 	if err != nil {
 		return

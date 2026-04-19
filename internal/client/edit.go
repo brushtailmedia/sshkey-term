@@ -88,7 +88,12 @@ func (c *Client) EditRoomMessage(msgID, room, newBody string) error {
 	}
 
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
-	sig := crypto.SignRoom(c.privKey, payloadBytes, room, epoch)
+	// Phase 21 item 3 — bind the signature to this specific msgID so a
+	// compromised server cannot replay this `(payload, room, epoch)` pair
+	// against a different msgID to rewrite history. Distinct domain tag
+	// from SignRoom also guarantees a send signature cannot cross-verify
+	// as an edit signature.
+	sig := crypto.SignRoomEdit(c.privKey, msgID, payloadBytes, room, epoch)
 
 	corrID := protocol.GenerateCorrID()
 	envelope := protocol.Edit{
@@ -149,7 +154,8 @@ func (c *Client) EditGroupMessage(msgID, group, newBody string) error {
 	}
 
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
-	sig := crypto.SignDM(c.privKey, payloadBytes, group, wrappedKeys)
+	// Phase 21 item 3 — msgID-bound edit signature. See EditRoomMessage.
+	sig := crypto.SignDMEdit(c.privKey, msgID, payloadBytes, group, wrappedKeys)
 
 	corrID := protocol.GenerateCorrID()
 	envelope := protocol.EditGroup{
@@ -209,7 +215,8 @@ func (c *Client) EditDMMessage(msgID, dmID, newBody string) error {
 	}
 
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
-	sig := crypto.SignDM(c.privKey, payloadBytes, dmID, wrappedKeys)
+	// Phase 21 item 3 — msgID-bound edit signature. See EditRoomMessage.
+	sig := crypto.SignDMEdit(c.privKey, msgID, payloadBytes, dmID, wrappedKeys)
 
 	corrID := protocol.GenerateCorrID()
 	envelope := protocol.EditDM{
