@@ -77,8 +77,9 @@ type SidebarModel struct {
 	selfUserID          string              // the current user's ID (for DM "other party" resolve)
 
 	// For message forwarding (set by App)
-	msgCh chan ServerMsg
-	errCh chan error
+	msgCh     chan ServerMsg
+	errCh     chan error
+	keyWarnCh chan KeyChangeEvent // Phase 21 F3.a
 }
 
 func NewSidebar() SidebarModel {

@@ -459,6 +459,16 @@ func (c *Client) checkReplay(sender, deviceID, room, group string, seq int64) {
 }
 
 // StoreProfile pins a user's key on first encounter, warns on change.
+//
+// Under the no-rotation protocol invariant (see PROTOCOL.md "Keys as
+// Identities"), the "change" branch here only fires on anomalous
+// inputs — a compromised server substituting a key, a server bug
+// emitting a corrupted fingerprint, or local DB tampering. It never
+// fires on legitimate operation. Both the ClearVerified call AND the
+// OnKeyWarning dispatch below are attack-path code (see
+// audit_v0.2.0.md#F32): they exist to surface and mitigate an event
+// class the protocol does not produce in normal operation. Stripping
+// either as "redundant" code halves the detection coverage.
 func (c *Client) StoreProfile(p *protocol.Profile) {
 	if c.store == nil {
 		return
@@ -472,6 +482,15 @@ func (c *Client) StoreProfile(p *protocol.Profile) {
 			"new_fingerprint", p.KeyFingerprint,
 		)
 		c.store.ClearVerified(p.User)
+
+		// Phase 21 F3.a closure 2026-04-19 — dispatch to the TUI so
+		// the user sees a blocking modal with old vs. new fingerprints
+		// and an explicit Accept / Disconnect choice. The callback
+		// runs on the readLoop goroutine; TUI handlers push to a
+		// channel and return.
+		if c.cfg.OnKeyWarning != nil {
+			c.cfg.OnKeyWarning(p.User, existing, p.KeyFingerprint)
+		}
 	}
 
 	c.store.PinKey(p.User, p.KeyFingerprint, p.PubKey)

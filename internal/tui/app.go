@@ -15,6 +15,7 @@ import (
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
+	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
 
 // undoWindowSeconds is the Phase 14 /undo window for reverting a
@@ -231,11 +232,29 @@ func (a App) Init() tea.Cmd {
 	)
 }
 
+// KeyChangeEvent is the tea.Msg form of a client-layer OnKeyWarning
+// callback — signals that `StoreProfile` detected a fingerprint
+// mismatch against the pinned value for an existing user ID. Under
+// the no-rotation protocol invariant this is always anomalous (see
+// PROTOCOL.md "Keys as Identities"); the App handler routes it to
+// the `KeyWarningModel` blocking dialog. Phase 21 F3.a closure
+// 2026-04-19.
+type KeyChangeEvent struct {
+	User           string
+	OldFingerprint string
+	NewFingerprint string
+}
+
 // connect starts the SSH connection in a goroutine.
 func (a App) connect() tea.Cmd {
 	return func() tea.Msg {
 		msgCh := make(chan ServerMsg, 100)
 		errCh := make(chan error, 1)
+		// Buffered so a burst of profile broadcasts during catchup
+		// can't block the client readLoop on a slow TUI. 10 events
+		// is comfortably above any realistic burst (one key-change
+		// event per user per session is the upper bound).
+		keyWarnCh := make(chan KeyChangeEvent, 10)
 
 		cfg := a.cfg
 		cfg.OnMessage = func(msgType string, raw json.RawMessage) {
@@ -243,6 +262,18 @@ func (a App) connect() tea.Cmd {
 		}
 		cfg.OnError = func(err error) {
 			errCh <- err
+		}
+		cfg.OnKeyWarning = func(user, oldFP, newFP string) {
+			// Non-blocking send — if the buffer is full (shouldn't
+			// happen in practice), drop rather than stall the
+			// readLoop. The key change has already been logged +
+			// ClearVerified has already run on the store side;
+			// dropping the modal dispatch is a minor UX
+			// degradation, not a correctness gap.
+			select {
+			case keyWarnCh <- KeyChangeEvent{User: user, OldFingerprint: oldFP, NewFingerprint: newFP}:
+			default:
+			}
 		}
 		// Passphrase callback — return cached passphrase for this key if available,
 		// otherwise signal the TUI to show the dialog.
@@ -281,24 +312,31 @@ func (a App) connect() tea.Cmd {
 			}
 		}()
 
-		return connectedWithClient{client: c, msgCh: msgCh, errCh: errCh}
+		return connectedWithClient{client: c, msgCh: msgCh, errCh: errCh, keyWarnCh: keyWarnCh}
 	}
 }
 
 type connectedWithClient struct {
-	client *client.Client
-	msgCh  chan ServerMsg
-	errCh  chan error
+	client    *client.Client
+	msgCh     chan ServerMsg
+	errCh     chan error
+	keyWarnCh chan KeyChangeEvent
 }
 
 // waitForMsg returns a cmd that waits for the next server message.
-func waitForMsg(msgCh chan ServerMsg, errCh chan error, done <-chan struct{}) tea.Cmd {
+// Selects across three channels: server-message events, errors, and
+// client-layer key-change warnings (Phase 21 F3.a) which surface via
+// their own channel rather than riding on the ServerMsg envelope
+// because they are TUI-synthetic events, not protocol frames.
+func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChangeEvent, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case msg := <-msgCh:
 			return msg
 		case err := <-errCh:
 			return ErrMsg{Err: err}
+		case kw := <-keyWarnCh:
+			return kw
 		case <-done:
 			return ErrMsg{Err: fmt.Errorf("disconnected")}
 		}
@@ -1392,8 +1430,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case KeyWarningAcceptMsg:
-		// Key was accepted — re-pin happened during StoreProfile
-		a.statusBar.SetError("New key accepted for " + a.resolveDisplayName(msg.User))
+		// Key was accepted — re-pin happened during StoreProfile.
+		// Phase 21 F3.c closure 2026-04-19 — nudge toward verification
+		// so users who want the trust work done have a clear next step.
+		displayName := a.resolveDisplayName(msg.User)
+		a.statusBar.SetError("New key accepted for " + displayName +
+			". Run /verify " + displayName + " to compare safety numbers out-of-band.")
 		return a, nil
 
 	case KeyWarningDisconnectMsg:
@@ -1760,10 +1802,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.updateTitle()
 
 		// Start listening for server messages
-		cmds = append(cmds, waitForMsg(msg.msgCh, msg.errCh, a.client.Done()))
+		cmds = append(cmds, waitForMsg(msg.msgCh, msg.errCh, msg.keyWarnCh, a.client.Done()))
 		// Store channels for future waits
 		a.sidebar.msgCh = msg.msgCh
 		a.sidebar.errCh = msg.errCh
+		a.sidebar.keyWarnCh = msg.keyWarnCh
 
 	case ServerMsg:
 		if cmd := a.handleServerMessage(msg); cmd != nil {
@@ -1772,8 +1815,31 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue listening
 		if a.client != nil {
 			if a.sidebar.msgCh != nil {
-				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.client.Done()))
+				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.client.Done()))
 			}
+		}
+
+	case KeyChangeEvent:
+		// Phase 21 F3.a closure 2026-04-19 — StoreProfile detected a
+		// fingerprint mismatch against the pinned value. Under the
+		// no-rotation protocol invariant, this is always an anomaly
+		// (compromised server, server bug, or local DB tampering —
+		// see PROTOCOL.md "Keys as Identities"). Show the blocking
+		// modal unless another modal is already visible; if so, drop
+		// this event (the user is busy with something; the detection
+		// has already logged + ClearVerified; they'll see the missing
+		// ✓ badge from F28 as a persistent indicator).
+		if a.keyWarning.IsVisible() || a.verify.IsVisible() || a.quitConfirm.IsVisible() ||
+			a.passphrase.IsVisible() {
+			// Skip — a.keyWarning.Show would overwrite in-flight user
+			// interaction. F28's badge carries the state until the
+			// next profile receive (or next user action).
+		} else {
+			a.keyWarning.Show(msg.User, msg.OldFingerprint, msg.NewFingerprint)
+		}
+		// Continue listening for the next event.
+		if a.client != nil && a.sidebar.msgCh != nil {
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.client.Done()))
 		}
 
 	case passphraseNeededMsg:
@@ -2523,16 +2589,40 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		}
 		a.statusBar.SetError("/delete must be run inside a conversation")
 	case "/verify":
+		// Phase 21 F29 closure (2026-04-19) — accept display names or
+		// "@alice" syntax in addition to raw user IDs, matching the
+		// completion affordance of /add. FindUserByName resolves both
+		// shapes (display name and user ID); the raw user ID is also
+		// accepted as a no-op passthrough so pre-F29 /verify usr_abc
+		// invocations continue to work.
 		if sc.Arg != "" && a.client != nil {
-			a.verify.Show(sc.Arg, a.client)
-		}
-	case "/unverify":
-		if sc.Arg != "" && a.client != nil {
-			if st := a.client.Store(); st != nil {
-				st.ClearVerified(sc.Arg)
-				a.statusBar.SetError("Verification removed for " + sc.Arg)
+			targetID, ok := a.resolveUserByName(sc.Arg)
+			if !ok {
+				a.statusBar.SetError("unknown user: " + sc.Arg)
+			} else {
+				a.verify.Show(targetID, a.client)
 			}
 		}
+	case "/unverify":
+		// Phase 21 F29 closure — same resolution as /verify.
+		if sc.Arg != "" && a.client != nil {
+			targetID, ok := a.resolveUserByName(sc.Arg)
+			if !ok {
+				a.statusBar.SetError("unknown user: " + sc.Arg)
+			} else if st := a.client.Store(); st != nil {
+				st.ClearVerified(targetID)
+				a.statusBar.SetError("Verification removed for " + a.resolveDisplayName(targetID))
+			}
+		}
+	case "/whois":
+		// Phase 21 F30 closure (2026-04-19) — display the full locally-
+		// known identity info for a user on demand: display name, user
+		// ID, SSH key fingerprint, verified state, first-seen timestamp
+		// and last-key-updated timestamp. Analogous to ssh-keyscan's
+		// output shape but using local TOFU state as the source of
+		// truth. Also copies the fingerprint to the clipboard so it can
+		// be pasted into a verification workflow.
+		a.handleWhoisCommand(sc.Arg)
 	case "/search":
 		a.search.Show()
 	case "/settings":
@@ -2942,15 +3032,145 @@ func (a *App) resolveGroupMemberByName(groupID, name string) (string, bool) {
 // (by definition) not yet in GroupMembers(). Delegates to the client
 // layer which owns the profile cache + its lock.
 func (a *App) resolveNonMemberByName(name string) (string, bool) {
+	return a.resolveUserByName(name)
+}
+
+// resolveUserByName is the generic "display name or user ID" lookup.
+// Unlike resolveNonMemberByName (which is scoped to the /add
+// affordance), this variant is used by /verify and /unverify where
+// the target can be any known user. Both wrappers delegate to the
+// same `client.FindUserByName`; the distinct names document where
+// each is used rather than expressing different lookup semantics.
+//
+// Phase 21 F29 closure (2026-04-19): /verify and /unverify previously
+// passed raw args to their downstream handlers, breaking parity with
+// /add's display-name completion. This helper landed to give both
+// verbs the same affordance.
+func (a *App) resolveUserByName(name string) (string, bool) {
 	if a.client == nil {
 		return "", false
 	}
-	target := strings.TrimPrefix(name, "@")
+	// Trim both sides before AND after stripping the "@" prefix so
+	// "  @Alice  " and "@Alice" both resolve. Users routinely paste
+	// whitespace around mentions; strict ordering here would make
+	// /verify finicky.
+	target := strings.TrimSpace(name)
+	target = strings.TrimPrefix(target, "@")
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return "", false
 	}
 	return a.client.FindUserByName(target)
+}
+
+// handleWhoisCommand implements the `/whois <name>` read-only slash
+// command. Phase 21 F30 closure (2026-04-19) — operators investigating
+// "did Alice's key actually rotate?" previously had no quick-lookup
+// command; their only options were to wait for a KeyWarningModel
+// (triggered only on change) or launch the full safety-number
+// VerifyModel. /whois exposes all locally-known identity state at once:
+//
+//	Alice (usr_abc12345) SHA256:ab...ef [verified] first seen
+//	  2026-03-15, key updated 2026-04-10 — fingerprint copied
+//
+// Data comes from two sources: the live profile cache (display name,
+// admin/retired flags, current fingerprint) and the pinned_keys store
+// (verified state, first-seen + last-updated timestamps, and the
+// fingerprint fallback for users whose live profile isn't available —
+// e.g., retired users whose profile broadcast we missed). When no
+// pinned entry exists and no live profile is available, the command
+// surfaces "unknown user" and does nothing else.
+//
+// The fingerprint is copied to the clipboard to match the `/mykey`
+// ergonomic — operators routinely paste it into a verification-
+// workflow document or chat.
+func (a *App) handleWhoisCommand(rawName string) {
+	if a.client == nil {
+		a.statusBar.SetError("Usage: /whois <name>")
+		return
+	}
+	targetID, ok := a.resolveUserByName(rawName)
+	if !ok {
+		// Retired-user fallback: the live profile cache
+		// (`FindUserByName`) only holds users the server has
+		// broadcast to us in this session, so retired accounts
+		// whose profile broadcast we missed are invisible there.
+		// If the raw argument matches a row in pinned_keys,
+		// resolve directly against that — this is the scenario
+		// the F30 recommendation explicitly cited ("did Alice's
+		// key actually rotate?" where Alice has since been
+		// retired). Lookup is by exact user ID; display-name
+		// fallback to pinned_keys isn't implemented because the
+		// pinned_keys row doesn't carry the display name.
+		trimmed := strings.TrimSpace(rawName)
+		trimmed = strings.TrimPrefix(trimmed, "@")
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed != "" {
+			if st := a.client.Store(); st != nil {
+				if info, err := st.GetPinnedKeyInfo(trimmed); err == nil && info.Fingerprint != "" {
+					targetID = trimmed
+					ok = true
+				}
+			}
+		}
+		if !ok {
+			a.statusBar.SetError("unknown user: " + strings.TrimSpace(rawName))
+			return
+		}
+	}
+
+	profile := a.client.Profile(targetID)
+	displayName := a.resolveDisplayName(targetID) // falls back to target ID
+
+	var info store.PinnedKeyInfo
+	if st := a.client.Store(); st != nil {
+		// Swallow sql errors — surface as no-pinned-data rather than
+		// a noisy stack. Missing pinned entry is the norm for users
+		// we've never received messages from.
+		info, _ = st.GetPinnedKeyInfo(targetID)
+	}
+
+	// Prefer the live profile's fingerprint (authoritative, current-
+	// broadcast) over the pinned fingerprint (last-cached). They should
+	// match except during the window between a server push and
+	// StoreProfile updating the pinned row; the live one wins either
+	// way.
+	fingerprint := info.Fingerprint
+	if profile != nil && profile.KeyFingerprint != "" {
+		fingerprint = profile.KeyFingerprint
+	}
+	if fingerprint == "" {
+		a.statusBar.SetError("unknown user: " + strings.TrimSpace(rawName) + " (no profile or pinned key)")
+		return
+	}
+
+	// Build the status-bar string. Kept compact so it fits on a
+	// single line in typical terminal widths; full data goes to
+	// clipboard and ergonomics follow /mykey.
+	parts := []string{displayName + " (" + targetID + ")", fingerprint}
+
+	verifyTag := "unverified"
+	if info.Verified {
+		verifyTag = "verified"
+	}
+	parts = append(parts, verifyTag)
+
+	if profile != nil && profile.Admin {
+		parts = append(parts, "admin")
+	}
+	if profile != nil && profile.Retired {
+		parts = append(parts, "retired")
+	}
+
+	if info.FirstSeen > 0 {
+		parts = append(parts, "first seen "+time.Unix(info.FirstSeen, 0).UTC().Format("2006-01-02"))
+	}
+	if info.UpdatedAt > 0 && info.UpdatedAt != info.FirstSeen {
+		parts = append(parts, "key updated "+time.Unix(info.UpdatedAt, 0).UTC().Format("2006-01-02"))
+	}
+
+	CopyToClipboard(fingerprint)
+	a.statusBar.SetError(strings.Join(parts, " — ") + " — fingerprint copied to clipboard")
 }
 
 // lookupGroupName returns the display name of a group, falling back
@@ -3897,8 +4117,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 					replyTo = payload.ReplyTo
 					mentions = payload.Mentions
 				}
-				from := m.From
-				from = a.client.DisplayName(m.From)
+				from := a.client.DisplayName(m.From)
 				a.messages.messages = append(a.messages.messages, DisplayMessage{
 					ID:       m.ID,
 					FromID:   m.From,

@@ -38,6 +38,17 @@ type Config struct {
 	OnError      func(err error)
 	OnPassphrase PassphraseFunc // called if key is passphrase-protected
 
+	// OnKeyWarning fires when StoreProfile detects a mismatch between
+	// a user's currently-pinned fingerprint and the fingerprint on an
+	// incoming profile broadcast. Under the no-rotation protocol
+	// invariant (PROTOCOL.md "Keys as Identities"), this event only
+	// fires on anomalous inputs — a compromised server substituting
+	// a key, a server bug emitting a corrupted fingerprint, or local
+	// DB tampering. The callback runs on the client's readLoop
+	// goroutine; receivers should push to a channel and return
+	// promptly rather than blocking. Phase 21 F3 closure 2026-04-19.
+	OnKeyWarning func(user, oldFingerprint, newFingerprint string)
+
 	Logger *slog.Logger
 }
 
@@ -1323,6 +1334,20 @@ func (c *Client) DisplayRoomTopic(roomID string) string {
 // connection. Do not call from production code.
 func SetStoreForTesting(c *Client, s *store.Store) {
 	c.store = s
+}
+
+// SetProfileForTesting adds a profile to the Client's in-memory profile
+// cache from an external package. Production code populates c.profiles
+// via the readLoop `profile` handler; this helper lets tui-layer tests
+// exercise methods that read through the cache (FindUserByName,
+// DisplayName, Profile) without spinning up a full SSH connection.
+// Phase 21 F29 closure added this alongside the existing
+// SetStoreForTesting helper.
+// Do not call from production code.
+func SetProfileForTesting(c *Client, p *protocol.Profile) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.profiles[p.User] = p
 }
 
 // GroupMembers returns the member list for a group DM.

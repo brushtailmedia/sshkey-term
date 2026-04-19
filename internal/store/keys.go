@@ -110,6 +110,39 @@ func (s *Store) GetPinnedKeyFull(user string) (fingerprint string, verified bool
 	return fingerprint, v == 1, pubkey
 }
 
+// PinnedKeyInfo carries the full pinned_keys row for a user — used by
+// `/whois` (Phase 21 F30 closure 2026-04-19) to show the operator all
+// locally-known state at once without a chain of individual getters.
+// Timestamps are Unix seconds (schema uses INTEGER columns).
+type PinnedKeyInfo struct {
+	Fingerprint string
+	Pubkey      string
+	Verified    bool
+	FirstSeen   int64 // Unix seconds; 0 if not pinned
+	UpdatedAt   int64 // Unix seconds; 0 if not pinned
+}
+
+// GetPinnedKeyInfo returns the full pinned_keys row as a struct.
+// Missing user returns a zero-value PinnedKeyInfo (all fields zero,
+// no error) — missing is the norm for unpinned users, not an error.
+// Real SQL errors still propagate.
+func (s *Store) GetPinnedKeyInfo(user string) (PinnedKeyInfo, error) {
+	var info PinnedKeyInfo
+	var v int
+	err := s.db.QueryRow(`
+		SELECT fingerprint, pubkey, verified, first_seen, updated_at
+		FROM pinned_keys WHERE user = ?`, user,
+	).Scan(&info.Fingerprint, &info.Pubkey, &v, &info.FirstSeen, &info.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PinnedKeyInfo{}, nil
+	}
+	if err != nil {
+		return PinnedKeyInfo{}, err
+	}
+	info.Verified = v == 1
+	return info, nil
+}
+
 // MarkVerified marks a user as verified (safety number confirmed).
 func (s *Store) MarkVerified(user string) error {
 	_, err := s.db.Exec(`UPDATE pinned_keys SET verified = 1 WHERE user = ?`, user)

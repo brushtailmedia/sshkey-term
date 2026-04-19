@@ -14,21 +14,21 @@ func ValidateDisplayName(name string) (string, error) {
 	name = strings.TrimSpace(name)
 
 	if name == "" {
-		return "", fmt.Errorf("Name cannot be empty")
+		return "", fmt.Errorf("name cannot be empty")
 	}
 	if len(name) < 2 {
-		return "", fmt.Errorf("Name must be at least 2 characters")
+		return "", fmt.Errorf("name must be at least 2 characters")
 	}
 	if len(name) > 32 {
-		return "", fmt.Errorf("Name must be 32 characters or fewer")
+		return "", fmt.Errorf("name must be 32 characters or fewer")
 	}
 
 	for _, r := range name {
 		if !unicode.IsPrint(r) {
-			return "", fmt.Errorf("Name contains non-printable character")
+			return "", fmt.Errorf("name contains non-printable character")
 		}
 		if isRejectChar(r) {
-			return "", fmt.Errorf("Name contains invalid character")
+			return "", fmt.Errorf("name contains invalid character")
 		}
 	}
 

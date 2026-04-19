@@ -148,6 +148,7 @@ func (h HelpModel) View(width, height int) string {
 		{cmd: "/topic", desc: "show room topic (rooms only)"},
 		{cmd: "/settings", desc: "open settings"},
 		{cmd: "/unverify <user>", desc: "remove verification"},
+		{cmd: "/whois <user>", desc: "show user's fingerprint + verified state"},
 		{cmd: "/pending", desc: "pending keys (admin)"},
 		{cmd: "/mykey", desc: "copy public key"},
 		// Phase 14 status commands (group-context, any member)

@@ -119,6 +119,19 @@ func CompleteWithContext(input string, cursorPos int, groupMembers []MemberEntry
 		case "/add":
 			// Non-members only (target must not already be in the group).
 			return completeMentions(word, nonMemberPool)
+		case "/verify", "/unverify", "/whois":
+			// Identity verbs (Phase 21 F29 + F30 closure) — complete
+			// against ANY known user. In a group context the pool is
+			// (members ∪ nonMembers); outside a group context both
+			// are empty and completion silently does nothing, which
+			// is fine — user types the name manually. Deduplication
+			// is not needed because members and nonMembers are
+			// disjoint by construction (a user is either in the
+			// current group or not).
+			pool := make([]MemberEntry, 0, len(groupMembers)+len(nonMemberPool))
+			pool = append(pool, groupMembers...)
+			pool = append(pool, nonMemberPool...)
+			return completeMentions(word, pool)
 		default:
 			return completeMentions(word, groupMembers)
 		}
@@ -172,6 +185,7 @@ func completeCommands(prefix string) *CompletionModel {
 		{Text: "/upload ", Display: "/upload", Description: "upload file"},
 		{Text: "/verify ", Display: "/verify", Description: "verify user"},
 		{Text: "/unverify ", Display: "/unverify", Description: "remove verification"},
+		{Text: "/whois ", Display: "/whois", Description: "show user's fingerprint + verified state"},
 		{Text: "/mute", Display: "/mute", Description: "toggle mute"},
 		{Text: "/search ", Display: "/search", Description: "search messages"},
 		{Text: "/leave", Display: "/leave", Description: "leave room or group"},
