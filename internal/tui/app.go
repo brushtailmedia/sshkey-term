@@ -69,6 +69,11 @@ type App struct {
 	verify      VerifyModel
 	keyWarning  KeyWarningModel
 	quitConfirm       QuitConfirmModel
+	// lastCtrlQAt (Phase 17c Step 5 polish) stamps the time of the
+	// last Ctrl+Q keypress. A second Ctrl+Q within doubleQuitWindow
+	// bypasses the confirm dialog — escape hatch for users who
+	// genuinely want to abandon pending sends.
+	lastCtrlQAt time.Time
 	retireConfirm     RetireConfirmModel
 	leaveConfirm      LeaveConfirmModel
 	leaveRoomConfirm  LeaveRoomConfirmModel
@@ -154,6 +159,14 @@ const maxCreateDMAutoRetries = 3
 // after a server_busy response. Long enough that cleanup will finish,
 // short enough to feel instant to the user.
 const createDMRetryDelay = 80
+
+// doubleQuitWindow is the time window during which a second Ctrl+Q
+// keypress bypasses the quit-confirmation dialog. Phase 17c Step 5
+// polish: "bypass-able with repeated quit keypresses for users who
+// genuinely want to abandon". 500ms — long enough for a deliberate
+// double-tap, short enough that accidental double-presses from the
+// existing dialog flow don't trigger it.
+const doubleQuitWindow = 500 * time.Millisecond
 
 // refreshingMinVisibleMs is the minimum duration the "refreshing…"
 // keypress-ack indicator stays visible after a refresh keypress
@@ -567,6 +580,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 
 		case "ctrl+q":
+			// Phase 17c Step 5 polish: double-press Ctrl+Q within
+			// doubleQuitWindow bypasses the confirm dialog — escape
+			// hatch for users who genuinely want to abandon pending
+			// sends.
+			now := time.Now()
+			if !a.lastCtrlQAt.IsZero() && now.Sub(a.lastCtrlQAt) < doubleQuitWindow {
+				a.lastCtrlQAt = time.Time{}
+				if a.client != nil {
+					a.client.Close()
+				}
+				return a, tea.Quit
+			}
+			a.lastCtrlQAt = now
+
 			serverName := "server"
 			if a.appConfig != nil && a.serverIdx < len(a.appConfig.Servers) {
 				serverName = a.appConfig.Servers[a.serverIdx].Name
