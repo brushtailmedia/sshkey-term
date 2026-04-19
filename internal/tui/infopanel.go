@@ -48,6 +48,16 @@ type MemberActionMsg struct {
 	User   string
 }
 
+// RefreshRequestMsg is emitted by refresh-key bindings in info-panel /
+// device-manager / the global Ctrl+Shift+R handler. The app routes it
+// to the matching client request verb and starts the "refreshing…"
+// status-line keypress-ack indicator. Phase 17c Step 6.
+type RefreshRequestMsg struct {
+	// Kind is the refresh target: "room_members", "device_list", or
+	// "reconnect" (full handshake via Ctrl+Shift+R).
+	Kind string
+}
+
 func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[string]bool) {
 	i.visible = true
 	i.room = room
@@ -257,6 +267,16 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 		muted := i.muted
 		return i, func() tea.Msg {
 			return MuteToggleMsg{Target: target, Muted: muted}
+		}
+	case "r":
+		// Phase 17c Step 6: refresh room member list. Only meaningful
+		// in room context (groups use group_event broadcasts to stay
+		// current; DMs have no member list). App.go handles the
+		// actual server request + statusBar.SetRefreshing.
+		if i.room != "" {
+			return i, func() tea.Msg {
+				return RefreshRequestMsg{Kind: "room_members"}
+			}
 		}
 	// Phase 14 admin-action shortcuts on the focused member row.
 	// A/K/P/X emit MemberActionMsg with admin action values that the

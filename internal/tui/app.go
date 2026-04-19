@@ -155,6 +155,21 @@ const maxCreateDMAutoRetries = 3
 // short enough to feel instant to the user.
 const createDMRetryDelay = 80
 
+// refreshingMinVisibleMs is the minimum duration the "refreshing…"
+// keypress-ack indicator stays visible after a refresh keypress
+// (Phase 17c Step 6). Server responses arriving faster than this
+// still leave the indicator on screen for the floor window so the
+// user gets unambiguous visual confirmation that their keypress
+// registered. 200ms is the plan's specified value — long enough to
+// read, short enough to feel instant.
+const refreshingMinVisibleMs = 200
+
+// refreshingTickMsg is emitted by tea.Tick after refreshingMinVisibleMs
+// elapses to trigger a repaint — without this, the status bar
+// wouldn't redraw to drop the indicator until the next keypress /
+// server message arrived, which could be much later.
+type refreshingTickMsg struct{}
+
 // Focus tracks which panel has keyboard focus.
 type Focus int
 
@@ -633,6 +648,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+f":
 			a.search.Show()
 			return a, nil
+
+		case "ctrl+shift+r":
+			// Phase 17c Step 6: nuclear refresh — force full
+			// reconnect handshake. Emits RefreshRequestMsg so the
+			// central handler drives both the client.Close and the
+			// keypress-ack indicator consistently.
+			return a, func() tea.Msg { return RefreshRequestMsg{Kind: "reconnect"} }
 
 		case "ctrl+,":
 			username := ""
@@ -1281,7 +1303,49 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case DeviceMgrRefreshMsg:
 		if a.client != nil {
 			a.client.SendListDevices()
+			// Phase 17c Step 6: keypress-ack indicator + 200ms tea.Tick
+			// to repaint when the timer elapses (even if the server
+			// response hasn't cleared it first).
+			a.statusBar.SetRefreshing(refreshingMinVisibleMs * time.Millisecond)
+			return a, tea.Tick(refreshingMinVisibleMs*time.Millisecond, func(time.Time) tea.Msg {
+				return refreshingTickMsg{}
+			})
 		}
+		return a, nil
+
+	case RefreshRequestMsg:
+		// Phase 17c Step 6: central handler for refresh-key bindings
+		// (info panel `r`, device manager `r`, global Ctrl+Shift+R).
+		// Dispatches the right verb for each kind + fires the
+		// keypress-ack indicator.
+		if a.client == nil {
+			return a, nil
+		}
+		switch msg.Kind {
+		case "room_members":
+			if a.messages.room != "" {
+				a.client.RequestRoomMembers(a.messages.room)
+			}
+		case "device_list":
+			a.client.SendListDevices()
+		case "reconnect":
+			// Force reconnect — closing the client triggers the
+			// outer reconnect loop (see reconnect.go). The
+			// refreshing indicator stays visible during the
+			// transition; the SetConnected(true) on successful
+			// re-handshake is what ultimately masks it.
+			a.statusBar.SetReconnecting(0, 0)
+			_ = a.client.Close()
+		}
+		a.statusBar.SetRefreshing(refreshingMinVisibleMs * time.Millisecond)
+		return a, tea.Tick(refreshingMinVisibleMs*time.Millisecond, func(time.Time) tea.Msg {
+			return refreshingTickMsg{}
+		})
+
+	case refreshingTickMsg:
+		// Phase 17c Step 6: the 200ms minimum-visibility window
+		// elapsed. Returning nil forces a repaint; statusBar View
+		// notices refreshingUntil is past and drops the indicator.
 		return a, nil
 
 	case DeviceRevokedQuitMsg:
@@ -3345,7 +3409,10 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			a.statusBar.SetPending(len(keys) > 0)
 		}
 	case "room_members_list":
-		// Response to room_members — update info panel and member panel
+		// Response to room_members — update info panel and member panel.
+		// Phase 17c Step 6: signal the status bar that the refresh
+		// completed (200ms floor still applies via View check).
+		a.statusBar.ClearRefreshing()
 		if a.client != nil {
 			room, members := a.client.RoomMembersList()
 			a.infoPanel.SetRoomMembers(room, members, a.client, a.sidebar.online)
@@ -3361,6 +3428,9 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			a.deviceRevoked.Show(m.DeviceID, m.Reason)
 		}
 	case "device_list":
+		// Phase 17c Step 6: signal refresh completion for the
+		// "refreshing…" keypress-ack indicator.
+		a.statusBar.ClearRefreshing()
 		var m protocol.DeviceList
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			a.deviceMgr.SetDevices(m.Devices)

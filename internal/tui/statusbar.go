@@ -59,13 +59,21 @@ func renderStrengthHint(h keygen.LiveHint) string {
 
 // StatusBarModel manages the bottom status bar.
 type StatusBarModel struct {
-	username     string
-	admin        bool
-	hasPending   bool
-	connected    bool
-	reconnecting bool
+	username      string
+	admin         bool
+	hasPending    bool
+	connected     bool
+	reconnecting  bool
 	reconnAttempt int
-	errorMsg     string
+	errorMsg      string
+
+	// refreshingUntil (Phase 17c Step 6) holds the earliest time at
+	// which the "refreshing…" keypress-ack indicator may disappear.
+	// Set by SetRefreshing(d) to now+d so the indicator stays visible
+	// for AT LEAST d regardless of how fast the server responds.
+	// Cleared inspection is driven by View rendering; no explicit
+	// timer is needed — a tea.Tick after d triggers a repaint.
+	refreshingUntil time.Time
 }
 
 func NewStatusBar() StatusBarModel {
@@ -102,6 +110,44 @@ func (s *StatusBarModel) ClearError() {
 	s.errorMsg = ""
 }
 
+// SetRefreshing shows the "refreshing…" keypress-ack indicator for at
+// least minDur. If the server responds within minDur the indicator
+// still remains visible until the timer elapses — prevents flicker
+// from fast server responses and gives the user visual confirmation
+// that their keypress registered.
+//
+// Called from the TUI's refresh-key handlers. Pair with
+// ClearRefreshing() on response arrival; ClearRefreshing is a hint
+// that the indicator CAN hide (it will respect the minDur floor set
+// here).
+//
+// Phase 17c Step 6.
+func (s *StatusBarModel) SetRefreshing(minDur time.Duration) {
+	target := time.Now().Add(minDur)
+	if target.After(s.refreshingUntil) {
+		s.refreshingUntil = target
+	}
+}
+
+// ClearRefreshing signals that the refresh operation completed (e.g.
+// room_members_list or device_list arrived, or an error came back).
+// If the minimum-duration window from SetRefreshing has elapsed the
+// indicator hides on next View; otherwise the indicator remains
+// visible until the floor is reached.
+//
+// Currently a no-op because the "clear" semantics are handled
+// entirely by the time.Now() check in View — once minDur has elapsed,
+// View no longer renders the indicator regardless of whether
+// ClearRefreshing was called. Kept as an explicit API so callers
+// document their intent at the receive site (future polish could
+// make this tighten the floor to "hide now if possible").
+//
+// Phase 17c Step 6.
+func (s *StatusBarModel) ClearRefreshing() {
+	// Intentional no-op — see doc comment. The View method's
+	// time-based check handles visibility transparently.
+}
+
 func (s StatusBarModel) View(width int) string {
 	// Left side: encryption + connection status
 	dot := statusDisconnected
@@ -131,9 +177,15 @@ func (s StatusBarModel) View(width int) string {
 	}
 
 	// Error (persists until next user action clears it)
+	// OR refreshing indicator (takes precedence over refreshing — an
+	// error is the more important signal when both are true).
 	mid := ""
 	if s.errorMsg != "" {
 		mid = errorStyle.Render("  ⚠ " + s.errorMsg)
+	} else if time.Now().Before(s.refreshingUntil) {
+		// Phase 17c Step 6: keypress-ack indicator. Minimum 200ms
+		// visibility is enforced by SetRefreshing's floor.
+		mid = statusBarStyle.Render("  refreshing…")
 	}
 
 	// Pad to width
