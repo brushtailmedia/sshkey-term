@@ -90,14 +90,19 @@ func (c *Client) EditRoomMessage(msgID, room, newBody string) error {
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
 	sig := crypto.SignRoom(c.privKey, payloadBytes, room, epoch)
 
-	return c.enc.Encode(protocol.Edit{
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.Edit{
 		Type:      "edit",
 		ID:        msgID,
 		Room:      room,
 		Epoch:     epoch,
 		Payload:   encrypted,
 		Signature: base64.StdEncoding.EncodeToString(sig),
-	})
+		CorrID:    corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "edit", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // EditGroupMessage replaces the body of a group DM message. Group DMs
@@ -146,14 +151,19 @@ func (c *Client) EditGroupMessage(msgID, group, newBody string) error {
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
 	sig := crypto.SignDM(c.privKey, payloadBytes, group, wrappedKeys)
 
-	return c.enc.Encode(protocol.EditGroup{
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.EditGroup{
 		Type:        "edit_group",
 		ID:          msgID,
 		Group:       group,
 		WrappedKeys: wrappedKeys,
 		Payload:     encrypted,
 		Signature:   base64.StdEncoding.EncodeToString(sig),
-	})
+		CorrID:      corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "edit_group", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // EditDMMessage replaces the body of a 1:1 DM message. Generates a
@@ -201,14 +211,19 @@ func (c *Client) EditDMMessage(msgID, dmID, newBody string) error {
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
 	sig := crypto.SignDM(c.privKey, payloadBytes, dmID, wrappedKeys)
 
-	return c.enc.Encode(protocol.EditDM{
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.EditDM{
 		Type:        "edit_dm",
 		ID:          msgID,
 		DM:          dmID,
 		WrappedKeys: wrappedKeys,
 		Payload:     encrypted,
 		Signature:   base64.StdEncoding.EncodeToString(sig),
-	})
+		CorrID:      corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "edit_dm", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // loadOriginalMessage fetches the stored message row for the given

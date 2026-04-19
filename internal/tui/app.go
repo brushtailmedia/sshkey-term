@@ -556,7 +556,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.appConfig != nil && a.serverIdx < len(a.appConfig.Servers) {
 				serverName = a.appConfig.Servers[a.serverIdx].Name
 			}
-			a.quitConfirm.Show(serverName)
+			// Phase 17c Step 5: surface pending-send count so the
+			// user sees if they'll lose unflushed messages on quit.
+			pendingSend := 0
+			if a.client != nil {
+				pendingSend = a.client.SendQueue().PendingCount()
+			}
+			a.quitConfirm.ShowWithPending(serverName, pendingSend)
 			return a, nil
 
 		case "?":
@@ -2977,11 +2983,71 @@ func (a *App) handleWhoamiCommand(sc *SlashCommandMsg) {
 // handleServerMessage processes incoming server messages for the UI.
 // Returns an optional tea.Cmd when the handler needs to schedule follow-up
 // work (e.g. a delayed retry on server_busy).
+//
+// Phase 17c Step 5 classification walk (Activity 1) — reference for
+// which cases correspond to which client-facing category per
+// refactor_plan.md §Phase 17c. The send-queue Ack/Error dispatch is
+// handled generically in client.readLoop via dispatchCorrID (see
+// sendqueue_dispatch.go); the cases below need per-verb UI logic
+// ON TOP of that generic dispatch.
+//
+//   SUCCESS ACKS (match client requests via corr_id — readLoop Acks):
+//     "message"            ← send              [ack via dispatch]
+//     "group_message"      ← send_group        [ack via dispatch]
+//     "dm"                 ← send_dm           [ack via dispatch]
+//     "edited"             ← edit              [ack via dispatch]
+//     "group_edited"       ← edit_group        [ack via dispatch]
+//     "dm_edited"          ← edit_dm           [ack via dispatch]
+//     "deleted"            ← delete            [ack via dispatch]
+//     "reaction"           ← react             [ack via dispatch]
+//     "reaction_removed"   ← unreact           [ack via dispatch]
+//     "pinned" / "unpinned"← pin / unpin       [ack via dispatch — no client verb today]
+//     "history_result"     ← history           [ack via dispatch]
+//     "room_members_list"  ← room_members      [ack via dispatch]
+//     "device_list"        ← list_devices      [ack via dispatch]
+//     "upload_ready"/"upload_complete" ← upload_start [ack via dispatch]
+//     "download_start"     ← download          [ack via dispatch]
+//
+//   ERROR CATEGORIES (routed through protocol.CategoryForCode):
+//     Category A-default: rate_limited on send/edit/react/admin →
+//                         retry w/ backoff (driver); surface on exhaust
+//     Category A-silent:  rate_limited on room_members / list_devices →
+//                         silent drop (see Gap 5 in case "error" below)
+//     Category B:         invalid_epoch / epoch_conflict /
+//                         stale_member_list → apply server-pushed
+//                         epoch_key (see case "epoch_key" which calls
+//                         Client.TriggerEpochRetry), then retry
+//     Category C:         permanent user-action (message_too_large,
+//                         edit_window_expired, etc.) → surface to
+//                         statusBar
+//     Category D:         privacy-identical (denied, unknown_room,
+//                         etc.) → surface generic message to statusBar
+//
+//   SERVER BROADCASTS / PUSHES (no ack, no category):
+//     typing, presence, read, profile, user_retired, room_retired,
+//     room_left, room_deleted, retired_rooms, retired_users,
+//     group_event, group_left, group_deleted, group_renamed,
+//     group_created, group_added_to, dm_created, dm_left, room_event,
+//     room_list, group_list, dm_list, sync_batch, unread, pins,
+//     device_revoked, admin_notify, pending_keys_list, epoch_key,
+//     epoch_trigger, epoch_confirmed, server_shutdown — these cases
+//     apply incoming state directly; no queue interaction needed.
+//
+// When a new message type is added, classify it here and either wire
+// through the generic dispatch (if it's an ack) or apply-state inline
+// (if it's a push).
 func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	switch msg.Type {
 	case "message":
 		var m protocol.Message
 		json.Unmarshal(msg.Raw, &m)
+		// Phase 17c Step 5: if the server echoed back a corr_id that
+		// matches an in-flight send-queue entry, ack it. Only the
+		// originator's broadcast carries CorrID (server strips it for
+		// other recipients).
+		if m.CorrID != "" && a.client != nil {
+			a.client.SendQueue().Ack(m.CorrID)
+		}
 		a.messages.AddRoomMessage(m, a.client)
 		if m.Room == a.messages.room {
 			a.sendReadReceipt()
@@ -3015,6 +3081,9 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	case "group_message":
 		var m protocol.GroupMessage
 		json.Unmarshal(msg.Raw, &m)
+		if m.CorrID != "" && a.client != nil {
+			a.client.SendQueue().Ack(m.CorrID)
+		}
 		a.messages.AddGroupMessage(m, a.client)
 		if m.Group == a.messages.group {
 			a.sendReadReceipt()
@@ -3713,6 +3782,9 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	case "dm":
 		var m protocol.DM
 		json.Unmarshal(msg.Raw, &m)
+		if m.CorrID != "" && a.client != nil {
+			a.client.SendQueue().Ack(m.CorrID)
+		}
 		// Add to messages view if the active context is this DM
 		if m.DM == a.messages.dm {
 			// DM messages are decrypted + displayed inline (same as group_message)
@@ -3920,6 +3992,28 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		var m protocol.Error
 		json.Unmarshal(msg.Raw, &m)
 
+		// Phase 17c Step 5: classify via corr_id + CategoryForCode.
+		// The queue handles retry state for Category A/B (keeps the
+		// entry pending) and removes the entry for Category C/D so
+		// the UI surfaces the error once.
+		var verb string
+		if m.CorrID != "" && a.client != nil {
+			if entry := a.client.SendQueue().Get(m.CorrID); entry != nil {
+				verb = entry.Verb
+			}
+			a.client.SendQueue().Error(m.CorrID, &m)
+		}
+		category := protocol.CategoryForCode(m.Code)
+
+		// Phase 17c Step 5 Gap 5: A-silent enforcement for refresh
+		// verbs. When rate_limited comes back from room_members or
+		// list_devices (A-silent), drop the error silently — cached
+		// data on screen is still valid; surfacing an error for a
+		// best-effort refresh alarms the user about a non-problem.
+		if m.Code == "rate_limited" && (verb == "room_members" || verb == "list_devices") {
+			return nil
+		}
+
 		// server_busy on an in-flight create_dm → transparently retry
 		// with a short backoff. The user never sees the server's busy
 		// message; either the retry succeeds and a dm_created arrives,
@@ -3937,6 +4031,12 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			a.statusBar.SetError("Could not start conversation — please try again.")
 			return nil
 		}
+
+		// Category D: privacy-identical rejection — server already
+		// sends the generic "operation rejected" text, so surfacing
+		// m.Message is equivalent. Left as a hook for future
+		// category-specific UX (e.g., soft toast vs hard banner).
+		_ = category
 
 		a.statusBar.SetError(m.Message)
 		// If this is a username_taken error and settings is open, show it

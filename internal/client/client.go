@@ -85,6 +85,15 @@ type Client struct {
 	signer      ssh.Signer
 	lastSynced  string
 
+	// sendQueue (Phase 17c Step 5) tracks in-flight outbound requests
+	// by their client-generated corr_id. Replaces fire-and-forget.
+	// Server echoes corr_id on success broadcasts (message/
+	// group_message/dm) and on error responses — TUI handlers call
+	// Ack/Error on the queue to close the loop. In-memory only;
+	// clean close or crash loses pending entries (documented
+	// behavior per refactor_plan.md).
+	sendQueue *Queue
+
 	done chan struct{}
 }
 
@@ -104,8 +113,16 @@ func New(cfg Config) *Client {
 		epochKeys:    make(map[string]map[int64][]byte),
 		currentEpoch: make(map[string]int64),
 		seqCounters:  make(map[string]int64),
+		sendQueue:    NewQueue(),
 		done:         make(chan struct{}),
 	}
+}
+
+// SendQueue returns the in-memory send queue. TUI uses this to
+// Ack/Error entries on inbound broadcasts, and to read PendingCount
+// for the quit-confirmation prompt.
+func (c *Client) SendQueue() *Queue {
+	return c.sendQueue
 }
 
 // Connect establishes the SSH connection and performs the protocol handshake.
@@ -228,6 +245,11 @@ func (c *Client) Connect() error {
 	// the connection to trigger the TUI's reconnect logic.
 	go c.keepalive()
 
+	// Phase 17c Step 5 Gap 2/3: start the send-queue driver. Sweeps
+	// timeouts + triggers Category A retries with exponential backoff.
+	// Exits when c.done closes.
+	go c.runSendQueueDriver()
+
 	return nil
 }
 
@@ -346,6 +368,19 @@ func (c *Client) readLoop() {
 			continue
 		}
 
+		// Phase 17c Step 5 residual: generic corr_id dispatch. Any
+		// server response or broadcast carrying corr_id matches an
+		// in-flight send-queue entry. Route to Error (for the 3
+		// error types — so Category C/D entries surface correctly)
+		// or Ack (for everything else).
+		//
+		// Why this is at the readLoop level rather than per-case:
+		// it's a single untyped unmarshal of just corr_id + code,
+		// which gives us ack/error-classification parity across all
+		// 15 CorrID-carrying verbs in one place. Per-case wiring
+		// would need 11+ duplicated calls.
+		dispatchCorrID(c, msgType, raw)
+
 		// Handle protocol-level messages internally
 		c.handleInternal(msgType, raw)
 
@@ -376,6 +411,12 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		var ek protocol.EpochKey
 		if err := json.Unmarshal(raw, &ek); err == nil {
 			c.storeEpochKey(ek.Room, ek.Epoch, ek.WrappedKey)
+			// Phase 17c Step 5 Gap 4: Category B state-fix apply.
+			// A fresh epoch_key after an invalid_epoch rejection is
+			// the state-fix the server promised — re-send any
+			// queued entries that failed with invalid_epoch for
+			// this room.
+			c.TriggerEpochRetry(ek.Room)
 		}
 	case "epoch_trigger":
 		c.handleEpochTrigger(raw)

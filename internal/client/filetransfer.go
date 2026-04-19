@@ -133,7 +133,8 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 		uploadsMu.Unlock()
 	}()
 
-	err = c.enc.Encode(protocol.UploadStart{
+	uploadCorrID := protocol.GenerateCorrID()
+	envelope := protocol.UploadStart{
 		Type:        "upload_start",
 		UploadID:    uploadID,
 		Size:        int64(len(encBytes)),
@@ -141,7 +142,11 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 		Room:        room,
 		Group:       group,
 		DM:          dm,
-	})
+		CorrID:      uploadCorrID,
+	}
+	c.sendQueue.EnqueueWithID(uploadCorrID, "upload_start", envelope)
+	c.sendQueue.MarkSending(uploadCorrID)
+	err = c.enc.Encode(envelope)
 	if err != nil {
 		return "", fmt.Errorf("send upload_start: %w", err)
 	}
@@ -304,10 +309,15 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 	defer c.downloadChanMu.Unlock()
 
 	// Send download request
-	err := c.enc.Encode(protocol.Download{
+	dlCorrID := protocol.GenerateCorrID()
+	envelope := protocol.Download{
 		Type:   "download",
 		FileID: fileID,
-	})
+		CorrID: dlCorrID,
+	}
+	c.sendQueue.EnqueueWithID(dlCorrID, "download", envelope)
+	c.sendQueue.MarkSending(dlCorrID)
+	err := c.enc.Encode(envelope)
 	if err != nil {
 		return "", err
 	}

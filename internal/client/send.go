@@ -76,14 +76,23 @@ func (c *Client) SendRoomMessageFull(room, body string, replyTo string, mentions
 		fileIDs = append(fileIDs, a.FileID)
 	}
 
-	return c.enc.Encode(protocol.Send{
+	// Phase 17c Step 5: enqueue + mark-sending before the wire write.
+	// TUI's message broadcast handler Ack()s on corr_id match;
+	// error handler routes to Queue.Error for category dispatch.
+	// Queue is in-memory only — clean close loses unacked entries.
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.Send{
 		Type:      "send",
 		Room:      room,
 		Epoch:     epoch,
 		Payload:   encrypted,
 		FileIDs:   fileIDs,
 		Signature: base64.StdEncoding.EncodeToString(sig),
-	})
+		CorrID:    corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "send", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // SendRoomMessageFile uploads a local file and sends a message that
@@ -203,14 +212,19 @@ func (c *Client) SendGroupMessageFull(group, body, replyTo string, mentions []st
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
 	sig := crypto.SignDM(c.privKey, payloadBytes, group, wrappedKeys)
 
-	return c.enc.Encode(protocol.SendGroup{
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.SendGroup{
 		Type:        "send_group",
 		Group:       group,
 		WrappedKeys: wrappedKeys,
 		Payload:     encrypted,
 		FileIDs:     fileIDs,
 		Signature:   base64.StdEncoding.EncodeToString(sig),
-	})
+		CorrID:      corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "send_group", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // SendGroupMessageFile uploads a local file into a group DM and sends a
@@ -431,14 +445,19 @@ func (c *Client) SendRoomReaction(room, targetMsgID, emoji string) error {
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
 	sig := crypto.SignRoom(c.privKey, payloadBytes, room, epoch)
 
-	return c.enc.Encode(protocol.React{
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.React{
 		Type:      "react",
 		ID:        targetMsgID,
 		Room:      room,
 		Epoch:     epoch,
 		Payload:   encrypted,
 		Signature: base64.StdEncoding.EncodeToString(sig),
-	})
+		CorrID:    corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "react", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // SendGroupReaction sends an encrypted reaction to a group DM message.
@@ -475,24 +494,34 @@ func (c *Client) SendGroupReaction(group, targetMsgID, emoji string) error {
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
 	sig := crypto.SignDM(c.privKey, payloadBytes, group, wrappedKeys)
 
-	return c.enc.Encode(protocol.React{
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.React{
 		Type:        "react",
 		ID:          targetMsgID,
 		Group:       group,
 		WrappedKeys: wrappedKeys,
 		Payload:     encrypted,
 		Signature:   base64.StdEncoding.EncodeToString(sig),
-	})
+		CorrID:      corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "react", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // SendUnreact removes a reaction by its server-assigned reaction_id. Used
 // by the explicit "Remove my reaction" UX — the client looks up the
 // reaction_id from its local (message_id, user, emoji) index and sends it.
 func (c *Client) SendUnreact(reactionID string) error {
-	return c.enc.Encode(protocol.Unreact{
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.Unreact{
 		Type:       "unreact",
 		ReactionID: reactionID,
-	})
+		CorrID:     corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "unreact", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // DecryptRoomReaction decrypts a reaction payload from a room.
@@ -573,10 +602,15 @@ func (c *Client) SendRead(room, group, dm, lastRead string) error {
 
 // SendDelete sends a message deletion request.
 func (c *Client) SendDelete(id string) error {
-	return c.enc.Encode(protocol.Delete{
-		Type: "delete",
-		ID:   id,
-	})
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.Delete{
+		Type:   "delete",
+		ID:     id,
+		CorrID: corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "delete", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // CreateGroup creates a new group DM.
@@ -726,14 +760,19 @@ func (c *Client) SendDMMessageFull(dmID, body, replyTo string, mentions []string
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
 	sig := crypto.SignDM(c.privKey, payloadBytes, dmID, wrappedKeys)
 
-	return c.enc.Encode(protocol.SendDM{
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.SendDM{
 		Type:        "send_dm",
 		DM:          dmID,
 		WrappedKeys: wrappedKeys,
 		Payload:     encrypted,
 		FileIDs:     fileIDs,
 		Signature:   base64.StdEncoding.EncodeToString(sig),
-	})
+		CorrID:      corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "send_dm", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // SendDMMessageFile uploads a local file into a 1:1 DM and sends it.
@@ -865,14 +904,19 @@ func (c *Client) SendDMReaction(dmID, targetMsgID, emoji string) error {
 	payloadBytes, _ := base64.StdEncoding.DecodeString(encrypted)
 	sig := crypto.SignDM(c.privKey, payloadBytes, dmID, wrappedKeys)
 
-	return c.enc.Encode(protocol.React{
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.React{
 		Type:        "react",
 		ID:          targetMsgID,
 		DM:          dmID,
 		WrappedKeys: wrappedKeys,
 		Payload:     encrypted,
 		Signature:   base64.StdEncoding.EncodeToString(sig),
-	})
+		CorrID:      corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "react", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // DecryptDMReaction decrypts a reaction payload from a 1:1 DM.
@@ -905,13 +949,18 @@ func (c *Client) DecryptDMReaction(wrappedKeys map[string]string, payloadBase64 
 
 // RequestHistory requests older messages.
 func (c *Client) RequestHistory(room, group, before string, limit int) error {
-	return c.enc.Encode(protocol.History{
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.History{
 		Type:   "history",
 		Room:   room,
 		Group:  group,
 		Before: before,
 		Limit:  limit,
-	})
+		CorrID: corrID,
+	}
+	c.sendQueue.EnqueueWithID(corrID, "history", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // SendRetireMe permanently retires the current user's account. After the
@@ -932,7 +981,11 @@ func (c *Client) SendRetireMe(reason string) error {
 // The response arrives as a device_list message and should be handled by the
 // OnMessage callback.
 func (c *Client) SendListDevices() error {
-	return c.enc.Encode(protocol.ListDevices{Type: "list_devices"})
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.ListDevices{Type: "list_devices", CorrID: corrID}
+	c.sendQueue.EnqueueWithID(corrID, "list_devices", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // SendRevokeDevice asks the server to revoke one of the user's own devices.
@@ -977,7 +1030,11 @@ func (c *Client) ClearPendingAlert() {
 
 // RequestRoomMembers asks the server for the member list of a room.
 func (c *Client) RequestRoomMembers(room string) error {
-	return c.enc.Encode(protocol.RoomMembers{Type: "room_members", Room: room})
+	corrID := protocol.GenerateCorrID()
+	envelope := protocol.RoomMembers{Type: "room_members", Room: room, CorrID: corrID}
+	c.sendQueue.EnqueueWithID(corrID, "room_members", envelope)
+	c.sendQueue.MarkSending(corrID)
+	return c.enc.Encode(envelope)
 }
 
 // RoomMembersList returns the most recently received room members list.
