@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -66,15 +65,15 @@ type Client struct {
 	logger         *slog.Logger
 	store          *store.Store
 
-	mu          sync.RWMutex
-	userID      string // nanoid (usr_ prefix) — immutable identity
-	displayName string
-	admin       bool
-	rooms       []string
-	groups      []string
+	mu           sync.RWMutex
+	userID       string // nanoid (usr_ prefix) — immutable identity
+	displayName  string
+	admin        bool
+	rooms        []string
+	groups       []string
 	capabilities []string
 	profiles     map[string]*protocol.Profile
-	groupMembers map[string][]string         // group DM ID -> member userIDs
+	groupMembers map[string][]string // group DM ID -> member userIDs
 	// Phase 14: in-memory admin set per group. Sourced from the
 	// group_list catchup on connect (protocol.GroupInfo.Admins) and
 	// updated by live group_event{promote,demote} + sync replay. Not
@@ -82,19 +81,19 @@ type Client struct {
 	// server and the client refetches on reconnect. The LOCAL user's
 	// admin flag IS persisted (groups.is_admin column) for pre-check
 	// survival across restart.
-	groupAdmins  map[string]map[string]bool  // group DM ID -> set of admin userIDs
-	dms          map[string][2]string        // 1:1 DM ID -> [userA, userB]
-	retired      map[string]string           // retired userID -> retired_at timestamp
-	epochKeys      map[string]map[int64][]byte // room -> epoch -> unwrapped key
-	currentEpoch   map[string]int64            // room -> current epoch number
-	seqCounters    map[string]int64            // "room:x" or "group:x" or "dm:x" -> next seq
+	groupAdmins     map[string]map[string]bool  // group DM ID -> set of admin userIDs
+	dms             map[string][2]string        // 1:1 DM ID -> [userA, userB]
+	retired         map[string]string           // retired userID -> retired_at timestamp
+	epochKeys       map[string]map[int64][]byte // room -> epoch -> unwrapped key
+	currentEpoch    map[string]int64            // room -> current epoch number
+	seqCounters     map[string]int64            // "room:x" or "group:x" or "dm:x" -> next seq
 	hasPendingKeys  bool                        // true when admin_notify arrived (cleared on list refresh)
 	pendingKeys     []protocol.PendingKeyEntry  // populated by pending_keys_list
 	roomMembersRoom string                      // room for latest room_members_list
 	roomMembers     []string                    // member usernames from room_members_list
-	privKey        ed25519.PrivateKey
-	signer      ssh.Signer
-	lastSynced  string
+	privKey         ed25519.PrivateKey
+	signer          ssh.Signer
+	lastSynced      string
 
 	// sendQueue (Phase 17c Step 5) tracks in-flight outbound requests
 	// by their client-generated corr_id. Replaces fire-and-forget.
@@ -366,8 +365,12 @@ func (c *Client) readLoop() {
 
 		raw, err := c.dec.DecodeRaw()
 		if err != nil {
-			if err != io.EOF {
-				if c.cfg.OnError != nil {
+			if c.cfg.OnError != nil {
+				select {
+				case <-c.done:
+					// Local shutdown path (explicit Close); suppress
+					// reconnect-trigger errors.
+				default:
 					c.cfg.OnError(err)
 				}
 			}
