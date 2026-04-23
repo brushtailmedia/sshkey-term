@@ -161,7 +161,9 @@ func (s *Store) DeleteMessage(id, deletedBy string) ([]string, error) {
 	var attachJSON string
 	s.db.QueryRow(`SELECT attachments FROM messages WHERE id = ?`, id).Scan(&attachJSON)
 
-	s.db.Exec(`DELETE FROM reactions WHERE message_id = ?`, id)
+	if err := s.DeleteReactionsForMessage(id); err != nil {
+		return nil, err
+	}
 	_, err := s.db.Exec(`UPDATE messages SET deleted = 1, deleted_by = ?, body = '' WHERE id = ?`,
 		deletedBy, id)
 
@@ -177,6 +179,12 @@ func (s *Store) DeleteMessage(id, deletedBy string) ([]string, error) {
 		}
 	}
 	return fileIDs, err
+}
+
+// DeleteReactionsForMessage removes all reactions for a single message id.
+func (s *Store) DeleteReactionsForMessage(msgID string) error {
+	_, err := s.db.Exec(`DELETE FROM reactions WHERE message_id = ?`, msgID)
+	return err
 }
 
 // StoredReaction represents a decrypted reaction in the local DB.
@@ -318,7 +326,9 @@ func (s *Store) UpdateMessageEdited(msgID, newBody string, editedAt int64) (int6
 	}
 	if n > 0 {
 		// Clear locally-cached reactions on the edited message.
-		s.db.Exec(`DELETE FROM reactions WHERE message_id = ?`, msgID)
+		if err := s.DeleteReactionsForMessage(msgID); err != nil {
+			return 0, err
+		}
 	}
 	return n, nil
 }

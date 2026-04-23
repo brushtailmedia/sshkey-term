@@ -1353,6 +1353,19 @@ func SetProfileForTesting(c *Client, p *protocol.Profile) {
 	c.profiles[p.User] = p
 }
 
+// SetUserIDForTesting sets the authenticated local user ID from an
+// external package. Production code assigns c.userID during handshake;
+// this helper exists for tui-layer tests that need self-identity
+// dependent behavior (for example Up-arrow edit targeting) without a
+// live SSH session.
+//
+// Do not call from production code.
+func SetUserIDForTesting(c *Client, userID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.userID = userID
+}
+
 // GroupMembers returns the member list for a group DM.
 func (c *Client) GroupMembers(groupID string) []string {
 	c.mu.RLock()

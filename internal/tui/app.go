@@ -53,47 +53,47 @@ type App struct {
 	err       error
 
 	// UI state
-	sidebar   SidebarModel
-	messages  MessagesModel
-	input     InputModel
-	statusBar StatusBarModel
-	help      HelpModel
-	search      SearchModel
-	newConv     NewConvModel
-	emojiPicker EmojiPickerModel
-	infoPanel    InfoPanelModel
+	sidebar       SidebarModel
+	messages      MessagesModel
+	input         InputModel
+	statusBar     StatusBarModel
+	help          HelpModel
+	search        SearchModel
+	newConv       NewConvModel
+	emojiPicker   EmojiPickerModel
+	infoPanel     InfoPanelModel
 	pendingPanel  PendingPanelModel
 	connectFailed ConnectFailedModel
-	settings    SettingsModel
-	addServer   AddServerModel
-	memberPanel MemberPanelModel
-	verify      VerifyModel
-	keyWarning  KeyWarningModel
-	quitConfirm       QuitConfirmModel
+	settings      SettingsModel
+	addServer     AddServerModel
+	memberPanel   MemberPanelModel
+	verify        VerifyModel
+	keyWarning    KeyWarningModel
+	quitConfirm   QuitConfirmModel
 	// lastCtrlQAt (Phase 17c Step 5 polish) stamps the time of the
 	// last Ctrl+Q keypress. A second Ctrl+Q within doubleQuitWindow
 	// bypasses the confirm dialog — escape hatch for users who
 	// genuinely want to abandon pending sends.
-	lastCtrlQAt time.Time
-	retireConfirm     RetireConfirmModel
-	leaveConfirm      LeaveConfirmModel
-	leaveRoomConfirm  LeaveRoomConfirmModel
-	deleteDMConfirm   DeleteDMConfirmModel
+	lastCtrlQAt        time.Time
+	retireConfirm      RetireConfirmModel
+	leaveConfirm       LeaveConfirmModel
+	leaveRoomConfirm   LeaveRoomConfirmModel
+	deleteDMConfirm    DeleteDMConfirmModel
 	deleteGroupConfirm DeleteGroupConfirmModel
 	deleteRoomConfirm  DeleteRoomConfirmModel
 	// Phase 14 in-group admin verb dialogs
-	addConfirm         AddConfirmModel
-	kickConfirm        KickConfirmModel
-	promoteConfirm     PromoteConfirmModel
-	demoteConfirm      DemoteConfirmModel
-	transferConfirm    TransferConfirmModel
+	addConfirm      AddConfirmModel
+	kickConfirm     KickConfirmModel
+	promoteConfirm  PromoteConfirmModel
+	demoteConfirm   DemoteConfirmModel
+	transferConfirm TransferConfirmModel
 	// Phase 14 read-only overlays (/audit, /members, /admins)
-	auditOverlay       AuditOverlayModel
-	membersOverlay    MembersOverlayModel
+	auditOverlay   AuditOverlayModel
+	membersOverlay MembersOverlayModel
 	// Phase 14 last-admin inline promote picker — shown when the
 	// server rejects /leave or /delete with ErrForbidden due to the
 	// caller being the only admin of a group that has other members.
-	lastAdminPicker    LastAdminPickerModel
+	lastAdminPicker LastAdminPickerModel
 	// Tracks whether the pending /leave or /delete was actually a
 	// /delete — set by the LeaveConfirmMsg and DeleteGroupConfirmMsg
 	// handlers just before the wire send, cleared on next send or on
@@ -109,30 +109,30 @@ type App struct {
 	lastKickGroup  string
 	lastKickUserID string
 	lastKickTS     int64
-	deviceRevoked     DeviceRevokedModel
-	deviceMgr     DeviceMgrModel
-	quickSwitch QuickSwitchModel
-	threadPanel ThreadPanelModel
-	pinnedBar   PinnedBarModel
+	deviceRevoked  DeviceRevokedModel
+	deviceMgr      DeviceMgrModel
+	quickSwitch    QuickSwitchModel
+	threadPanel    ThreadPanelModel
+	pinnedBar      PinnedBarModel
 
 	// Config state
-	appConfig   *config.Config
-	configDir   string
-	serverIdx   int // index of the active server in config
-	bell              BellConfig
-	muted             map[string]bool // room name or conv ID -> muted
-	showHelpHint      bool
-	reconnectAttempt  int
+	appConfig        *config.Config
+	configDir        string
+	serverIdx        int // index of the active server in config
+	bell             BellConfig
+	muted            map[string]bool // room name or conv ID -> muted
+	showHelpHint     bool
+	reconnectAttempt int
 
-	width          int
-	height         int
-	focus          Focus
-	layout         Layout
-	contextMenu    ContextMenuModel
-	memberMenu     MemberMenuModel
-	passphrase         PassphraseModel
-	passphraseCh       chan []byte
-	passphraseCache    map[string][]byte // keyPath -> passphrase
+	width           int
+	height          int
+	focus           Focus
+	layout          Layout
+	contextMenu     ContextMenuModel
+	memberMenu      MemberMenuModel
+	passphrase      PassphraseModel
+	passphraseCh    chan []byte
+	passphraseCache map[string][]byte // keyPath -> passphrase
 
 	// pendingCreateDM tracks an in-flight create_dm so the client can
 	// transparently retry if the server returns server_busy (a cleanup
@@ -197,31 +197,31 @@ const (
 // New creates the app model.
 func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx int) App {
 	return App{
-		cfg:         cfg,
-		sidebar:     NewSidebar(),
-		messages:    NewMessages(),
-		input:       NewInput(),
-		statusBar:   NewStatusBar(),
-		search:      NewSearch(),
-		newConv:     NewNewConv(),
-		emojiPicker: NewEmojiPicker(),
-		quickSwitch: NewQuickSwitch(),
-		memberPanel: NewMemberPanel(),
-		settings:     NewSettings(),
-		addServer:    NewAddServer(),
-		retireConfirm: NewRetireConfirm(),
-		deviceRevoked: NewDeviceRevoked(),
-		deviceMgr:     NewDeviceMgr(),
+		cfg:             cfg,
+		sidebar:         NewSidebar(),
+		messages:        NewMessages(),
+		input:           NewInput(),
+		statusBar:       NewStatusBar(),
+		search:          NewSearch(),
+		newConv:         NewNewConv(),
+		emojiPicker:     NewEmojiPicker(),
+		quickSwitch:     NewQuickSwitch(),
+		memberPanel:     NewMemberPanel(),
+		settings:        NewSettings(),
+		addServer:       NewAddServer(),
+		retireConfirm:   NewRetireConfirm(),
+		deviceRevoked:   NewDeviceRevoked(),
+		deviceMgr:       NewDeviceMgr(),
 		passphrase:      NewPassphrase(),
 		passphraseCh:    make(chan []byte, 1),
 		passphraseCache: make(map[string][]byte),
-		appConfig:    appCfg,
-		configDir:   configDir,
-		serverIdx:   serverIdx,
-		bell:         NewBellConfig(appCfg.Notifications),
-		muted:        config.LoadMutedMap(appCfg),
-		showHelpHint: !appCfg.Notifications.HelpShown,
-		focus:        FocusInput,
+		appConfig:       appCfg,
+		configDir:       configDir,
+		serverIdx:       serverIdx,
+		bell:            NewBellConfig(appCfg.Notifications),
+		muted:           config.LoadMutedMap(appCfg),
+		showHelpHint:    !appCfg.Notifications.HelpShown,
+		focus:           FocusInput,
 	}
 }
 
@@ -804,6 +804,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 
 		case "esc":
+			// Phase 15: Esc in input-focus edit mode cancels the in-progress
+			// edit (clear buffer + exit edit state) rather than only changing
+			// panel focus. This branch must run before the generic focus reset
+			// to avoid leaving the input in zombie edit mode.
+			if a.focus == FocusInput && a.input.IsEditing() {
+				a.input.ExitEditMode()
+				a.input.ClearInput()
+				return a, nil
+			}
 			a.focus = FocusInput
 			return a, nil
 		}
@@ -828,7 +837,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						a.client.RequestRoomMembers(a.messages.room)
 					}
 					a.input.SetMembers(a.activeMemberEntries())
-				a.input.SetNonMembers(a.activeNonMemberEntries())
+					a.input.SetNonMembers(a.activeNonMemberEntries())
 				}
 				a.sendReadReceipt()
 			}
@@ -1794,7 +1803,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Set up member list for @completion
 			a.memberPanel.Refresh(a.client.Rooms()[0], "", a.client, a.sidebar.online)
 			a.input.SetMembers(a.activeMemberEntries())
-				a.input.SetNonMembers(a.activeNonMemberEntries())
+			a.input.SetNonMembers(a.activeNonMemberEntries())
 		}
 
 		a.statusBar.SetUser(a.client.DisplayName(a.client.UserID()), a.client.IsAdmin())
@@ -2025,7 +2034,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 						a.client.RequestRoomMembers(a.messages.room)
 					}
 					a.input.SetMembers(a.activeMemberEntries())
-				a.input.SetNonMembers(a.activeNonMemberEntries())
+					a.input.SetNonMembers(a.activeNonMemberEntries())
 				}
 				a.sendReadReceipt()
 			}
@@ -2145,23 +2154,23 @@ func (a *App) setUnreadDividerAfter(lastReadID string) {
 //
 // Side effects in order:
 //
-//   1. **Exit edit mode** if the user had a half-finished edit in the
-//      previous context. Dispatching that edit after a context switch
-//      would either land in the wrong conversation (if the new context
-//      is active) or silently no-op (if the new context is empty),
-//      both of which are bad user experience. The buffer is cleared
-//      along with the edit flag so the user doesn't ship an orphaned
-//      body on their next keystroke. Phase 15.
+//  1. **Exit edit mode** if the user had a half-finished edit in the
+//     previous context. Dispatching that edit after a context switch
+//     would either land in the wrong conversation (if the new context
+//     is active) or silently no-op (if the new context is empty),
+//     both of which are bad user experience. The buffer is cleared
+//     along with the edit flag so the user doesn't ship an orphaned
+//     body on their next keystroke. Phase 15.
 //
-//   2. **Apply the new room's topic** (or clear it in non-room
-//      contexts). Reads from the local DB via
-//      `Client.DisplayRoomTopic` and pushes the result into the
-//      messages model so the two-line pane header renders the current
-//      topic. Safe to call with group / DM / empty contexts — the
-//      resolver returns empty and `SetRoomTopic("")` omits the topic
-//      line cleanly. Also safe when the client is nil (first-run
-//      wizard or pre-connect): the messages model renders the title
-//      line only until the next context switch. Phase 18.
+//  2. **Apply the new room's topic** (or clear it in non-room
+//     contexts). Reads from the local DB via
+//     `Client.DisplayRoomTopic` and pushes the result into the
+//     messages model so the two-line pane header renders the current
+//     topic. Safe to call with group / DM / empty contexts — the
+//     resolver returns empty and `SetRoomTopic("")` omits the topic
+//     line cleanly. Also safe when the client is nil (first-run
+//     wizard or pre-connect): the messages model renders the title
+//     line only until the next context switch. Phase 18.
 //
 // This helper REPLACES the older `applyRoomTopic` — which only ran
 // the topic-resolution step and had edit-mode cleanup piggybacked
@@ -2361,7 +2370,7 @@ func (a *App) switchToSidebarSelection() {
 			a.client.RequestRoomMembers(a.messages.room)
 		}
 		a.input.SetMembers(a.activeMemberEntries())
-				a.input.SetNonMembers(a.activeNonMemberEntries())
+		a.input.SetNonMembers(a.activeNonMemberEntries())
 	}
 	a.sendReadReceipt()
 }
@@ -3302,47 +3311,47 @@ func (a *App) handleWhoamiCommand(sc *SlashCommandMsg) {
 // sendqueue_dispatch.go); the cases below need per-verb UI logic
 // ON TOP of that generic dispatch.
 //
-//   SUCCESS ACKS (match client requests via corr_id — readLoop Acks):
-//     "message"            ← send              [ack via dispatch]
-//     "group_message"      ← send_group        [ack via dispatch]
-//     "dm"                 ← send_dm           [ack via dispatch]
-//     "edited"             ← edit              [ack via dispatch]
-//     "group_edited"       ← edit_group        [ack via dispatch]
-//     "dm_edited"          ← edit_dm           [ack via dispatch]
-//     "deleted"            ← delete            [ack via dispatch]
-//     "reaction"           ← react             [ack via dispatch]
-//     "reaction_removed"   ← unreact           [ack via dispatch]
-//     "pinned" / "unpinned"← pin / unpin       [ack via dispatch — no client verb today]
-//     "history_result"     ← history           [ack via dispatch]
-//     "room_members_list"  ← room_members      [ack via dispatch]
-//     "device_list"        ← list_devices      [ack via dispatch]
-//     "upload_ready"/"upload_complete" ← upload_start [ack via dispatch]
-//     "download_start"     ← download          [ack via dispatch]
+//	SUCCESS ACKS (match client requests via corr_id — readLoop Acks):
+//	  "message"            ← send              [ack via dispatch]
+//	  "group_message"      ← send_group        [ack via dispatch]
+//	  "dm"                 ← send_dm           [ack via dispatch]
+//	  "edited"             ← edit              [ack via dispatch]
+//	  "group_edited"       ← edit_group        [ack via dispatch]
+//	  "dm_edited"          ← edit_dm           [ack via dispatch]
+//	  "deleted"            ← delete            [ack via dispatch]
+//	  "reaction"           ← react             [ack via dispatch]
+//	  "reaction_removed"   ← unreact           [ack via dispatch]
+//	  "pinned" / "unpinned"← pin / unpin       [ack via dispatch — no client verb today]
+//	  "history_result"     ← history           [ack via dispatch]
+//	  "room_members_list"  ← room_members      [ack via dispatch]
+//	  "device_list"        ← list_devices      [ack via dispatch]
+//	  "upload_ready"/"upload_complete" ← upload_start [ack via dispatch]
+//	  "download_start"     ← download          [ack via dispatch]
 //
-//   ERROR CATEGORIES (routed through protocol.CategoryForCode):
-//     Category A-default: rate_limited on send/edit/react/admin →
-//                         retry w/ backoff (driver); surface on exhaust
-//     Category A-silent:  rate_limited on room_members / list_devices →
-//                         silent drop (see Gap 5 in case "error" below)
-//     Category B:         invalid_epoch / epoch_conflict /
-//                         stale_member_list → apply server-pushed
-//                         epoch_key (see case "epoch_key" which calls
-//                         Client.TriggerEpochRetry), then retry
-//     Category C:         permanent user-action (message_too_large,
-//                         edit_window_expired, etc.) → surface to
-//                         statusBar
-//     Category D:         privacy-identical (denied, unknown_room,
-//                         etc.) → surface generic message to statusBar
+//	ERROR CATEGORIES (routed through protocol.CategoryForCode):
+//	  Category A-default: rate_limited on send/edit/react/admin →
+//	                      retry w/ backoff (driver); surface on exhaust
+//	  Category A-silent:  rate_limited on room_members / list_devices →
+//	                      silent drop (see Gap 5 in case "error" below)
+//	  Category B:         invalid_epoch / epoch_conflict /
+//	                      stale_member_list → apply server-pushed
+//	                      epoch_key (see case "epoch_key" which calls
+//	                      Client.TriggerEpochRetry), then retry
+//	  Category C:         permanent user-action (message_too_large,
+//	                      edit_window_expired, etc.) → surface to
+//	                      statusBar
+//	  Category D:         privacy-identical (denied, unknown_room,
+//	                      etc.) → surface generic message to statusBar
 //
-//   SERVER BROADCASTS / PUSHES (no ack, no category):
-//     typing, presence, read, profile, user_retired, room_retired,
-//     room_left, room_deleted, retired_rooms, retired_users,
-//     group_event, group_left, group_deleted, group_renamed,
-//     group_created, group_added_to, dm_created, dm_left, room_event,
-//     room_list, group_list, dm_list, sync_batch, unread, pins,
-//     device_revoked, admin_notify, pending_keys_list, epoch_key,
-//     epoch_trigger, epoch_confirmed, server_shutdown — these cases
-//     apply incoming state directly; no queue interaction needed.
+//	SERVER BROADCASTS / PUSHES (no ack, no category):
+//	  typing, presence, read, profile, user_retired, room_retired,
+//	  room_left, room_deleted, retired_rooms, retired_users,
+//	  group_event, group_left, group_deleted, group_renamed,
+//	  group_created, group_added_to, dm_created, dm_left, room_event,
+//	  room_list, group_list, dm_list, sync_batch, unread, pins,
+//	  device_revoked, admin_notify, pending_keys_list, epoch_key,
+//	  epoch_trigger, epoch_confirmed, server_shutdown — these cases
+//	  apply incoming state directly; no queue interaction needed.
 //
 // When a new message type is added, classify it here and either wire
 // through the generic dispatch (if it's an ack) or apply-state inline

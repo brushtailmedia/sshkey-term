@@ -90,17 +90,16 @@ func TestGenerateEd25519KeyFile_WithPassphrase(t *testing.T) {
 }
 
 func TestGenerateEd25519KeyFile_ExpandsTilde(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("no home dir")
-	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
 	// Create a temp subdir we can clean up
 	relPath := ".sshkey-test-tmp-" + t.Name() + "/key"
 	tildePath := "~/" + relPath
 	absPath := filepath.Join(home, relPath)
 	defer os.RemoveAll(filepath.Dir(absPath))
 
-	_, err = generateEd25519KeyFile(tildePath, "")
+	_, err := generateEd25519KeyFile(tildePath, "")
 	if err != nil {
 		t.Fatalf("generate with ~: %v", err)
 	}

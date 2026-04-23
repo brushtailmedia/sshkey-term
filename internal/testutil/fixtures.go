@@ -43,7 +43,6 @@ var (
 var (
 	fixturesOnce sync.Once
 	fixturesErr  error
-	usersToml    string
 	keyDir       string
 )
 
@@ -74,7 +73,7 @@ func EnsureFixtures(t testing.TB) {
 			u.UserID = generateID("usr_")
 			u.KeyPath = filepath.Join(keyDir, strings.ToLower(u.DisplayName)+"_ed25519")
 
-			pub, priv, err := ed25519.GenerateKey(rand.Reader)
+			_, priv, err := ed25519.GenerateKey(rand.Reader)
 			if err != nil {
 				fixturesErr = err
 				return
@@ -89,21 +88,12 @@ func EnsureFixtures(t testing.TB) {
 				return
 			}
 
-			sshPub, _ := ssh.NewPublicKey(pub)
-			pubLine := strings.TrimRight(string(ssh.MarshalAuthorizedKey(sshPub)), "\n")
-
-			usersToml += fmt.Sprintf("[%s]\nkey = %q\ndisplay_name = %q\nrooms = %s\n\n",
-				u.UserID, pubLine+" "+u.DisplayName+"@test", u.DisplayName, u.Rooms)
+			// Key comments are not used by the retained test helpers.
 		}
 	})
 	if fixturesErr != nil {
 		t.Fatalf("generate test fixtures: %v", fixturesErr)
 	}
-}
-
-// UsersToml returns the generated users.toml content.
-func UsersToml() string {
-	return usersToml
 }
 
 // AdminUserID returns Alice's username (Alice is admin in test config).
