@@ -87,6 +87,8 @@ type App struct {
 	promoteConfirm  PromoteConfirmModel
 	demoteConfirm   DemoteConfirmModel
 	transferConfirm TransferConfirmModel
+	// Attachment save-as dialog (post-v0.2.0 image fix follow-up)
+	saveAttachment SaveAttachmentModel
 	// Phase 14 read-only overlays (/audit, /members, /admins)
 	auditOverlay   AuditOverlayModel
 	membersOverlay MembersOverlayModel
@@ -212,6 +214,7 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		retireConfirm:   NewRetireConfirm(),
 		deviceRevoked:   NewDeviceRevoked(),
 		deviceMgr:       NewDeviceMgr(),
+		saveAttachment:  NewSaveAttachment(),
 		passphrase:      NewPassphrase(),
 		passphraseCh:    make(chan []byte, 1),
 		passphraseCache: make(map[string][]byte),
@@ -255,6 +258,11 @@ func (a App) connect() tea.Cmd {
 		// is comfortably above any realistic burst (one key-change
 		// event per user per session is the upper bound).
 		keyWarnCh := make(chan KeyChangeEvent, 10)
+		// Buffered to cover image-attachment bursts during catchup —
+		// a chatty room with many recent images could fire a dozen
+		// auto-preview completions in quick succession. 100 matches
+		// msgCh's buffer.
+		attachReadyCh := make(chan AttachmentReadyEvent, 100)
 
 		cfg := a.cfg
 		cfg.OnMessage = func(msgType string, raw json.RawMessage) {
@@ -272,6 +280,19 @@ func (a App) connect() tea.Cmd {
 			// degradation, not a correctness gap.
 			select {
 			case keyWarnCh <- KeyChangeEvent{User: user, OldFingerprint: oldFP, NewFingerprint: newFP}:
+			default:
+			}
+		}
+		cfg.OnAttachmentReady = func(fileID string) {
+			// Non-blocking send — a burst of images arriving during
+			// catchup shouldn't stall the auto-preview goroutine on a
+			// slow TUI. Buffer is large enough to cover typical bursts;
+			// if full, drop the nudge (worst case: the user sees the
+			// 🖼 placeholder until the next keypress triggers a repaint,
+			// at which point the render path's os.Stat picks up the
+			// cache file anyway).
+			select {
+			case attachReadyCh <- AttachmentReadyEvent{FileID: fileID}:
 			default:
 			}
 		}
@@ -312,23 +333,54 @@ func (a App) connect() tea.Cmd {
 			}
 		}()
 
-		return connectedWithClient{client: c, msgCh: msgCh, errCh: errCh, keyWarnCh: keyWarnCh}
+		return connectedWithClient{client: c, msgCh: msgCh, errCh: errCh, keyWarnCh: keyWarnCh, attachReadyCh: attachReadyCh}
 	}
 }
 
 type connectedWithClient struct {
-	client    *client.Client
-	msgCh     chan ServerMsg
-	errCh     chan error
-	keyWarnCh chan KeyChangeEvent
+	client        *client.Client
+	msgCh         chan ServerMsg
+	errCh         chan error
+	keyWarnCh     chan KeyChangeEvent
+	attachReadyCh chan AttachmentReadyEvent
+}
+
+// saveAttachmentOpenMsg flips the save-as modal open after a
+// download completes on a tea.Cmd goroutine. Carries the bits the
+// modal needs: the local plaintext cache path (copy source), the
+// sender-supplied filename (sanitized, for display + rename
+// suggestion), and the pre-filled default destination.
+type saveAttachmentOpenMsg struct {
+	SourcePath     string
+	AttachmentName string
+	DefaultPath    string
+}
+
+// saveAttachmentDownloadFailedMsg surfaces a download error when the
+// tea.Cmd goroutine failed to fetch the attachment. The modal never
+// opens in this path.
+type saveAttachmentDownloadFailedMsg struct {
+	Err error
+}
+
+// AttachmentReadyEvent is the tea.Msg form of a client-layer
+// OnAttachmentReady callback — signals that an auto-preview image
+// download has completed and the file is now cached on disk. The TUI
+// uses this purely as a re-render trigger; the render path derives
+// LocalPath from the cache on every paint, so no model state has to
+// mutate — returning from Update with no cmd is sufficient to make
+// View pick up the new file.
+type AttachmentReadyEvent struct {
+	FileID string
 }
 
 // waitForMsg returns a cmd that waits for the next server message.
-// Selects across three channels: server-message events, errors, and
-// client-layer key-change warnings (Phase 21 F3.a) which surface via
-// their own channel rather than riding on the ServerMsg envelope
-// because they are TUI-synthetic events, not protocol frames.
-func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChangeEvent, done <-chan struct{}) tea.Cmd {
+// Selects across four channels: server-message events, errors,
+// client-layer key-change warnings (Phase 21 F3.a), and attachment
+// auto-preview completions. All four surface via separate channels
+// rather than riding on the ServerMsg envelope because they are
+// TUI-synthetic events, not protocol frames.
+func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChangeEvent, attachReadyCh chan AttachmentReadyEvent, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case msg := <-msgCh:
@@ -337,6 +389,8 @@ func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChange
 			return ErrMsg{Err: err}
 		case kw := <-keyWarnCh:
 			return kw
+		case ar := <-attachReadyCh:
+			return ar
 		case <-done:
 			return ErrMsg{Err: fmt.Errorf("disconnected")}
 		}
@@ -414,6 +468,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.leaveRoomConfirm.IsVisible() {
 			var cmd tea.Cmd
 			a.leaveRoomConfirm, cmd = a.leaveRoomConfirm.Update(msg)
+			return a, cmd
+		}
+
+		// Save-attachment dialog intercepts all keys: text-input for
+		// the destination path in phaseEdit, y/n/e-style shortcuts in
+		// phaseExists. Placed alongside the other modal intercepts so
+		// the whole background (compose, sidebar, message actions) is
+		// inert while the dialog is up.
+		if a.saveAttachment.IsVisible() {
+			var cmd tea.Cmd
+			a.saveAttachment, cmd = a.saveAttachment.Update(msg)
 			return a, cmd
 		}
 
@@ -1270,6 +1335,43 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case saveAttachmentOpenMsg:
+		// Download goroutine completed; open the save-as modal on the
+		// Update goroutine. Status bar's "Downloading..." message is
+		// cleared by a subsequent status update (or by the modal
+		// covering the status bar until the user finishes).
+		a.saveAttachment.Show(msg.SourcePath, msg.AttachmentName, msg.DefaultPath)
+		return a, nil
+
+	case saveAttachmentDownloadFailedMsg:
+		// Download goroutine failed before we ever reached the modal.
+		// Show the error in the status bar and do nothing else — no
+		// modal opened, no state to unwind.
+		a.statusBar.SetError("Download failed: " + msg.Err.Error())
+		return a, nil
+
+	case SaveAttachmentDoMsg:
+		// User confirmed a destination (possibly via overwrite or
+		// rename). Perform the copy in a goroutine so the TUI stays
+		// responsive, and report the outcome via the status bar.
+		src := msg.SourcePath
+		dst := msg.DestPath
+		go func() {
+			if err := client.SaveFileAs(src, dst); err != nil {
+				a.statusBar.SetError("Save failed: " + err.Error())
+				return
+			}
+			a.statusBar.SetError("Saved: " + dst)
+		}()
+		return a, nil
+
+	case SaveAttachmentCancelledMsg:
+		// User bailed out of the save flow. Surface a subtle
+		// acknowledgement so they know the Esc registered; don't spam
+		// the status bar if they're about to do something else.
+		a.statusBar.SetError("Save cancelled")
+		return a, nil
+
 	case DeleteDMConfirmMsg:
 		// User confirmed /delete on a 1:1 DM. /delete is silent (the
 		// other party is never notified) and atomic in the sense that
@@ -1691,18 +1793,40 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "save_attachment":
 			if a.client != nil && len(msg.Msg.Attachments) > 0 {
 				att := msg.Msg.Attachments[0]
-				go func() {
+				// Strip any path components from the sender-supplied
+				// filename before we let it near filepath.Join — a
+				// hostile sender with `att.Name = "../../etc/passwd"`
+				// would otherwise be able to steer the save outside
+				// the chosen destination directory.
+				safeName := sanitizeAttachmentName(att.Name)
+				defaultPath := filepath.Join(defaultSaveDir(), safeName)
+				cachePath := filepath.Join(a.cfg.DataDir, "files", att.FileID)
+
+				// If auto-preview already cached the file (small image)
+				// or the user previously opened it, skip the network
+				// round-trip and open the modal immediately. Otherwise
+				// fire a tea.Cmd that downloads then emits the
+				// open-modal message so Show() lands on the Update
+				// goroutine, not the download goroutine.
+				if _, err := os.Stat(cachePath); err == nil {
+					a.saveAttachment.Show(cachePath, safeName, defaultPath)
+				} else {
 					a.statusBar.SetError("Downloading " + att.Name + "...")
-					path, err := a.client.DownloadFile(att.FileID, att.DecryptKey)
-					if err != nil {
-						a.statusBar.SetError("Download failed: " + err.Error())
-						return
-					}
-					home, _ := os.UserHomeDir()
-					dst := filepath.Join(home, "Downloads", att.Name)
-					client.SaveFileAs(path, dst)
-					a.statusBar.SetError("Saved: " + dst)
-				}()
+					fileID := att.FileID
+					decryptKey := att.DecryptKey
+					c := a.client
+					cmds = append(cmds, func() tea.Msg {
+						path, err := c.DownloadFile(fileID, decryptKey)
+						if err != nil {
+							return saveAttachmentDownloadFailedMsg{Err: err}
+						}
+						return saveAttachmentOpenMsg{
+							SourcePath:     path,
+							AttachmentName: safeName,
+							DefaultPath:    defaultPath,
+						}
+					})
+				}
 			}
 		case "open_menu":
 			// Keyboard-triggered context menu opener (Enter on selected message).
@@ -1811,11 +1935,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.updateTitle()
 
 		// Start listening for server messages
-		cmds = append(cmds, waitForMsg(msg.msgCh, msg.errCh, msg.keyWarnCh, a.client.Done()))
+		cmds = append(cmds, waitForMsg(msg.msgCh, msg.errCh, msg.keyWarnCh, msg.attachReadyCh, a.client.Done()))
 		// Store channels for future waits
 		a.sidebar.msgCh = msg.msgCh
 		a.sidebar.errCh = msg.errCh
 		a.sidebar.keyWarnCh = msg.keyWarnCh
+		a.sidebar.attachReadyCh = msg.attachReadyCh
+
+		// Wire the per-server file cache directory into the messages
+		// model so the inline-image render path can resolve downloaded
+		// attachments by file_id at paint time. See MessagesModel.SetFilesDir.
+		a.messages.SetFilesDir(filepath.Join(a.cfg.DataDir, "files"))
 
 	case ServerMsg:
 		if cmd := a.handleServerMessage(msg); cmd != nil {
@@ -1824,8 +1954,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue listening
 		if a.client != nil {
 			if a.sidebar.msgCh != nil {
-				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.client.Done()))
+				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.client.Done()))
 			}
+		}
+
+	case AttachmentReadyEvent:
+		// Auto-preview image download completed. No model state to
+		// mutate — the render path checks the file cache on disk by
+		// file_id on every View call, so returning from Update is
+		// enough to trigger a re-paint that picks up the newly-cached
+		// file. Continue listening for the next event.
+		if a.client != nil && a.sidebar.msgCh != nil {
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.client.Done()))
 		}
 
 	case KeyChangeEvent:
@@ -1848,7 +1988,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Continue listening for the next event.
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.client.Done()))
 		}
 
 	case passphraseNeededMsg:
@@ -1950,7 +2090,12 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return a, cmd
 	}
 
-	// Other overlays are keyboard-only
+	// Other overlays are keyboard-only. Listing them here consumes any
+	// mouse event (click / wheel / drag) that arrives while the overlay
+	// is up, so clicks landing "outside" the visible dialog footprint
+	// don't bleed through to the sidebar / messages / compose input
+	// underneath. Any new modal with the same behaviour must be added
+	// to this list or it will silently pass clicks through.
 	if a.help.IsVisible() || a.search.IsVisible() || a.quickSwitch.IsVisible() || a.threadPanel.IsVisible() || a.newConv.IsVisible() ||
 		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.pendingPanel.IsVisible() ||
 		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
@@ -1960,6 +2105,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.demoteConfirm.IsVisible() || a.transferConfirm.IsVisible() ||
 		a.auditOverlay.IsVisible() || a.membersOverlay.IsVisible() ||
 		a.lastAdminPicker.IsVisible() ||
+		a.saveAttachment.IsVisible() ||
 		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
 		return a, nil
 	}
@@ -4604,6 +4750,9 @@ func (a App) View() string {
 	}
 	if a.transferConfirm.IsVisible() {
 		return a.transferConfirm.View(a.width)
+	}
+	if a.saveAttachment.IsVisible() {
+		return a.saveAttachment.View(a.width)
 	}
 	if a.deviceRevoked.IsVisible() {
 		return a.deviceRevoked.View(a.width)

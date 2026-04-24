@@ -4,6 +4,8 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 
 	"github.com/brushtailmedia/sshkey-term/internal/crypto"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
@@ -95,6 +97,7 @@ func (c *Client) storeRoomMessage(raw json.RawMessage) {
 		Mentions:    mentions,
 		Attachments: attachments,
 	})
+	c.maybeAutoPreviewAttachments(attachments)
 }
 
 // storeGroupMessage decrypts and stores a group DM message in the local DB.
@@ -148,6 +151,7 @@ func (c *Client) storeGroupMessage(raw json.RawMessage) {
 		Mentions:    payload.Mentions,
 		Attachments: attachments,
 	})
+	c.maybeAutoPreviewAttachments(attachments)
 }
 
 // storeDMMessage decrypts and stores a 1:1 DM message in the local DB.
@@ -195,6 +199,84 @@ func (c *Client) storeDMMessage(raw json.RawMessage) {
 		Mentions:    mentions,
 		Attachments: attachments,
 	})
+	c.maybeAutoPreviewAttachments(attachments)
+}
+
+// maybeAutoPreviewAttachments kicks off background downloads for image
+// attachments small enough to preview inline. One goroutine per matching
+// attachment; no-op when auto-preview is disabled (cap <= 0), when the
+// mime is not in the accept-list, when the attachment is already cached
+// on disk, or when the decrypt key can't be decoded.
+//
+// Each goroutine calls DownloadFile which does the full fetch + decrypt
+// + write-to-cache. On completion we fire the OnAttachmentReady callback
+// so the TUI can re-render the message (render path checks the cache
+// file on disk by file_id, so the callback carries the file_id only).
+// Download failures log at Debug and are otherwise silent — the render
+// path falls back to the 🖼 placeholder.
+//
+// The size threshold is the primary defense against crafted-image
+// decoder exploits: anything above it cannot auto-fire the decoder,
+// only manual `o` can. Decoder panics are additionally recovered in
+// RenderImageInline.
+func (c *Client) maybeAutoPreviewAttachments(attachments []store.StoredAttachment) {
+	if c.cfg.ImageAutoPreviewMaxBytes <= 0 {
+		return
+	}
+	dataDir := c.cfg.DataDir
+	if dataDir == "" {
+		return
+	}
+	cb := c.cfg.OnAttachmentReady
+	for _, a := range attachments {
+		if !isAutoPreviewMime(a.Mime) {
+			continue
+		}
+		if a.Size <= 0 || a.Size > c.cfg.ImageAutoPreviewMaxBytes {
+			continue
+		}
+		cachedPath := filepath.Join(dataDir, "files", a.FileID)
+		if _, err := os.Stat(cachedPath); err == nil {
+			// Already cached from a previous session or manual open — no
+			// download needed, but still nudge the TUI to re-render in
+			// case this message is visible and the previous render
+			// happened before the cache check fired.
+			if cb != nil {
+				go cb(a.FileID)
+			}
+			continue
+		}
+		key, err := base64.StdEncoding.DecodeString(a.DecryptKey)
+		if err != nil {
+			continue
+		}
+		fileID := a.FileID // capture for closure
+		go func() {
+			if _, err := c.DownloadFile(fileID, key); err != nil {
+				if c.logger != nil {
+					c.logger.Debug("auto-preview download failed",
+						"file_id", fileID, "error", err)
+				}
+				return
+			}
+			if cb != nil {
+				cb(fileID)
+			}
+		}()
+	}
+}
+
+// isAutoPreviewMime is the narrow accept-list for auto-download. Kept
+// intentionally tighter than any general image-mime check: auto-decoding
+// on receive (without user action) is the one path where a crafted
+// payload could fire, so we restrict it to the four formats native to
+// Go's image decoders. Other mime types stay manual-open-only.
+func isAutoPreviewMime(mime string) bool {
+	switch mime {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	}
+	return false
 }
 
 // storeEditedRoomMessage applies an `edited` broadcast to the local DB.

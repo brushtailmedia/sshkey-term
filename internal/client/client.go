@@ -48,6 +48,22 @@ type Config struct {
 	// promptly rather than blocking. Phase 21 F3 closure 2026-04-19.
 	OnKeyWarning func(user, oldFingerprint, newFingerprint string)
 
+	// OnAttachmentReady fires when an auto-previewed image attachment
+	// finishes downloading to the local file cache. The callback
+	// carries the file_id so the TUI can re-render the matching
+	// message — the render path looks up the cache file on disk by
+	// file_id, so no path is needed in the callback. Runs on the
+	// auto-download goroutine; receivers should push to a channel and
+	// return promptly.
+	OnAttachmentReady func(fileID string)
+
+	// ImageAutoPreviewMaxBytes is the size cap for auto-downloading
+	// image attachments on message receive. Images at or below this
+	// threshold are fetched in the background so they can render
+	// inline; larger images still require an explicit `o` keypress.
+	// Zero or negative disables auto-preview entirely.
+	ImageAutoPreviewMaxBytes int64
+
 	Logger *slog.Logger
 }
 

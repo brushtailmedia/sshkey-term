@@ -44,7 +44,18 @@ func CanRenderImages() bool {
 // RenderImageInline renders an image file to a string of terminal escape sequences.
 // maxCols/maxRows define the bounding box in terminal cells.
 // Aspect ratio is preserved — the image fits within the box.
-func RenderImageInline(filePath string, maxCols, maxRows int) string {
+//
+// A deferred recover wraps decode + encode so a malformed or crafted image
+// (untrusted sender-supplied bytes) that trips a decoder panic does not
+// crash the TUI — we fall back to the empty-string result which makes the
+// caller render the 🖼 placeholder instead.
+func RenderImageInline(filePath string, maxCols, maxRows int) (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = ""
+		}
+	}()
+
 	if !CanRenderImages() {
 		return ""
 	}

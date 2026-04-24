@@ -3,6 +3,8 @@ package tui
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -145,7 +147,6 @@ type DisplayAttachment struct {
 	Size       int64
 	Mime       string
 	IsImage    bool
-	LocalPath  string // set after download
 	DecryptKey []byte // key to decrypt the downloaded file (epoch key for rooms, per-file K_file for DMs)
 }
 
@@ -169,6 +170,33 @@ type MessagesModel struct {
 	retired        map[string]bool   // userID -> account retired
 	left           bool              // current context is archived (read-only, user has left)
 	roomRetired    bool              // current context is a retired room (archived by admin)
+	filesDir       string            // <dataDir>/files — set by App after connect; used to derive per-attachment cached path for inline-image render
+}
+
+// SetFilesDir wires the per-server file cache directory into the render
+// path so the inline-image branch can check whether an attachment has
+// been downloaded without consulting any DB or in-memory map. Called
+// from App after the client connects.
+func (m *MessagesModel) SetFilesDir(dir string) {
+	m.filesDir = dir
+}
+
+// attachmentLocalPath returns the cached plaintext path for an
+// attachment if the file has been downloaded, else "". DownloadFile
+// writes decrypted bytes to <filesDir>/<fileID> deterministically, so
+// the cache-on-disk is the single source of truth for "is this locally
+// available?" — no need to persist a LocalPath field on the stored
+// attachment row. If the cache is evicted the next render drops back
+// to the 🖼 placeholder naturally.
+func (m *MessagesModel) attachmentLocalPath(fileID string) string {
+	if m.filesDir == "" || fileID == "" {
+		return ""
+	}
+	path := filepath.Join(m.filesDir, fileID)
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+	return path
 }
 
 func NewMessages() MessagesModel {
@@ -1264,18 +1292,23 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 
 			// Attachments
 			for _, att := range msg.Attachments {
-				if att.IsImage && att.LocalPath != "" && CanRenderImages() {
-					// Inline image rendering
-					// Image takes up most of the panel — width minus padding, height up to 2/3 of visible area
-				imgMaxRows := visibleHeight * 2 / 3
-				if imgMaxRows < 10 {
-					imgMaxRows = 10
-				}
-				imgStr := RenderImageInline(att.LocalPath, width-8, imgMaxRows)
+				localPath := m.attachmentLocalPath(att.FileID)
+				if att.IsImage && localPath != "" && CanRenderImages() {
+					// Inline image rendering — image takes up width minus
+					// edge padding, height up to 2/3 of the visible panel.
+					imgMaxRows := visibleHeight * 2 / 3
+					if imgMaxRows < 10 {
+						imgMaxRows = 10
+					}
+					imgStr := RenderImageInline(localPath, width-8, imgMaxRows)
 					if imgStr != "" {
 						line += "\n" + imgStr
 						line += "\n " + fmt.Sprintf("%s (%s)", att.Name, formatSize(att.Size))
 					} else {
+						// Decoder returned empty (malformed image, decoder
+						// panic recovered, or unsupported format). Fall
+						// back to the placeholder so the user still sees
+						// the attachment metadata.
 						line += "\n " + fmt.Sprintf("🖼 %s (%s)", att.Name, formatSize(att.Size))
 					}
 				} else if att.IsImage {

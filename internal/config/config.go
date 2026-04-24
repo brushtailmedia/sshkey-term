@@ -13,10 +13,32 @@ import (
 
 // Config represents the client configuration.
 type Config struct {
-	Device        DeviceConfig        `toml:"device"`
-	Servers       []ServerConfig      `toml:"servers"`
-	Notifications NotificationConfig  `toml:"notifications"`
+	Device        DeviceConfig       `toml:"device"`
+	Servers       []ServerConfig     `toml:"servers"`
+	Notifications NotificationConfig `toml:"notifications"`
+	Attachments   AttachmentsConfig  `toml:"attachments"`
 }
+
+// AttachmentsConfig controls inline attachment behavior.
+type AttachmentsConfig struct {
+	// ImageAutoPreviewMaxBytes is the upper size cap for auto-downloading
+	// image attachments on receive so they render inline in the chat
+	// stream. Images above this threshold still require an explicit `o`
+	// (open) keypress to download. Zero disables auto-preview entirely —
+	// all images stay as 🖼 placeholders until the user opens them.
+	//
+	// Default when unset or zero: 2 MiB. The primary defense against
+	// crafted-image decoder exploits is this cap; anything above it
+	// cannot auto-fire the decoder. Decoder panics are additionally
+	// recovered in RenderImageInline.
+	ImageAutoPreviewMaxBytes int64 `toml:"image_auto_preview_max_bytes"`
+}
+
+// DefaultImageAutoPreviewMaxBytes is applied in Load when the config
+// either omits the attachments section entirely or sets the cap to
+// zero without being explicit about disabling auto-preview. Operators
+// who want auto-preview fully off should set a negative value.
+const DefaultImageAutoPreviewMaxBytes int64 = 2 * 1024 * 1024
 
 type NotificationConfig struct {
 	Desktop          string   `toml:"desktop"`            // "all", "mentions", "off" (default: "all")
@@ -57,6 +79,12 @@ func Load(dir string) (*Config, error) {
 
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	// Apply default for image auto-preview cap if the operator didn't set
+	// one. A negative value is the explicit "off" switch.
+	if cfg.Attachments.ImageAutoPreviewMaxBytes == 0 {
+		cfg.Attachments.ImageAutoPreviewMaxBytes = DefaultImageAutoPreviewMaxBytes
 	}
 
 	return cfg, nil

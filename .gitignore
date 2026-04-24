@@ -40,3 +40,6 @@ Thumbs.db
 
 # env file
 .env
+
+# Local planning / scratch docs (not for public repo)
+image_fix.md

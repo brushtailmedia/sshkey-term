@@ -98,12 +98,13 @@ func run() error {
 	dataDir := filepath.Join(configDir, server.Host)
 
 	clientCfg := client.Config{
-		Host:     server.Host,
-		Port:     server.Port,
-		KeyPath:  server.Key,
-		DeviceID: cfg.Device.ID,
-		DataDir:  dataDir,
-		Logger:   logger,
+		Host:                     server.Host,
+		Port:                     server.Port,
+		KeyPath:                  server.Key,
+		DeviceID:                 cfg.Device.ID,
+		DataDir:                  dataDir,
+		Logger:                   logger,
+		ImageAutoPreviewMaxBytes: cfg.Attachments.ImageAutoPreviewMaxBytes,
 		// OnPassphrase is handled by the TUI passphrase dialog
 	}
 
