@@ -29,7 +29,7 @@ Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat)
 
 ```
 ┌──────────────────────────────────────┐
-│  sshkey-chat (terminal client)       │
+│  sshkey-term (terminal client)       │
 ├──────────────────────────────────────┤
 │  Bubble Tea         UI chrome        │
 │  rasterm            inline images    │
@@ -105,7 +105,7 @@ On first launch, the client prompts to select or generate an Ed25519 SSH key, th
 ## Configuration
 
 ```
-~/.sshkey-chat/
+~/.sshkey-term/
 └── config.toml              global config, server list, device ID
 ├── chat.example.com/
 │   ├── messages.db          encrypted local DB (all rooms + DMs)
@@ -116,7 +116,7 @@ On first launch, the client prompts to select or generate an Ed25519 SSH key, th
 ```
 
 ```toml
-# ~/.sshkey-chat/config.toml
+# ~/.sshkey-term/config.toml
 
 [device]
 id = "dev_V1StGXR8_Z5jdHi6B-myT"

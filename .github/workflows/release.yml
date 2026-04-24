@@ -104,8 +104,8 @@ jobs:
           CGO_LDFLAGS: "-lm"
           CC: ${{ matrix.cc }}
         run: |
-          go build -ldflags="-s -w" -o sshkey-chat .
-          tar czf sshkey-term_${{ github.ref_name }}_linux_${{ matrix.goarch }}.tar.gz sshkey-chat README.md LICENSE CHANGELOG.md
+          go build -ldflags="-s -w" -o sshkey-term .
+          tar czf sshkey-term_${{ github.ref_name }}_linux_${{ matrix.goarch }}.tar.gz sshkey-term README.md LICENSE CHANGELOG.md
 
       - uses: actions/upload-artifact@v4
         with:
@@ -136,8 +136,8 @@ jobs:
           CGO_ENABLED: "1"
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
         run: |
-          go build -ldflags="-s -w" -o sshkey-chat .
-          tar czf sshkey-term_${{ github.ref_name }}_darwin_${{ matrix.goarch }}.tar.gz sshkey-chat README.md LICENSE CHANGELOG.md
+          go build -ldflags="-s -w" -o sshkey-term .
+          tar czf sshkey-term_${{ github.ref_name }}_darwin_${{ matrix.goarch }}.tar.gz sshkey-term README.md LICENSE CHANGELOG.md
 
       - uses: actions/upload-artifact@v4
         with:

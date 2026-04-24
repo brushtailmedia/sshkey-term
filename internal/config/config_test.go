@@ -90,8 +90,8 @@ func TestLoad_MalformedTOML(t *testing.T) {
 
 func TestDefaultConfigDir(t *testing.T) {
 	got := DefaultConfigDir()
-	if !strings.HasSuffix(got, ".sshkey-chat") {
-		t.Errorf("DefaultConfigDir() = %q, want suffix .sshkey-chat", got)
+	if !strings.HasSuffix(got, ".sshkey-term") {
+		t.Errorf("DefaultConfigDir() = %q, want suffix .sshkey-term", got)
 	}
 	if !filepath.IsAbs(got) {
 		t.Errorf("DefaultConfigDir() should be absolute path, got %q", got)

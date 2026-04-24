@@ -203,10 +203,10 @@ Inline popup triggered by prefix characters in the input bar. `Tab` accepts the 
 
 ## Keybinding Configuration
 
-Custom keybindings via `~/.sshkey-chat/keybindings.toml`. Only uncommented lines override defaults. Format:
+Custom keybindings via `~/.sshkey-term/keybindings.toml`. Only uncommented lines override defaults. Format:
 
 ```toml
-# ~/.sshkey-chat/keybindings.toml
+# ~/.sshkey-term/keybindings.toml
 
 # [global]
 # quit = "ctrl+q"

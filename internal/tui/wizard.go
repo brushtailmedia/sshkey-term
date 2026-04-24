@@ -100,7 +100,7 @@ func NewWizard() WizardModel {
 	// Key generation inputs
 	genPath := textinput.New()
 	home, _ := os.UserHomeDir()
-	genPath.SetValue(filepath.Join(home, ".sshkey-chat", "keys", "id_ed25519"))
+	genPath.SetValue(filepath.Join(home, ".sshkey-term", "keys", "id_ed25519"))
 	genPath.Prompt = ""
 
 	genPass := textinput.New()

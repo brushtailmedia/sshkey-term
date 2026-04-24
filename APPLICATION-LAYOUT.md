@@ -1038,7 +1038,7 @@ Validates file exists and is Ed25519. Tilde-expanded.
 │         Generate Key               │
 │                                    │
 │  Save to:                          │
-│  │~/.sshkey-chat/keys/id_ed25519█ │
+│  │~/.sshkey-term/keys/id_ed25519█ │
 │                                    │
 │  Passphrase (recommended):         │
 │  │●●●●●●●●●●●●●●                  │
@@ -1232,7 +1232,7 @@ The add-server dialog has two modes: the **form** (name / host / port / SSH key 
 ┌─ Generate New Key ─────────────────┐
 │                                    │
 │  Save to:                          │
-│  │~/.sshkey-chat/keys/id_ed25519█ │
+│  │~/.sshkey-term/keys/id_ed25519█ │
 │                                    │
 │  Passphrase (recommended):         │
 │  │●●●●●●●●●●●●●●                  │

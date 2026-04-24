@@ -101,7 +101,7 @@ func NewAddServer() AddServerModel {
 		genInputs[i].Prompt = ""
 	}
 	home, _ := os.UserHomeDir()
-	genInputs[0].SetValue(filepath.Join(home, ".sshkey-chat", "keys", "id_ed25519"))
+	genInputs[0].SetValue(filepath.Join(home, ".sshkey-term", "keys", "id_ed25519"))
 	genInputs[1].Placeholder = "passphrase"
 	genInputs[1].EchoMode = textinput.EchoPassword
 	genInputs[2].Placeholder = "confirm passphrase"
@@ -338,7 +338,7 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 		a.genErr = ""
 
 		// Rescan keys so the newly-generated one can appear in the list
-		// (it was written to ~/.sshkey-chat/keys/... by default, not ~/.ssh/,
+		// (it was written to ~/.sshkey-term/keys/... by default, not ~/.ssh/,
 		// so it typically won't — but rescan covers custom paths under ~/.ssh)
 		all := scanSSHKeys()
 		a.scannedKeys = a.scannedKeys[:0]

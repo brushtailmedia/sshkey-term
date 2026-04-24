@@ -16,7 +16,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "sshkey-chat: %v\n", err)
+		fmt.Fprintf(os.Stderr, "sshkey-term: %v\n", err)
 		os.Exit(1)
 	}
 }

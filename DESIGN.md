@@ -28,7 +28,7 @@ TUI renders inline system messages in the room transcript for all five event typ
 
 ## Local Database
 
-Single SQLCipher-encrypted SQLite database per server, stored at `~/.sshkey-chat/<server-host>/messages.db`. Encryption key derived from the SSH private key via HKDF-SHA256. WAL mode enabled, foreign keys enforced.
+Single SQLCipher-encrypted SQLite database per server, stored at `~/.sshkey-term/<server-host>/messages.db`. Encryption key derived from the SSH private key via HKDF-SHA256. WAL mode enabled, foreign keys enforced.
 
 The local DB is a cache, not the source of truth. It can be wiped — anything within the server's retention window is re-fetched via `history` requests on next connect.
 

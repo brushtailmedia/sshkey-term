@@ -30,7 +30,7 @@ type Config struct {
 	Port     int
 	KeyPath  string
 	DeviceID string
-	DataDir  string // per-server data directory (e.g., ~/.sshkey-chat/chat.example.com/)
+	DataDir  string // per-server data directory (e.g., ~/.sshkey-term/chat.example.com/)
 
 	// Callbacks
 	OnMessage    func(msgType string, raw json.RawMessage)
