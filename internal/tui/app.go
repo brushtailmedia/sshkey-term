@@ -1808,6 +1808,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// fire a tea.Cmd that downloads then emits the
 				// open-modal message so Show() lands on the Update
 				// goroutine, not the download goroutine.
+				//
+				// NB: the enclosing `case MessageAction:` block ends
+				// with `return a, nil` (see line below the switch), so
+				// we can't use the `cmds = append(cmds, ...)` pattern
+				// here — that accumulator is discarded. Return the cmd
+				// directly instead. Caught by staticcheck SA4006
+				// after an early attempt used the append pattern; the
+				// symptom was a permanent "Downloading..." status-bar
+				// message because the download goroutine never ran.
 				if _, err := os.Stat(cachePath); err == nil {
 					a.saveAttachment.Show(cachePath, safeName, defaultPath)
 				} else {
@@ -1815,7 +1824,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					fileID := att.FileID
 					decryptKey := att.DecryptKey
 					c := a.client
-					cmds = append(cmds, func() tea.Msg {
+					return a, func() tea.Msg {
 						path, err := c.DownloadFile(fileID, decryptKey)
 						if err != nil {
 							return saveAttachmentDownloadFailedMsg{Err: err}
@@ -1825,7 +1834,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							AttachmentName: safeName,
 							DefaultPath:    defaultPath,
 						}
-					})
+					}
 				}
 			}
 		case "open_menu":
