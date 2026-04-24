@@ -91,9 +91,6 @@ func (c *Client) handleEpochTrigger(raw json.RawMessage) {
 		"epoch", trigger.NewEpoch,
 		"members", len(wrappedKeys),
 	)
-
-	// Also store our own wrapped key for verification
-	_ = wrappedKeys[c.userID]
 }
 
 // handleEpochConfirmed activates the confirmed epoch key.

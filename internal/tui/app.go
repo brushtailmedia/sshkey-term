@@ -318,21 +318,19 @@ func (a App) connect() tea.Cmd {
 			return ErrMsg{Err: err}
 		}
 
-		// Store the client reference via a message
-		go func() {
-			for {
-				select {
-				case msg := <-msgCh:
-					// Forward to tea program (set externally)
-					_ = msg
-				case err := <-errCh:
-					_ = err
-				case <-c.Done():
-					return
-				}
-			}
-		}()
-
+		// The connected event is what drives the App's first
+		// waitForMsg cmd; once Update processes it, waitForMsg becomes
+		// the sole consumer of msgCh / errCh / keyWarnCh / attachReadyCh.
+		// A secondary discarder goroutine used to live here — its
+		// comment read "Forward to tea program (set externally)",
+		// marking unfinished plumbing that was never completed.
+		// With both it and waitForMsg blocked on receive from the same
+		// buffered channels, Go's scheduler picked arbitrarily: ~50%
+		// of incoming protocol events were silently eaten by the
+		// discarder instead of reaching Update. Deleted 2026-04-25
+		// after the audit caught the race (reproduction in
+		// discarder_race_test.go); see CHANGELOG for the full
+		// user-visible impact.
 		return connectedWithClient{client: c, msgCh: msgCh, errCh: errCh, keyWarnCh: keyWarnCh, attachReadyCh: attachReadyCh}
 	}
 }
