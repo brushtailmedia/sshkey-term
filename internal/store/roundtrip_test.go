@@ -231,8 +231,8 @@ func TestSearch_ExcludesDeleted_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestConvAttachment_RoundTrip verifies DM attachment persistence.
-func TestConvAttachment_RoundTrip(t *testing.T) {
+// TestGroupAttachment_RoundTrip verifies group attachment persistence.
+func TestGroupAttachment_RoundTrip(t *testing.T) {
 	seed := []byte("test-seed-32-bytes-for-ed25519key")
 	dbKey, err := DeriveDBKey(seed)
 	if err != nil {
@@ -247,9 +247,9 @@ func TestConvAttachment_RoundTrip(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	s1.InsertMessage(StoredMessage{
-		ID: "d1", Sender: "alice", Body: "dm file", TS: 1000, Conversation: "conv_abc",
+		ID: "d1", Sender: "alice", Body: "group file", TS: 1000, Group: "group_abc",
 		Attachments: []StoredAttachment{
-			{FileID: "file_dm1", Name: "secret.pdf", Size: 5000, Mime: "application/pdf", DecryptKey: "ZG1rZXk="},
+			{FileID: "file_grp1", Name: "secret.pdf", Size: 5000, Mime: "application/pdf", DecryptKey: "Z3Jwa2V5"},
 		},
 	})
 	s1.Close()
@@ -260,14 +260,14 @@ func TestConvAttachment_RoundTrip(t *testing.T) {
 	}
 	defer s2.Close()
 
-	msgs, _ := s2.GetConvMessages("conv_abc", 10)
+	msgs, _ := s2.GetGroupMessages("group_abc", 10)
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
 	if len(msgs[0].Attachments) != 1 {
 		t.Fatalf("expected 1 attachment, got %d", len(msgs[0].Attachments))
 	}
-	if msgs[0].Attachments[0].DecryptKey != "ZG1rZXk=" {
-		t.Errorf("DM decrypt key not preserved: %q", msgs[0].Attachments[0].DecryptKey)
+	if msgs[0].Attachments[0].DecryptKey != "Z3Jwa2V5" {
+		t.Errorf("group decrypt key not preserved: %q", msgs[0].Attachments[0].DecryptKey)
 	}
 }

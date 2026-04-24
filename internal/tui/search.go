@@ -69,9 +69,10 @@ func (s *SearchModel) SetFTS(hasFTS bool) {
 
 // SelectedResult returns the selected search result (for jump-to-message).
 type SearchJumpMsg struct {
-	Room         string
-	Conversation string
-	MessageID    string
+	Room      string
+	Group     string
+	DM        string
+	MessageID string
 }
 
 func (s SearchModel) Update(msg tea.KeyMsg, c *client.Client) (SearchModel, tea.Cmd) {
@@ -84,9 +85,10 @@ func (s SearchModel) Update(msg tea.KeyMsg, c *client.Client) (SearchModel, tea.
 			r := s.results[s.cursor]
 			return s, func() tea.Msg {
 				return SearchJumpMsg{
-					Room:         r.Room,
-					Conversation: r.Conversation,
-					MessageID:    r.ID,
+					Room:      r.Room,
+					Group:     r.Group,
+					DM:        r.DM,
+					MessageID: r.ID,
 				}
 			}
 		}
@@ -151,7 +153,10 @@ func (s SearchModel) View(width, height int) string {
 
 			location := r.Room
 			if location == "" {
-				location = r.Conversation
+				location = r.Group
+			}
+			if location == "" {
+				location = r.DM
 			}
 			ts := time.Unix(r.TS, 0).Format("Jan 2")
 

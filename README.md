@@ -1,19 +1,26 @@
 # sshkey-term
 
-v0.1.1 — Expect breaking changes until v1.0.
+Expect breaking changes until v1.0.
 
 Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat) -- a private messaging server over SSH with E2E encryption.
 
 ## Features
 
-- End-to-end encrypted rooms and DMs (AES-256-GCM, X25519 key wrapping)
+- End-to-end encrypted rooms, 1:1 DMs, and group DMs (AES-256-GCM, X25519 key wrapping)
 - SSH key is your permanent identity -- no accounts, no passwords, no key rotation
-- Rooms with epoch-based key rotation, DMs with per-message keys
-- File sharing, reactions, typing indicators, read receipts, presence
+- Rooms with epoch-based key rotation, DMs with per-message keys (Signal-level forward secrecy)
+- **In-group admin model for group DMs** (Phase 14) — creators become the first admin; admins can add, remove, promote, demote, and rename via `/add`, `/kick`, `/promote`, `/demote`, `/transfer` with confirmation dialogs, `/audit` for recent admin actions, and `/undo` for 30-second kick revert
+- `/leave` and `/delete` for rooms, 1:1 DMs, and group DMs with multi-device sync
+- Retired-room read-only state (admin-archived rooms show a distinct banner)
+- File sharing, reactions, typing indicators, read receipts, presence, pinned messages
+- Soft-delete: deleted messages show as tombstones in the stream, not disappearances
 - Inline images via sixel/kitty/iterm2 protocols
-- Local encrypted database (SQLCipher) with full-text search
-- Multi-server support
-- Offline message history (lazy scroll-back)
+- Local encrypted database (SQLCipher) with full-text search (FTS5)
+- Multi-server support (Ctrl+1-9 to switch)
+- Offline message history with lazy scroll-back (local-first, server fallback)
+- Quick switch (Ctrl+K fuzzy search across rooms and conversations)
+- Thread view, reply preview, jump-to-parent
+- Alt+Up/Down fast room navigation
 - Self-service account retirement (settings → Retire account) with typed confirmation
 - Self-service device management (settings → Manage devices) — list and revoke your own devices
 - First-run wizard with key generation + passphrase + mandatory backup acknowledgement
@@ -85,12 +92,12 @@ Or download pre-built binaries from [Releases](https://github.com/brushtailmedia
 
 ```bash
 # Build with FTS5 full-text search support (recommended)
-CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" go build -o sshkey-chat .
+CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" go build -o sshkey-term .
 
 # Or build without FTS5 (search falls back to LIKE queries)
-go build -o sshkey-chat .
+go build -o sshkey-term .
 
-./sshkey-chat
+./sshkey-term
 ```
 
 On first launch, the client prompts to select or generate an Ed25519 SSH key, then connect to a server.
@@ -99,7 +106,7 @@ On first launch, the client prompts to select or generate an Ed25519 SSH key, th
 
 ```
 ~/.sshkey-chat/
-��── config.toml              global config, server list, device ID
+└── config.toml              global config, server list, device ID
 ├── chat.example.com/
 │   ├── messages.db          encrypted local DB (all rooms + DMs)
 │   └── files/               cached attachments
@@ -131,7 +138,7 @@ Each server is independent -- different keys, different rooms, different users. 
 
 ## Security model
 
-**Your Ed25519 key is your permanent identity.** 
+**Your Ed25519 SSH key is your permanent identity.** 
 
 The server never sees your private key or passphrase, only the public key. The client handles all encryption, decryption, signing, and verification locally. The server is a blind relay that routes messages and enforces access control based on public keys.
 
@@ -150,6 +157,14 @@ Device revocation is operational cleanup — it doesn't stop an attacker who has
 **Back up your key.** If you lose both the key and your passphrase with no backup, your account ends — the server cannot help you recover it. The first-run wizard enforces an explicit acknowledgement of this before letting you connect.
 
 See the server's [PROTOCOL.md](https://github.com/brushtailmedia/sshkey-chat/blob/main/PROTOCOL.md) section "Account Retirement" for the wire protocol and [PROJECT.md "Account Lifecycle"](https://github.com/brushtailmedia/sshkey-chat/blob/main/PROJECT.md) for the full design rationale.
+
+## Documentation
+
+| File | Contents |
+|---|---|
+| [DESIGN.md](DESIGN.md) | Client architecture: local DB schema, caching, slash commands, focus model, sync flow, offline mode |
+| [KEYBINDINGS.md](KEYBINDINGS.md) | Keyboard shortcuts and slash commands — quick reference |
+| [APPLICATION-LAYOUT.md](APPLICATION-LAYOUT.md) | Visual layout: panels, message rendering, color palette |
 
 ## Protocol
 

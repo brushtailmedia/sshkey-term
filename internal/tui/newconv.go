@@ -6,8 +6,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
-	"github.com/brushtailmedia/sshkey-term/internal/client"
 )
 
 var (
@@ -38,6 +36,15 @@ type NewConvModel struct {
 type CreateConvMsg struct {
 	Members []string
 	Name    string
+}
+
+// retryCreateDMMsg is emitted by a delayed tea.Cmd when the app needs to
+// transparently retry a create_dm that was rejected with server_busy.
+// The retry counter lives on the App struct, not on the message, so a
+// stale retry fired after the user moved on to a different target is a
+// harmless no-op.
+type retryCreateDMMsg struct {
+	other string
 }
 
 func NewNewConv() NewConvModel {
@@ -105,7 +112,7 @@ func (n *NewConvModel) updateSuggestions() {
 	}
 }
 
-func (n NewConvModel) Update(msg tea.KeyMsg, c *client.Client) (NewConvModel, tea.Cmd) {
+func (n NewConvModel) Update(msg tea.KeyMsg) (NewConvModel, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		n.Hide()
@@ -123,12 +130,12 @@ func (n NewConvModel) Update(msg tea.KeyMsg, c *client.Client) (NewConvModel, te
 		return n, nil
 
 	case "ctrl+enter":
-		return n, n.create(c)
+		return n, n.create()
 
 	case "enter":
 		if n.focusName {
 			// Create on Enter in name field
-			return n, n.create(c)
+			return n, n.create()
 		}
 		// Toggle member selection
 		if len(n.suggestions) > 0 && n.suggCursor < len(n.suggestions) {
@@ -178,7 +185,7 @@ func (n NewConvModel) Update(msg tea.KeyMsg, c *client.Client) (NewConvModel, te
 	return n, cmd
 }
 
-func (n *NewConvModel) create(c *client.Client) tea.Cmd {
+func (n *NewConvModel) create() tea.Cmd {
 	members := n.selectedList()
 	if len(members) == 0 {
 		return nil
@@ -188,10 +195,10 @@ func (n *NewConvModel) create(c *client.Client) tea.Cmd {
 
 	n.Hide()
 
+	// The app layer actually sends the create_dm / create_group — this
+	// lets it track pending-create-DM state for the server_busy auto-retry
+	// path. The closure just emits the intent as a CreateConvMsg.
 	return func() tea.Msg {
-		if c != nil {
-			c.CreateDM(members, name)
-		}
 		return CreateConvMsg{Members: members, Name: name}
 	}
 }
@@ -211,7 +218,7 @@ func (n NewConvModel) View(width int) string {
 
 	var b strings.Builder
 
-	b.WriteString(searchHeaderStyle.Render("New Conversation"))
+	b.WriteString(searchHeaderStyle.Render("New Group DM"))
 	b.WriteString("\n\n")
 
 	// Selected members

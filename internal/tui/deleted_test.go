@@ -102,7 +102,7 @@ func TestMarkDeleted_NonexistentNoOp(t *testing.T) {
 
 func TestView_RendersDeletedAsTombstone(t *testing.T) {
 	m := NewMessages()
-	m.SetContext("general", "")
+	m.SetContext("general", "", "")
 	m.messages = []DisplayMessage{
 		{ID: "msg_1", From: "Alice", Body: "hello", TS: 1000, Room: "general"},
 		{ID: "msg_2", FromID: "usr_bob", From: "Bob", Body: "", TS: 1001, Room: "general", Deleted: true, DeletedBy: "usr_bob"},
@@ -123,7 +123,7 @@ func TestView_RendersDeletedAsTombstone(t *testing.T) {
 
 func TestView_SelfDeleteHasNoSenderName(t *testing.T) {
 	m := NewMessages()
-	m.SetContext("general", "")
+	m.SetContext("general", "", "")
 	m.messages = []DisplayMessage{
 		{ID: "msg_1", FromID: "usr_alice", From: "Alice", Body: "", TS: 1000, Room: "general", Deleted: true, DeletedBy: "usr_alice"},
 	}
@@ -139,7 +139,7 @@ func TestView_SelfDeleteHasNoSenderName(t *testing.T) {
 
 func TestView_AdminDeleteShowsWho(t *testing.T) {
 	m := NewMessages()
-	m.SetContext("general", "")
+	m.SetContext("general", "", "")
 	m.resolveName = func(s string) string {
 		if s == "usr_admin" {
 			return "AdminUser"
@@ -224,7 +224,7 @@ func TestKeyboard_DeleteNoOpOnDeleted(t *testing.T) {
 
 func TestKeyboard_PinNoOpOnDeleted(t *testing.T) {
 	m := NewMessages()
-	m.SetContext("general", "")
+	m.SetContext("general", "", "")
 	m.messages = []DisplayMessage{
 		{ID: "msg_1", From: "Alice", Body: "", TS: 1000, Room: "general", Deleted: true},
 	}

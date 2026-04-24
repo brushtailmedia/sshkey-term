@@ -25,7 +25,13 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.1"
+          go-version: "1.26.2"
+
+      - name: Cross-Product Coupling Guard
+        run: bash .github/scripts/check_test_coupling.sh
+
+      - name: Sleep Guard
+        run: bash .github/scripts/check_test_sleeps.sh
 
       - name: Install build deps (Linux)
         if: matrix.goos == 'linux'
@@ -38,12 +44,33 @@ jobs:
           CGO_LDFLAGS: ${{ matrix.goos == 'linux' && '-lm' || '' }}
         run: go build .
 
-      - name: Test
+      - name: Test (race)
         env:
           CGO_ENABLED: "1"
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
           CGO_LDFLAGS: ${{ matrix.goos == 'linux' && '-lm' || '' }}
-        run: go test -count=1 -p 1 ./...
+        run: go test -race -count=1 -p 1 ./...
+
+      - name: Test (short)
+        env:
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
+          CGO_LDFLAGS: ${{ matrix.goos == 'linux' && '-lm' || '' }}
+        run: go test -short -count=1 -p 1 ./...
+
+      - name: Test (shuffle)
+        env:
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
+          CGO_LDFLAGS: ${{ matrix.goos == 'linux' && '-lm' || '' }}
+        run: go test -shuffle=on -count=1 -p 1 ./...
+
+      - name: Coverage Guard
+        env:
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
+          CGO_LDFLAGS: ${{ matrix.goos == 'linux' && '-lm' || '' }}
+        run: bash .github/scripts/check_coverage.sh
 
   release-linux:
     needs: test
@@ -62,7 +89,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.1"
+          go-version: "1.26.2"
 
       - name: Install cross-compiler
         if: matrix.packages != ''
@@ -100,7 +127,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.1"
+          go-version: "1.26.2"
 
       - name: Build
         env:

@@ -1,0 +1,11 @@
+# Per-package coverage thresholds for CI guard.
+# Format:
+#   ./package/path | min_percent | rationale
+
+./internal/client | 20.0 | client dispatch and sync integration baseline
+./internal/config | 50.0 | config parsing and validation baseline
+./internal/crypto | 75.0 | cryptographic helper correctness
+./internal/keygen | 75.0 | key generation and storage behavior
+./internal/protocol | 55.0 | protocol mirror and helper mappings
+./internal/store | 65.0 | local persistence invariants
+./internal/tui | 33.0 | UI behavior baseline with existing suite

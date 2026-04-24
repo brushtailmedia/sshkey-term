@@ -131,7 +131,7 @@ func TestOpen_SchemaCreated(t *testing.T) {
 		found = append(found, name)
 	}
 
-	expected := []string{"messages", "reactions", "epoch_keys", "pinned_keys", "read_positions", "seq_marks", "conversations", "state"}
+	expected := []string{"messages", "reactions", "epoch_keys", "pinned_keys", "read_positions", "seq_marks", "groups", "direct_messages", "rooms", "state"}
 	for _, want := range expected {
 		seen := false
 		for _, got := range found {
@@ -232,14 +232,25 @@ func TestMessages_RoomFilter(t *testing.T) {
 	}
 }
 
-func TestMessages_ConvFilter(t *testing.T) {
+func TestMessages_GroupFilter(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "a", Sender: "x", Body: "dm 1", TS: 1, Conversation: "conv_1"})
-	s.InsertMessage(StoredMessage{ID: "b", Sender: "x", Body: "dm 2", TS: 2, Conversation: "conv_2"})
+	s.InsertMessage(StoredMessage{ID: "a", Sender: "x", Body: "grp 1", TS: 1, Group: "group_1"})
+	s.InsertMessage(StoredMessage{ID: "b", Sender: "x", Body: "grp 2", TS: 2, Group: "group_2"})
 
-	got, _ := s.GetConvMessages("conv_1", 10)
+	got, _ := s.GetGroupMessages("group_1", 10)
+	if len(got) != 1 || got[0].Body != "grp 1" {
+		t.Errorf("group_1 filter failed: %v", got)
+	}
+}
+
+func TestMessages_DMFilter(t *testing.T) {
+	s := openTestStore(t)
+	s.InsertMessage(StoredMessage{ID: "a", Sender: "x", Body: "dm 1", TS: 1, DM: "dm_1"})
+	s.InsertMessage(StoredMessage{ID: "b", Sender: "x", Body: "dm 2", TS: 2, DM: "dm_2"})
+
+	got, _ := s.GetDMMessages("dm_1", 10)
 	if len(got) != 1 || got[0].Body != "dm 1" {
-		t.Errorf("conv_1 filter failed: %v", got)
+		t.Errorf("dm_1 filter failed: %v", got)
 	}
 }
 
@@ -297,7 +308,7 @@ func TestMessages_GetMessagesBefore(t *testing.T) {
 	s.InsertMessage(StoredMessage{ID: "m2", Sender: "x", Body: "second", TS: 200, Room: "general"})
 	s.InsertMessage(StoredMessage{ID: "m3", Sender: "x", Body: "third", TS: 300, Room: "general"})
 
-	got, err := s.GetMessagesBefore("general", "", "m3", 10)
+	got, err := s.GetMessagesBefore("general", "", "", "m3", 10)
 	if err != nil {
 		t.Fatalf("get before: %v", err)
 	}
@@ -488,14 +499,26 @@ func TestReadPositions_Replace(t *testing.T) {
 	}
 }
 
-// -- Conversations --
+// -- Groups --
 
-func TestConversations_StoreAndReplace(t *testing.T) {
+func TestGroups_StoreAndReplace(t *testing.T) {
 	s := openTestStore(t)
-	if err := s.StoreConversation("conv_1", "Project", "alice,bob"); err != nil {
+	if err := s.StoreGroup("group_1", "Project", "alice,bob"); err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	if err := s.StoreConversation("conv_1", "Project Alpha", "alice,bob,carol"); err != nil {
+	if err := s.StoreGroup("group_1", "Project Alpha", "alice,bob,carol"); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+}
+
+// -- DMs --
+
+func TestDMs_StoreAndReplace(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.StoreDM("dm_1", "alice", "bob"); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if err := s.StoreDM("dm_1", "alice", "bob"); err != nil {
 		t.Fatalf("replace: %v", err)
 	}
 }
@@ -534,6 +557,79 @@ func TestState_Overwrite(t *testing.T) {
 	got, _ := s.GetState("k")
 	if got != "v2" {
 		t.Errorf("got %q, want v2", got)
+	}
+}
+
+// -- Rooms --
+
+func TestRoomUpsertAndGet(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.UpsertRoom("room_abc", "general", "General chat", 3); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if name := s.GetRoomName("room_abc"); name != "general" {
+		t.Errorf("GetRoomName = %q, want general", name)
+	}
+	// Unknown room falls back to raw ID
+	if name := s.GetRoomName("room_unknown"); name != "room_unknown" {
+		t.Errorf("GetRoomName unknown = %q, want room_unknown", name)
+	}
+	// Update display name
+	s.UpsertRoom("room_abc", "general-renamed", "New topic", 5)
+	if name := s.GetRoomName("room_abc"); name != "general-renamed" {
+		t.Errorf("GetRoomName after update = %q, want general-renamed", name)
+	}
+}
+
+// Phase 18: GetRoomTopic read path for the two-line messages header
+// and info panel topic line. Empty-string semantics (not raw-ID
+// fallback) so the render layer can omit the topic line cleanly.
+func TestGetRoomTopic_ReturnsTopic(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.UpsertRoom("room_topic1", "general", "General chat — please be nice", 3); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	topic := s.GetRoomTopic("room_topic1")
+	if topic != "General chat — please be nice" {
+		t.Errorf("GetRoomTopic = %q, want %q", topic, "General chat — please be nice")
+	}
+}
+
+func TestGetRoomTopic_NoRow_ReturnsEmpty(t *testing.T) {
+	s := openTestStore(t)
+	// Room that was never upserted → no row in rooms table.
+	if topic := s.GetRoomTopic("room_does_not_exist"); topic != "" {
+		t.Errorf("GetRoomTopic on missing room = %q, want empty string", topic)
+	}
+}
+
+func TestGetRoomTopic_EmptyTopic_ReturnsEmpty(t *testing.T) {
+	s := openTestStore(t)
+	// Room exists but has no topic set — this is the common case for
+	// topicless rooms. Should return "" not fall back to anything.
+	if err := s.UpsertRoom("room_notopic", "quiet", "", 1); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if topic := s.GetRoomTopic("room_notopic"); topic != "" {
+		t.Errorf("GetRoomTopic on topicless room = %q, want empty string", topic)
+	}
+}
+
+func TestGetRoomTopic_UpdatedOnSecondUpsert(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.UpsertRoom("room_upd", "eng", "Original topic", 2); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if topic := s.GetRoomTopic("room_upd"); topic != "Original topic" {
+		t.Errorf("initial topic = %q, want %q", topic, "Original topic")
+	}
+	// Re-upsert with a new topic (simulates the client receiving a
+	// refreshed room_list after the server-side topic changed).
+	if err := s.UpsertRoom("room_upd", "eng", "Updated topic", 2); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	if topic := s.GetRoomTopic("room_upd"); topic != "Updated topic" {
+		t.Errorf("updated topic = %q, want %q", topic, "Updated topic")
 	}
 }
 

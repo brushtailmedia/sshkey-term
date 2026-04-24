@@ -292,12 +292,12 @@ func TestClearServerData(t *testing.T) {
 func TestLoadMutedMap(t *testing.T) {
 	cfg := &Config{
 		Notifications: NotificationConfig{
-			MutedRooms:         []string{"general", "engineering"},
-			MutedConversations: []string{"conv_xyz"},
+			MutedRooms:  []string{"room_general", "room_eng"},
+			MutedGroups: []string{"group_xyz"},
 		},
 	}
 	m := LoadMutedMap(cfg)
-	if !m["general"] || !m["engineering"] || !m["conv_xyz"] {
+	if !m["room_general"] || !m["room_eng"] || !m["group_xyz"] {
 		t.Errorf("muted map missing expected entries: %v", m)
 	}
 	if m["not-muted"] {
@@ -305,32 +305,32 @@ func TestLoadMutedMap(t *testing.T) {
 	}
 }
 
-func TestSaveMutedMap_DistinguishesConvsAndRooms(t *testing.T) {
+func TestSaveMutedMap_DistinguishesGroupsAndRooms(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{}
 	muted := map[string]bool{
-		"general":     true,
-		"engineering": true,
-		"conv_abc123": true,
-		"off-by-user": false, // should be skipped
+		"room_general": true,
+		"room_eng":     true,
+		"group_abc123": true,
+		"off-by-user":  false, // should be skipped
 	}
 	if err := SaveMutedMap(dir, cfg, muted); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	// Verify rooms vs conversations were separated correctly
-	hasConv := false
-	for _, c := range cfg.Notifications.MutedConversations {
-		if c == "conv_abc123" {
-			hasConv = true
+	// Verify rooms vs groups were separated correctly
+	hasGroup := false
+	for _, g := range cfg.Notifications.MutedGroups {
+		if g == "group_abc123" {
+			hasGroup = true
 		}
 	}
-	if !hasConv {
-		t.Errorf("conv_abc123 should be in MutedConversations: %v", cfg.Notifications.MutedConversations)
+	if !hasGroup {
+		t.Errorf("group_abc123 should be in MutedGroups: %v", cfg.Notifications.MutedGroups)
 	}
 	for _, r := range cfg.Notifications.MutedRooms {
-		if strings.HasPrefix(r, "conv_") {
-			t.Errorf("MutedRooms contains conversation: %q", r)
+		if strings.HasPrefix(r, "group_") {
+			t.Errorf("MutedRooms contains group: %q", r)
 		}
 	}
 	// off-by-user was false, should not appear

@@ -39,13 +39,13 @@ func TestSoftDelete_MessageStaysInResults(t *testing.T) {
 	}
 }
 
-func TestSoftDelete_ConversationMessages(t *testing.T) {
+func TestSoftDelete_GroupMessages(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "d1", Sender: "alice", Body: "dm msg", TS: 1, Conversation: "conv_1"})
+	s.InsertMessage(StoredMessage{ID: "d1", Sender: "alice", Body: "dm msg", TS: 1, Group: "group_1"})
 
 	s.DeleteMessage("d1", "alice")
 
-	msgs, _ := s.GetConvMessages("conv_1", 10)
+	msgs, _ := s.GetGroupMessages("group_1", 10)
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 soft-deleted message, got %d", len(msgs))
 	}
@@ -110,7 +110,7 @@ func TestSoftDelete_GetMessagesBefore_IncludesDeleted(t *testing.T) {
 
 	s.DeleteMessage("m2", "bob")
 
-	msgs, err := s.GetMessagesBefore("general", "", "m3", 10)
+	msgs, err := s.GetMessagesBefore("general", "", "", "m3", 10)
 	if err != nil {
 		t.Fatalf("get before: %v", err)
 	}

@@ -124,7 +124,8 @@ func (s *Store) init() error {
 			body            TEXT NOT NULL,
 			ts              INTEGER NOT NULL,
 			room            TEXT NOT NULL DEFAULT '',
-			conversation    TEXT NOT NULL DEFAULT '',
+			group_id        TEXT NOT NULL DEFAULT '',
+			dm_id           TEXT NOT NULL DEFAULT '',
 			epoch           INTEGER NOT NULL DEFAULT 0,
 			reply_to        TEXT NOT NULL DEFAULT '',
 			mentions        TEXT NOT NULL DEFAULT '',
@@ -132,11 +133,13 @@ func (s *Store) init() error {
 			raw_payload     TEXT NOT NULL DEFAULT '',
 			deleted         INTEGER NOT NULL DEFAULT 0,
 			deleted_by      TEXT NOT NULL DEFAULT '',
-			attachments     TEXT NOT NULL DEFAULT ''
+			attachments     TEXT NOT NULL DEFAULT '',
+			edited_at       INTEGER NOT NULL DEFAULT 0
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room, ts) WHERE room != '';
-		CREATE INDEX IF NOT EXISTS idx_messages_conv_ts ON messages(conversation, ts) WHERE conversation != '';
+		CREATE INDEX IF NOT EXISTS idx_messages_group_ts ON messages(group_id, ts) WHERE group_id != '';
+		CREATE INDEX IF NOT EXISTS idx_messages_dm_ts ON messages(dm_id, ts) WHERE dm_id != '';
 
 		-- Reactions (decrypted emoji stored locally)
 		CREATE TABLE IF NOT EXISTS reactions (
@@ -180,11 +183,110 @@ func (s *Store) init() error {
 			seq INTEGER NOT NULL
 		);
 
-		-- Conversations (local cache of DM member lists + names)
-		CREATE TABLE IF NOT EXISTS conversations (
-			id      TEXT PRIMARY KEY,
-			name    TEXT NOT NULL DEFAULT '',
-			members TEXT NOT NULL DEFAULT ''
+		-- Rooms (persisted from server room_list).
+		-- left_at = 0 means active member; >0 means the user has left this
+		-- room (archived: greyed in sidebar, input disabled, history still
+		-- scrollable until /delete).
+		--
+		-- retired_at = 0 means active room; >0 means the room has been
+		-- retired (admin action, Phase 12). Distinct from left_at per Q9:
+		-- a user can be in a retired room (retired_at > 0, left_at = 0)
+		-- or leave a retired room (both > 0), and the TUI renders them
+		-- differently. name carries the post-retirement suffixed form.
+		CREATE TABLE IF NOT EXISTS rooms (
+			id            TEXT PRIMARY KEY,
+			name          TEXT NOT NULL DEFAULT '',
+			topic         TEXT NOT NULL DEFAULT '',
+			members       INTEGER NOT NULL DEFAULT 0,
+			updated_at    INTEGER NOT NULL DEFAULT 0,
+			left_at       INTEGER NOT NULL DEFAULT 0,
+			retired_at    INTEGER NOT NULL DEFAULT 0,
+			leave_reason  TEXT NOT NULL DEFAULT ''
+		);
+
+		-- Group DMs (local cache of group member lists + names).
+		-- left_at = 0 means active member; >0 means the user has left this
+		-- group (archived: greyed in sidebar, input disabled, history still
+		-- scrollable until /delete).
+		--
+		-- Phase 14: is_admin tracks the LOCAL user's admin status in this
+		-- group (1 = admin, 0 = regular member). Other members' admin
+		-- status is NOT persisted client-side — it lives in the in-memory
+		-- groupAdmins map on Client, sourced from the server's group_list
+		-- payload and updated by group_event{promote/demote}. The local
+		-- flag exists so the TUI pre-check (gating /add, /kick, etc.) can
+		-- consult it without a server round-trip, and so it survives
+		-- restart. is_admin is deliberately NOT part of the StoreGroup
+		-- upsert — promote/demote events land via SetLocalUserGroupAdmin
+		-- so they can't clobber the members list during a normal sync.
+		CREATE TABLE IF NOT EXISTS groups (
+			id           TEXT PRIMARY KEY,
+			name         TEXT NOT NULL DEFAULT '',
+			members      TEXT NOT NULL DEFAULT '',
+			is_admin     INTEGER NOT NULL DEFAULT 0,
+			left_at      INTEGER NOT NULL DEFAULT 0,
+			leave_reason TEXT NOT NULL DEFAULT ''
+		);
+
+		-- Phase 14: group_events is the local replay/audit table for
+		-- admin-initiated group mutations. Populated by:
+		--   (a) live group_event broadcasts from the server (join, leave,
+		--       promote, demote, rename)
+		--   (b) offline replay entries from sync_batch.Events on reconnect
+		-- Reads feed the /audit one-shot overlay and any future history
+		-- surface that wants to show "who did what and when".
+		--
+		-- Unlike the server (DB-per-context), the client is single-DB
+		-- per server, so this is one table keyed by group_id rather than
+		-- one table per group-{id}.db file. ts is INTEGER (unix seconds)
+		-- to match the server's group_events.ts type — sync replay uses
+		-- the same sinceTS watermark for both events and messages.
+		CREATE TABLE IF NOT EXISTS group_events (
+			id       INTEGER PRIMARY KEY AUTOINCREMENT,
+			group_id TEXT NOT NULL,
+			event    TEXT NOT NULL,
+			user     TEXT NOT NULL,
+			by       TEXT NOT NULL DEFAULT '',
+			reason   TEXT NOT NULL DEFAULT '',
+			name     TEXT NOT NULL DEFAULT '',
+			quiet    INTEGER NOT NULL DEFAULT 0,
+			ts       INTEGER NOT NULL
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_group_events_group_ts ON group_events(group_id, ts);
+
+		-- Phase 20: room_events is the local replay/audit table for
+		-- room audit events (leave / join / topic / rename / retire).
+		-- Populated by:
+		--   (a) live room_event broadcasts from the server
+		--   (b) offline replay entries from sync_batch.Events on reconnect
+		-- Mirrors group_events in shape but keyed by room_id. Separate
+		-- table (rather than a context-type column on group_events)
+		-- keeps the existing group-side code paths untouched.
+		CREATE TABLE IF NOT EXISTS room_events (
+			id       INTEGER PRIMARY KEY AUTOINCREMENT,
+			room_id  TEXT NOT NULL,
+			event    TEXT NOT NULL,
+			user     TEXT NOT NULL,
+			by       TEXT NOT NULL DEFAULT '',
+			reason   TEXT NOT NULL DEFAULT '',
+			name     TEXT NOT NULL DEFAULT '',
+			ts       INTEGER NOT NULL
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_room_events_room_ts ON room_events(room_id, ts);
+
+		-- 1:1 DMs (local cache of DM partner info).
+		-- left_at = 0 means active; >0 means the user has /delete'd this
+		-- DM (server-side cutoff is set, local message rows for this dm_id
+		-- have been purged). The row itself stays so sync from another
+		-- device can find it and confirm the local state matches.
+		CREATE TABLE IF NOT EXISTS direct_messages (
+			id         TEXT PRIMARY KEY,
+			user_a     TEXT NOT NULL,
+			user_b     TEXT NOT NULL,
+			created_at INTEGER NOT NULL DEFAULT 0,
+			left_at    INTEGER NOT NULL DEFAULT 0
 		);
 
 		-- Client state
@@ -215,11 +317,6 @@ func (s *Store) init() error {
 		END`)
 	}
 	// If FTS5 isn't available, search falls back to LIKE queries
-
-	// Migrations for existing DBs (no-op if columns already present)
-	s.db.Exec(`ALTER TABLE messages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0`)
-	s.db.Exec(`ALTER TABLE messages ADD COLUMN deleted_by TEXT NOT NULL DEFAULT ''`)
-	s.db.Exec(`ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT ''`)
 
 	return nil
 }

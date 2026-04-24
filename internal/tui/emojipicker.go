@@ -173,8 +173,3 @@ func (e EmojiPickerModel) View() string {
 
 	return dialogStyle.Render(b.String())
 }
-
-// emojiPickerOverlay is used for rendering - wraps the picker in a positioned overlay.
-func emojiPickerOverlay(picker EmojiPickerModel) string {
-	return picker.View()
-}

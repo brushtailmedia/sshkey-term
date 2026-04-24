@@ -16,15 +16,15 @@ type Keybindings struct {
 }
 
 type GlobalKeys struct {
-	Quit            string `toml:"quit"`
-	QuickSwitch     string `toml:"quick_switch"`
-	NewConversation string `toml:"new_conversation"`
-	MemberPanel     string `toml:"member_panel"`
-	PinnedMessages  string `toml:"pinned_messages"`
-	InfoPanel       string `toml:"info_panel"`
-	Settings        string `toml:"settings"`
-	Search          string `toml:"search"`
-	CommandMode     string `toml:"command_mode"`
+	Quit           string `toml:"quit"`
+	QuickSwitch    string `toml:"quick_switch"`
+	NewGroup       string `toml:"new_group"`
+	MemberPanel    string `toml:"member_panel"`
+	PinnedMessages string `toml:"pinned_messages"`
+	InfoPanel      string `toml:"info_panel"`
+	Settings       string `toml:"settings"`
+	Search         string `toml:"search"`
+	CommandMode    string `toml:"command_mode"`
 }
 
 type NavigationKeys struct {
@@ -62,15 +62,15 @@ type InputKeys struct {
 func DefaultKeybindings() Keybindings {
 	return Keybindings{
 		Global: GlobalKeys{
-			Quit:            "ctrl+q",
-			QuickSwitch:     "ctrl+k",
-			NewConversation: "ctrl+n",
-			MemberPanel:     "ctrl+m",
-			PinnedMessages:  "ctrl+p",
-			InfoPanel:       "ctrl+i",
-			Settings:        "ctrl+,",
-			Search:          "ctrl+f",
-			CommandMode:     "/",
+			Quit:           "ctrl+q",
+			QuickSwitch:    "ctrl+k",
+			NewGroup:       "ctrl+n",
+			MemberPanel:    "ctrl+m",
+			PinnedMessages: "ctrl+p",
+			InfoPanel:      "ctrl+i",
+			Settings:       "ctrl+,",
+			Search:         "ctrl+f",
+			CommandMode:    "/",
 		},
 		Navigation: NavigationKeys{
 			PrevRoom:   "alt+up",
@@ -135,7 +135,7 @@ func LoadKeybindings(configDir string) Keybindings {
 # [global]
 # quit = "ctrl+q"
 # quick_switch = "ctrl+k"
-# new_conversation = "ctrl+n"
+# new_group = "ctrl+n"
 # member_panel = "ctrl+m"
 # pinned_messages = "ctrl+p"
 # info_panel = "ctrl+i"
@@ -176,7 +176,7 @@ func LoadKeybindings(configDir string) Keybindings {
 func mergeKeybindings(dst, src *Keybindings) {
 	if src.Global.Quit != "" { dst.Global.Quit = src.Global.Quit }
 	if src.Global.QuickSwitch != "" { dst.Global.QuickSwitch = src.Global.QuickSwitch }
-	if src.Global.NewConversation != "" { dst.Global.NewConversation = src.Global.NewConversation }
+	if src.Global.NewGroup != "" { dst.Global.NewGroup = src.Global.NewGroup }
 	if src.Global.MemberPanel != "" { dst.Global.MemberPanel = src.Global.MemberPanel }
 	if src.Global.PinnedMessages != "" { dst.Global.PinnedMessages = src.Global.PinnedMessages }
 	if src.Global.InfoPanel != "" { dst.Global.InfoPanel = src.Global.InfoPanel }

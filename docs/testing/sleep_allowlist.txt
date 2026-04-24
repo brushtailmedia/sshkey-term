@@ -1,0 +1,8 @@
+# Baseline allowlist for existing test time.Sleep callsites.
+# Format:
+#   path:line | owner | rationale
+
+internal/tui/statusbar_test.go:28 | phase22 | status timeout progression assertion
+internal/tui/statusbar_test.go:74 | phase22 | status timeout progression assertion
+internal/tui/whois_test.go:283 | phase22 | clipboard/status async settle window
+internal/client/filetransfer_test.go:41 | phase22 | bounded pending-download registration poll in download path tests

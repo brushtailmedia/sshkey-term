@@ -54,15 +54,17 @@ var (
 
 // DisplayMessage is a message ready for rendering.
 type DisplayMessage struct {
-	ID           string
-	FromID       string // raw username (nanoid) for logic/comparison
-	From         string // display name for rendering
-	Body         string // decrypted body (or "(encrypted)" if not decryptable)
-	TS           int64
-	Room         string
-	Conversation string
-	ReplyTo      string
-	Mentions     []string
+	ID       string
+	FromID   string // raw username (nanoid) for logic/comparison
+	From     string // display name for rendering
+	Body     string // decrypted body (or "(encrypted)" if not decryptable)
+	TS       int64
+	EditedAt int64 // Phase 15: 0 if never edited, else server's edit wall clock (for "(edited)" marker)
+	Room     string
+	Group    string
+	DM       string
+	ReplyTo  string
+	Mentions []string
 	// ReactionsByUser tracks all reaction_ids per (user, emoji) on this message.
 	// user -> emoji -> []reaction_id. Display count = distinct users per emoji.
 	// The current user's own entries are used for the "Remove my reaction" UX.
@@ -72,6 +74,18 @@ type DisplayMessage struct {
 	SystemText      string
 	Deleted         bool
 	DeletedBy       string
+	// Phase 14 coalescing metadata. Populated when IsSystem is true
+	// and the row was created by AddCoalescingSystemMessage for an
+	// admin-initiated group event (join, promote, demote, removed).
+	// Empty otherwise — regular system messages (typing, retirement,
+	// self-leave) never coalesce. See AddCoalescingSystemMessage for
+	// the merge rules.
+	coalesceVerb    string
+	coalesceByID    string
+	coalesceByName  string
+	coalesceGroup   string
+	coalesceTargets []string
+	coalesceFirstTS int64
 }
 
 // DisplayReactions returns the emoji→count map for rendering, counting the
@@ -139,17 +153,22 @@ type DisplayAttachment struct {
 type MessagesModel struct {
 	messages       []DisplayMessage
 	room           string
-	conversation   string
+	group          string
+	dm             string
+	roomTopic      string // Phase 18: current room topic, rendered in the two-line header above the stream. Empty for groups/DMs/topicless rooms.
 	cursor         int  // selected message index (-1 = none)
 	scrollOffset   int
 	typingUsers    map[string]time.Time // user -> last typing time
 	currentUser    string               // display name — for @mention highlighting in body
 	currentUserID  string               // nanoid — for mention detection in payload
-	resolveName    func(string) string  // nanoid → display name (set by App)
+	resolveName     func(string) string // user nanoid → display name (set by App)
+	resolveRoomName func(string) string // room nanoid → display name (set by App)
 	loadingHistory bool
 	hasMore        bool              // server indicated more history available
 	unreadFromID   string            // first unread message ID (for divider)
-	retired        map[string]bool   // username -> account retired
+	retired        map[string]bool   // userID -> account retired
+	left           bool              // current context is archived (read-only, user has left)
+	roomRetired    bool              // current context is a retired room (archived by admin)
 }
 
 func NewMessages() MessagesModel {
@@ -191,15 +210,70 @@ func (m *MessagesModel) MarkRetired(user string) {
 	m.retired[user] = true
 }
 
-func (m *MessagesModel) SetContext(room, conversation string) {
+func (m *MessagesModel) SetContext(room, group, dm string) {
 	m.room = room
-	m.conversation = conversation
+	m.group = group
+	m.dm = dm
+	m.roomTopic = "" // Phase 18: caller should call SetRoomTopic after when the new context is a room with a topic
 	m.messages = nil
 	m.cursor = -1
 	m.scrollOffset = 0
 	m.unreadFromID = ""
 	m.hasMore = true
 	m.loadingHistory = false
+	m.left = false        // caller should call SetLeft after if the new context is archived
+	m.roomRetired = false // caller should call SetRoomRetired after if the new context is a retired room
+	// Clear typing indicators on context switch. SetTyping only inserts
+	// entries that match the current context, but stale entries from the
+	// previous context can linger (entries time out via the 5-second
+	// cutoff at render time, not on context switch). Without this clear,
+	// switching from group_X to group_Y while carol's typing entry is
+	// still recent would briefly display "carol is typing" in group_Y
+	// where carol is not typing — the per-context typing namespace bug.
+	for k := range m.typingUsers {
+		delete(m.typingUsers, k)
+	}
+}
+
+// SetRoomTopic stores the current room topic for rendering in the two-line
+// header above the message stream. Phase 18. Empty string omits the topic
+// line entirely — groups and 1:1 DMs always pass "" since they have no
+// topics. Rooms without a topic also pass "".
+func (m *MessagesModel) SetRoomTopic(topic string) {
+	m.roomTopic = topic
+}
+
+// RoomTopic returns the current room topic (read-only accessor used by
+// /topic slash command). Empty string when no topic is set or the context
+// is not a room.
+func (m *MessagesModel) RoomTopic() string {
+	return m.roomTopic
+}
+
+// SetLeft marks the current context as archived (read-only). When true,
+// the messages view renders a "you left this group" indicator and the
+// input bar should be disabled by the caller.
+func (m *MessagesModel) SetLeft(left bool) {
+	m.left = left
+}
+
+// IsLeft returns true if the current messages context is archived.
+func (m *MessagesModel) IsLeft() bool {
+	return m.left
+}
+
+// SetRoomRetired marks the current context as a retired room (Phase
+// 12). When true, the read-only banner renders different wording
+// ("this room was archived by an admin") to differentiate from a
+// self-leave. Orthogonal to left: a room may be both retired and left,
+// but the retired wording takes precedence because it's the cause.
+func (m *MessagesModel) SetRoomRetired(retired bool) {
+	m.roomRetired = retired
+}
+
+// IsRoomRetired returns true if the current context is a retired room.
+func (m *MessagesModel) IsRoomRetired() bool {
+	return m.roomRetired
 }
 
 // SetUnreadFrom sets the first unread message ID for the divider.
@@ -219,8 +293,10 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 
 	if m.room != "" {
 		stored, err = loadRoom(c, m.room)
-	} else if m.conversation != "" {
-		stored, err = loadConv(c, m.conversation)
+	} else if m.group != "" {
+		stored, err = loadGroup(c, m.group)
+	} else if m.dm != "" {
+		stored, err = loadDM(c, m.dm)
 	}
 
 	if err != nil || len(stored) == 0 {
@@ -248,18 +324,20 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 		}
 
 		m.messages = append(m.messages, DisplayMessage{
-			ID:           s.ID,
-			FromID:       s.Sender,
-			From:         from,
-			Body:         s.Body,
-			TS:           s.TS,
-			Room:         s.Room,
-			Conversation: s.Conversation,
-			ReplyTo:      s.ReplyTo,
-			Mentions:     s.Mentions,
-			Deleted:      s.Deleted,
-			DeletedBy:    s.DeletedBy,
-			Attachments:  attachments,
+			ID:          s.ID,
+			FromID:      s.Sender,
+			From:        from,
+			Body:        s.Body,
+			TS:          s.TS,
+			EditedAt:    s.EditedAt, // Phase 15
+			Room:        s.Room,
+			Group:       s.Group,
+			DM:          s.DM,
+			ReplyTo:     s.ReplyTo,
+			Mentions:    s.Mentions,
+			Deleted:     s.Deleted,
+			DeletedBy:   s.DeletedBy,
+			Attachments: attachments,
 		})
 		if s.ID != "" {
 			msgIDs = append(msgIDs, s.ID)
@@ -280,7 +358,10 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 	if st := c.Store(); st != nil {
 		target := m.room
 		if target == "" {
-			target = m.conversation
+			target = m.group
+		}
+		if target == "" {
+			target = m.dm
 		}
 		if target != "" {
 			if lastRead, err := st.GetReadPosition(target); err == nil && lastRead != "" {
@@ -306,8 +387,12 @@ func loadRoom(c *client.Client, room string) ([]store.StoredMessage, error) {
 	return c.LoadRoomMessages(room, 200)
 }
 
-func loadConv(c *client.Client, conv string) ([]store.StoredMessage, error) {
-	return c.LoadConvMessages(conv, 200)
+func loadGroup(c *client.Client, group string) ([]store.StoredMessage, error) {
+	return c.LoadGroupMessages(group, 200)
+}
+
+func loadDM(c *client.Client, dm string) ([]store.StoredMessage, error) {
+	return c.LoadDMMessages(dm, 200)
 }
 
 // requestHistory sends a history request for older messages.
@@ -318,16 +403,18 @@ func (m *MessagesModel) requestHistory() tea.Cmd {
 
 	firstMsg := m.messages[0]
 	room := m.room
-	conv := m.conversation
+	group := m.group
+	dm := m.dm
 	beforeID := firstMsg.ID
 
 	m.loadingHistory = true
 
 	return func() tea.Msg {
 		return HistoryRequestMsg{
-			Room:         room,
-			Conversation: conv,
-			BeforeID:     beforeID,
+			Room:     room,
+			Group:    group,
+			DM:       dm,
+			BeforeID: beforeID,
 		}
 	}
 }
@@ -408,8 +495,8 @@ func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
 	})
 }
 
-func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
-	if msg.Conversation != m.conversation {
+func (m *MessagesModel) AddGroupMessage(msg protocol.GroupMessage, c *client.Client) {
+	if msg.Group != m.group {
 		return
 	}
 
@@ -419,7 +506,7 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 	var attachments []DisplayAttachment
 
 	if c != nil {
-		payload, err := c.DecryptDMMessage(msg.WrappedKeys, msg.Payload)
+		payload, err := c.DecryptGroupMessage(msg.WrappedKeys, msg.Payload)
 		if err == nil {
 			body = payload.Body
 			replyTo = payload.ReplyTo
@@ -445,15 +532,15 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 	}
 
 	m.messages = append(m.messages, DisplayMessage{
-		ID:           msg.ID,
-		FromID:       msg.From,
-		From:         from,
-		Body:         body,
-		TS:           msg.TS,
-		Conversation: msg.Conversation,
-		ReplyTo:      replyTo,
-		Mentions:     mentions,
-		Attachments:  attachments,
+		ID:          msg.ID,
+		FromID:      msg.From,
+		From:        from,
+		Body:        body,
+		TS:          msg.TS,
+		Group:       msg.Group,
+		ReplyTo:     replyTo,
+		Mentions:    mentions,
+		Attachments: attachments,
 	})
 }
 
@@ -506,15 +593,15 @@ func (m *MessagesModel) buildDisplayMsg(msg protocol.Message, c *client.Client) 
 	}
 }
 
-// buildDisplayDM creates a DisplayMessage from a DM protocol message without appending it.
-func (m *MessagesModel) buildDisplayDM(msg protocol.DM, c *client.Client) DisplayMessage {
+// buildDisplayGroup creates a DisplayMessage from a group DM protocol message without appending it.
+func (m *MessagesModel) buildDisplayGroup(msg protocol.GroupMessage, c *client.Client) DisplayMessage {
 	body := "(encrypted)"
 	replyTo := ""
 	var mentions []string
 	var attachments []DisplayAttachment
 
 	if c != nil {
-		payload, err := c.DecryptDMMessage(msg.WrappedKeys, msg.Payload)
+		payload, err := c.DecryptGroupMessage(msg.WrappedKeys, msg.Payload)
 		if err == nil {
 			body = payload.Body
 			replyTo = payload.ReplyTo
@@ -539,15 +626,15 @@ func (m *MessagesModel) buildDisplayDM(msg protocol.DM, c *client.Client) Displa
 	}
 
 	return DisplayMessage{
-		ID:           msg.ID,
-		FromID:       msg.From,
-		From:         from,
-		Body:         body,
-		TS:           msg.TS,
-		Conversation: msg.Conversation,
-		ReplyTo:      replyTo,
-		Mentions:     mentions,
-		Attachments:  attachments,
+		ID:          msg.ID,
+		FromID:      msg.From,
+		From:        from,
+		Body:        body,
+		TS:          msg.TS,
+		Group:       msg.Group,
+		ReplyTo:     replyTo,
+		Mentions:    mentions,
+		Attachments: attachments,
 	}
 }
 
@@ -561,11 +648,106 @@ func isImageMime(mime string) bool {
 }
 
 func (m *MessagesModel) AddSystemMessage(text string) {
+	// Plain system message append — no coalescing. Used for non-admin
+	// events (e.g. typing, reconnect notices) and fallback cases
+	// where the caller didn't provide coalescing metadata.
 	m.messages = append(m.messages, DisplayMessage{
 		IsSystem:   true,
 		SystemText: text,
 		TS:         time.Now().Unix(),
 	})
+}
+
+// AddCoalescingSystemMessage is the Phase 14 variant used by the
+// group_event dispatch path. Same output as AddSystemMessage when
+// consecutive events differ — but when the last system message was
+// the same (admin, verb) pair within 10 seconds AND targeted the
+// same group, the existing row is REPLACED with a collapsed form.
+//
+// Coalescing rules (from groups_admin.md "Client-side coalescing"):
+//
+//   - Window: 10 seconds from the first event of a series
+//   - Only collapses same admin + same verb (join, promote, demote,
+//     leave:removed). leave with empty reason (self-leave) and
+//     retirement events are NEVER coalesced — they represent
+//     user-initiated or account-level actions that each deserve
+//     their own system message.
+//   - Max 3 targets shown by name, then "and N more"
+//   - Individual rows are STILL persisted to the local group_events
+//     table in un-coalesced form (the client layer does that before
+//     this call). /audit shows the un-coalesced history.
+//
+// Parameters:
+//
+//   - verb: "join" | "promote" | "demote" | "removed"
+//   - byID: the acting admin's user ID (empty string disables coalescing)
+//   - byName: pre-resolved display name for the acting admin (used in the collapsed text)
+//   - targetName: pre-resolved display name for this event's target
+//   - groupID: used as a partition key — events in different groups
+//     never coalesce even if verb+admin match
+//   - renderSingle: the full text for this single event ("alice added bob to the group")
+//   - renderJoined: given a joined list of target names like "bob, carol, and dave", returns the coalesced text ("alice added bob, carol, and dave to the group")
+func (m *MessagesModel) AddCoalescingSystemMessage(
+	verb, byID, byName, targetName, groupID, renderSingle string,
+	renderJoined func(joined string) string,
+) {
+	now := time.Now().Unix()
+
+	// Guard: no coalescing without a stable acting admin (empty
+	// byID means self-leave or retirement — always individual rows).
+	if byID == "" {
+		m.AddSystemMessage(renderSingle)
+		return
+	}
+
+	// Check the last row for coalescing eligibility.
+	if len(m.messages) > 0 {
+		last := &m.messages[len(m.messages)-1]
+		if last.IsSystem &&
+			last.coalesceVerb == verb &&
+			last.coalesceByID == byID &&
+			last.coalesceGroup == groupID &&
+			now-last.coalesceFirstTS <= 10 {
+			// Extend the existing coalesced row instead of adding a new one.
+			last.coalesceTargets = append(last.coalesceTargets, targetName)
+			last.SystemText = renderJoined(joinCoalesced(last.coalesceTargets))
+			last.TS = now
+			return
+		}
+	}
+
+	// First event in a potential series — store metadata alongside
+	// the text so the NEXT event can coalesce into this row.
+	m.messages = append(m.messages, DisplayMessage{
+		IsSystem:        true,
+		SystemText:      renderSingle,
+		TS:              now,
+		coalesceVerb:    verb,
+		coalesceByID:    byID,
+		coalesceByName:  byName,
+		coalesceGroup:   groupID,
+		coalesceTargets: []string{targetName},
+		coalesceFirstTS: now,
+	})
+}
+
+// joinCoalesced formats the list of target names per the plan:
+// up to 3 names shown, then "and N more" for overflow. Oxford-comma
+// style separators for the 3-name case.
+func joinCoalesced(names []string) string {
+	switch n := len(names); n {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " and " + names[1]
+	case 3:
+		return names[0] + ", " + names[1] + ", and " + names[2]
+	default:
+		return names[0] + ", " + names[1] + ", " + names[2] +
+			fmt.Sprintf(", and %d more", n-3)
+	}
 }
 
 // MarkDeleted flags a message as deleted in-place. The message stays in the
@@ -593,6 +775,67 @@ func (m *MessagesModel) MarkDeleted(id, deletedBy string) {
 	}
 }
 
+// ApplyEdit updates an in-memory DisplayMessage's body and edited_at
+// when an `edited` / `group_edited` / `dm_edited` envelope arrives.
+// Phase 15. Also clears reaction state on the edited message ID per
+// Decision log Q12: clients unconditionally clear reactions when
+// they receive an edit event, matching the server-side reaction
+// delete that happened in the same transaction as the payload replace.
+// Mentions are re-extracted from the new body for highlight rendering.
+// Safe to call with an ID that isn't in the loaded message list — it's
+// a no-op in that case (the store was updated separately by the
+// dispatch path and will pick up the new row on next LoadFromDB).
+func (m *MessagesModel) ApplyEdit(id, newBody string, editedAt int64) {
+	for i, msg := range m.messages {
+		if msg.ID != id {
+			continue
+		}
+		// Clean up reaction tracker entries — matches the MarkDeleted
+		// reaction cleanup pattern. Keeps the package-level tracker
+		// consistent with the rendered state.
+		for _, byEmoji := range msg.ReactionsByUser {
+			for _, ids := range byEmoji {
+				for _, rid := range ids {
+					delete(reactionTracker, rid)
+				}
+			}
+		}
+		m.messages[i].Body = newBody
+		m.messages[i].EditedAt = editedAt
+		m.messages[i].ReactionsByUser = nil
+		// Re-extract mentions from the new body for highlight rendering.
+		// Simple scan — matches the client-side extractor in client/edit.go.
+		m.messages[i].Mentions = extractMentionsInline(newBody)
+		return
+	}
+}
+
+// extractMentionsInline is a TUI-local copy of the client's mention
+// extractor. Keeps the TUI layer self-contained (no cross-package
+// dependency into internal/client just for a one-liner scan).
+func extractMentionsInline(body string) []string {
+	var mentions []string
+	for i := 0; i < len(body); i++ {
+		if body[i] != '@' {
+			continue
+		}
+		j := i + 1
+		for j < len(body) {
+			c := body[j]
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+				j++
+				continue
+			}
+			break
+		}
+		if j > i+1 {
+			mentions = append(mentions, body[i+1:j])
+		}
+		i = j - 1
+	}
+	return mentions
+}
+
 func (m *MessagesModel) AddReaction(r protocol.Reaction) {
 	// Legacy — use AddReactionDecrypted instead. Records with "?" as the
 	// emoji since decryption info isn't available here.
@@ -618,8 +861,17 @@ func (m *MessagesModel) AddReactionDecrypted(r protocol.Reaction, c *client.Clie
 				return // server tampering — reaction re-targeted
 			}
 		}
-	} else if r.Conversation != "" {
-		// DM reaction — decrypt with per-message key
+	} else if r.Group != "" {
+		// Group DM reaction — decrypt with per-message key
+		dr, err := c.DecryptGroupReaction(r.WrappedKeys, r.Payload)
+		if err == nil {
+			emoji = dr.Emoji
+			if dr.Target != r.ID {
+				return
+			}
+		}
+	} else if r.DM != "" {
+		// 1:1 DM reaction — decrypt with per-message key
 		dr, err := c.DecryptDMReaction(r.WrappedKeys, r.Payload)
 		if err == nil {
 			emoji = dr.Emoji
@@ -703,8 +955,8 @@ func (m *MessagesModel) RemoveReaction(reactionID string) {
 	}
 }
 
-func (m *MessagesModel) SetTyping(user, room, conversation string) {
-	if room == m.room || conversation == m.conversation {
+func (m *MessagesModel) SetTyping(user, room, group, dm string) {
+	if (room != "" && room == m.room) || (group != "" && group == m.group) || (dm != "" && dm == m.dm) {
 		m.typingUsers[user] = time.Now()
 	}
 }
@@ -733,9 +985,10 @@ type MessageAction struct {
 
 // HistoryRequestMsg is sent when the user scrolls to the top and needs older messages.
 type HistoryRequestMsg struct {
-	Room         string
-	Conversation string
-	BeforeID     string
+	Room     string
+	Group    string
+	DM       string
+	BeforeID string
 }
 
 func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
@@ -843,18 +1096,55 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 func (m MessagesModel) View(width, height int, focused bool) string {
 	var b strings.Builder
 
-	// Header
+	// Header (Phase 18). Two lines pinned at the top of the messages
+	// pane inside the rounded border:
+	//   - Line 1: context title — room display name, group name, other
+	//     party's display name (1:1 DMs via resolveName), or fallback
+	//   - Line 2: room topic in dim italic — rooms only, omitted when
+	//     empty or when the context is a group / 1:1 DM / no-room
+	// Plus a blank separator line before the message stream begins.
+	// The header re-renders on every View() call so topic changes from
+	// reconnect (server re-sends room_list) are picked up automatically.
 	title := m.room
+	if title != "" && m.resolveRoomName != nil {
+		title = m.resolveRoomName(title)
+	}
 	if title == "" {
-		title = m.conversation
+		title = m.group
+	}
+	if title == "" && m.dm != "" {
+		// For 1:1 DMs, use the DM ID as the title — the app layer will
+		// resolve it to the other party's display name via resolveName.
+		if m.resolveName != nil {
+			title = m.resolveName(m.dm)
+		} else {
+			title = m.dm
+		}
 	}
 	if title == "" {
 		title = "no room selected"
 	}
 
+	// Line 1: bold title. searchHeaderStyle is already used by the info
+	// panel for analogous "title bar" rendering so it stays visually
+	// consistent across overlays.
+	b.WriteString(searchHeaderStyle.Render(" " + title))
+	b.WriteString("\n")
+
+	// Line 2: topic, rooms only, omitted when empty. helpDescStyle is
+	// the dim-italic muted style used elsewhere for secondary context.
+	headerLines := 2 // line 1 + blank separator
+	if m.room != "" && m.roomTopic != "" {
+		b.WriteString(helpDescStyle.Render(" " + m.roomTopic))
+		b.WriteString("\n")
+		headerLines = 3 // line 1 + line 2 + blank separator
+	}
+	b.WriteString("\n") // blank separator before the message stream
+
 	// Visible messages — bottom-aligned by default, but shifts up to
 	// keep the cursor visible when the user scrolls with keyboard/mouse.
-	visibleHeight := height - 2 // borders
+	// Subtract header lines so scroll math accounts for the pinned header.
+	visibleHeight := height - 2 - headerLines // borders + header
 	start := 0
 	if len(m.messages) > visibleHeight {
 		start = len(m.messages) - visibleHeight
@@ -928,9 +1218,24 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 					header += " " + helpDescStyle.Render("[retired]")
 				}
 				header += "  " + timestampStyle.Render(ts)
+				// Phase 15: "(edited)" marker in dim style next to
+				// the timestamp when the message has been edited.
+				// EditedAt is 0 on unedited rows (default), non-zero
+				// after the server echoed an `edited` event.
+				if msg.EditedAt > 0 {
+					header += " " + helpDescStyle.Render("(edited)")
+				}
 				line = " " + header + "\n" + body
 			} else {
-				line = body
+				// Consecutive-message grouping: header is hidden, but
+				// if THIS message is edited we still want the marker
+				// to show so the user can tell at a glance. Render
+				// the marker as a trailing annotation on the body.
+				if msg.EditedAt > 0 {
+					line = body + " " + helpDescStyle.Render("(edited)")
+				} else {
+					line = body
+				}
 			}
 
 			if isMentioned {
@@ -1015,6 +1320,34 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 			typing = fmt.Sprintf("%d people are typing...", len(typingNames))
 		}
 		b.WriteString(systemMsgStyle.Render(" ── " + typing + " ──"))
+		b.WriteString("\n")
+	}
+
+	// Read-only / archived indicator. Shown when the user has left the
+	// current context or the room has been retired by an admin. Messages
+	// above remain readable, but the input bar is disabled. Use /delete
+	// to remove the entry from your view.
+	//
+	// Retirement takes precedence over "left" because it's the cause:
+	// if a room was retired, we want the banner to say so (and explain
+	// that /delete is the only remaining action), even if the user also
+	// happens to have left before it was retired.
+	if m.roomRetired {
+		b.WriteString(systemMsgStyle.Render(" ── this room was archived by an admin — read-only — type /delete to remove from your view ──"))
+		b.WriteString("\n")
+	} else if m.left {
+		var label string
+		switch {
+		case m.room != "":
+			label = "room"
+		case m.group != "":
+			label = "group"
+		case m.dm != "":
+			label = "DM"
+		default:
+			label = "context"
+		}
+		b.WriteString(systemMsgStyle.Render(" ── you left this " + label + " — read-only — type /delete to remove from your view ──"))
 		b.WriteString("\n")
 	}
 

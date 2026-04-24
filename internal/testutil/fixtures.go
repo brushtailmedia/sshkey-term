@@ -27,7 +27,7 @@ import (
 
 // TestUser holds all identity info for a test user.
 type TestUser struct {
-	Username    string // real nanoid (e.g., "usr_V1StGXR8_Z5jdHi6B-myT")
+	UserID      string // real nanoid (e.g., "usr_V1StGXR8_Z5jdHi6B-myT")
 	DisplayName string // human-visible name
 	KeyPath     string // path to Ed25519 private key
 	Rooms       string // TOML rooms array
@@ -43,7 +43,6 @@ var (
 var (
 	fixturesOnce sync.Once
 	fixturesErr  error
-	usersToml    string
 	keyDir       string
 )
 
@@ -71,10 +70,10 @@ func EnsureFixtures(t testing.TB) {
 		Carol = TestUser{DisplayName: "Carol", Rooms: `["general"]`}
 
 		for _, u := range []*TestUser{&Alice, &Bob, &Carol} {
-			u.Username = generateID("usr_")
+			u.UserID = generateID("usr_")
 			u.KeyPath = filepath.Join(keyDir, strings.ToLower(u.DisplayName)+"_ed25519")
 
-			pub, priv, err := ed25519.GenerateKey(rand.Reader)
+			_, priv, err := ed25519.GenerateKey(rand.Reader)
 			if err != nil {
 				fixturesErr = err
 				return
@@ -89,11 +88,7 @@ func EnsureFixtures(t testing.TB) {
 				return
 			}
 
-			sshPub, _ := ssh.NewPublicKey(pub)
-			pubLine := strings.TrimRight(string(ssh.MarshalAuthorizedKey(sshPub)), "\n")
-
-			usersToml += fmt.Sprintf("[%s]\nkey = %q\ndisplay_name = %q\nrooms = %s\n\n",
-				u.Username, pubLine+" "+u.DisplayName+"@test", u.DisplayName, u.Rooms)
+			// Key comments are not used by the retained test helpers.
 		}
 	})
 	if fixturesErr != nil {
@@ -101,14 +96,9 @@ func EnsureFixtures(t testing.TB) {
 	}
 }
 
-// UsersToml returns the generated users.toml content.
-func UsersToml() string {
-	return usersToml
-}
-
-// AdminUsername returns Alice's username (Alice is admin in test config).
-func AdminUsername() string {
-	return Alice.Username
+// AdminUserID returns Alice's username (Alice is admin in test config).
+func AdminUserID() string {
+	return Alice.UserID
 }
 
 // WaitForType reads from a channel until a message of the given type arrives.
@@ -177,20 +167,26 @@ func CreateTestDB(t testing.TB, keyPath string) string {
 	}
 	defer st.Close()
 
-	// Seed with test data using the real generated usernames
+	// Seed with test data using the real generated usernames + a fixed test room nanoid.
 	st.InsertMessage(store.StoredMessage{
-		ID: "msg_test_001", Sender: Alice.Username, Body: "test message from alice",
-		TS: time.Now().Unix(), Room: "general",
+		ID: "msg_test_001", Sender: Alice.UserID, Body: "test message from alice",
+		TS: time.Now().Unix(), Room: TestRoomID,
 	})
 	st.InsertMessage(store.StoredMessage{
-		ID: "msg_test_002", Sender: Bob.Username, Body: "test reply from bob",
-		TS: time.Now().Unix() + 1, Room: "general",
+		ID: "msg_test_002", Sender: Bob.UserID, Body: "test reply from bob",
+		TS: time.Now().Unix() + 1, Room: TestRoomID,
 	})
-	st.StoreEpochKey("general", 1, []byte("test-epoch-key-32-bytes-long!!"))
+	st.StoreEpochKey(TestRoomID, 1, []byte("test-epoch-key-32-bytes-long!!"))
 	st.SetState("last_synced", time.Now().UTC().Format(time.RFC3339))
+	// Persist room metadata so DisplayRoomName resolves it.
+	st.UpsertRoom(TestRoomID, "general", "Test general room", 2)
 
 	return dbDir
 }
+
+// TestRoomID is a fixed nanoid used by CreateTestDB so tests can reference
+// the seeded room without needing a server connection.
+const TestRoomID = "room_test_general_0001"
 
 // ParseRawEd25519Key is exported from the client package for test use.
 // This alias avoids tests needing to import client directly for key parsing.
