@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Security
+- **CI: staticcheck gate wired into `ci.yml` + `release.yml` (2026-04-25).** Post-v0.2.1 audit caught an SA4006 ("this value is never used") finding on a `cmds = append(cmds, downloadFn)` inside `case MessageAction:` that exits with `return a, nil` — the download goroutine was constructed and then silently discarded, leaving the status bar stuck on `Downloading...` forever for any non-cached attachment. `go vet` didn't flag it. Wiring staticcheck into both workflows — pinned to `honnef.co/go/tools/cmd/staticcheck@2026.1` (v0.7.0, the version Phase 21 F5 rebuilt against Go 1.26.2) — runs the default check set (SA correctness, ST style, S simplification, QF quick-fix) on every PR and every release tag. CGO env inherited from the matrix leg config (`CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm"` on Linux; `-lm` omitted on macOS) so sqlcipher types resolve. Currently passes clean. Sister entry in sshkey-chat's CHANGELOG covers the server side.
+
 ## [v0.2.1] - 2026-04-25
 
 Client-side attachment and inline image UX fixes. 

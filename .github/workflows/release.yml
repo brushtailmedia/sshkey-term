@@ -72,6 +72,20 @@ jobs:
           CGO_LDFLAGS: ${{ matrix.goos == 'linux' && '-lm' || '' }}
         run: bash .github/scripts/check_coverage.sh
 
+      # staticcheck on the release path: blocks a tag push if any new
+      # SA-class finding lands. Added 2026-04-25 after the post-v0.2.1
+      # audit — see ci.yml for the rationale. Pinned to the Phase 21
+      # F5 baseline version. CGO env vars inherited from the matrix
+      # leg (macOS omits -lm; Linux sets it).
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
+      - name: Staticcheck
+        env:
+          CGO_ENABLED: "1"
+          CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
+          CGO_LDFLAGS: ${{ matrix.goos == 'linux' && '-lm' || '' }}
+        run: staticcheck ./...
+
   release-linux:
     needs: test
     strategy:
