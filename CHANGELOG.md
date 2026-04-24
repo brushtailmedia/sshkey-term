@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-04-24
+
 ### Security
 - **Phase 23 server-side co-release marker (2026-04-24).** No client code changes. Server-side Phase 23 (rooms.toml removal + guided `sshkey-ctl init` onboarding) is invisible to the protocol: `sshkey-term` connects to a configured server the same way, `room_list` still arrives from the server's `rooms.db`, and no new wire verbs ship. Operators following the updated Docker onboarding story will copy admin keys from a `./docker/keys` host bind mount rather than via `docker cp`, but that's a server-ops change — `sshkey-term` still consumes whichever private key file the operator points `--key` at. See `sshkey-chat` `CHANGELOG.md` for the full server-side entry and `rooms_toml_removal_init_plan.md` for the canonical plan.
 - **Phase 22b deferred-items closure support (2026-04-24).** Client-side deferred registry is now fully closed in documentation/policy sync with the shipped server-side launch-gate and quota/auto-revoke integrations. **B.15 ratchet applied:** CI thresholds raised to `internal/client` 20.0, `internal/tui` 33.0, `internal/protocol` 55.0 and reflected in `docs/testing/CONVENTIONS.md` + `docs/testing/coverage_thresholds.txt`.
