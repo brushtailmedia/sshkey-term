@@ -89,6 +89,13 @@ func (c *ContextMenuModel) IsVisible() bool {
 	return c.visible
 }
 
+// AnchorXY returns the (col, row) anchor where the menu should be drawn.
+// This is the click position passed to Show — the App's overlay() helper
+// clamps it to the visible terminal so the menu stays on-screen.
+func (c ContextMenuModel) AnchorXY() (int, int) {
+	return c.x, c.y
+}
+
 func (c ContextMenuModel) Update(msg tea.KeyMsg) (ContextMenuModel, tea.Cmd) {
 	switch msg.String() {
 	case "esc":

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -151,6 +152,21 @@ type DisplayAttachment struct {
 }
 
 // MessagesModel manages the message stream.
+//
+// Scroll model (post-2026-04-25 refactor): the message body is rendered
+// into a `bubbles/viewport.Model` that owns the bounded scroll region.
+// Cursor and viewport scroll are decoupled — `cursor` is the highlighted
+// selected message (used for keyboard actions like reply/react/delete),
+// while `viewport.YOffset` is independent scroll position. Mouse wheel
+// scrolls the viewport without moving the cursor; arrow keys move the
+// cursor and the viewport scrolls only if the cursor would otherwise
+// go off-screen. Auto-scroll-to-bottom on new message fires only when
+// the user is already at the bottom (preserves reading position
+// during history browsing).
+//
+// Pre-refactor a manual scrollOffset+cursor system was conflated with
+// the messages-render loop having no upper bound — scrolling up enough
+// blew past the pane height and corrupted the surrounding layout.
 type MessagesModel struct {
 	messages       []DisplayMessage
 	room           string
@@ -158,7 +174,6 @@ type MessagesModel struct {
 	dm             string
 	roomTopic      string // Phase 18: current room topic, rendered in the two-line header above the stream. Empty for groups/DMs/topicless rooms.
 	cursor         int  // selected message index (-1 = none)
-	scrollOffset   int
 	typingUsers    map[string]time.Time // user -> last typing time
 	currentUser    string               // display name — for @mention highlighting in body
 	currentUserID  string               // nanoid — for mention detection in payload
@@ -171,6 +186,13 @@ type MessagesModel struct {
 	left           bool              // current context is archived (read-only, user has left)
 	roomRetired    bool              // current context is a retired room (archived by admin)
 	filesDir       string            // <dataDir>/files — set by App after connect; used to derive per-attachment cached path for inline-image render
+
+	// viewport owns the scrollable message-stream region. Width and
+	// Height are set by View() each render to track terminal resize +
+	// member-panel-toggle changes. Content is set by RefreshContent()
+	// (called from the App on any message-slice change) — including
+	// the auto-scroll-to-bottom-if-was-at-bottom rule.
+	viewport viewport.Model
 }
 
 // SetFilesDir wires the per-server file cache directory into the render
@@ -200,11 +222,16 @@ func (m *MessagesModel) attachmentLocalPath(fileID string) string {
 }
 
 func NewMessages() MessagesModel {
+	// Initial viewport size is a reasonable default; View() resizes
+	// every render to the actual panel dimensions. Mouse wheel
+	// support comes for free via viewport.Update(tea.MouseMsg).
+	vp := viewport.New(80, 24)
 	return MessagesModel{
 		cursor:      -1,
 		typingUsers: make(map[string]time.Time),
 		hasMore:     true,
 		retired:     make(map[string]bool),
+		viewport:    vp,
 	}
 }
 
@@ -245,7 +272,7 @@ func (m *MessagesModel) SetContext(room, group, dm string) {
 	m.roomTopic = "" // Phase 18: caller should call SetRoomTopic after when the new context is a room with a topic
 	m.messages = nil
 	m.cursor = -1
-	m.scrollOffset = 0
+	m.viewport.GotoBottom() // reset scroll position for new context
 	m.unreadFromID = ""
 	m.hasMore = true
 	m.loadingHistory = false
@@ -1022,28 +1049,73 @@ type HistoryRequestMsg struct {
 func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
-		if m.cursor > 0 {
+		// Cursor-driven up. Snap-then-move: if cursor is unset (-1)
+		// or off the bottom of the viewport (e.g. user wheel-scrolled
+		// up to read history), the first press snaps cursor to the
+		// last message and that becomes the engaged browse position.
+		// Subsequent presses walk up message-by-message; viewport
+		// follows when cursor would go off the top edge.
+		if m.cursor == -1 && len(m.messages) > 0 {
+			m.cursor = len(m.messages) - 1
+		} else if m.cursor > 0 {
 			m.cursor--
-			// At the top — request history
+			// At the top — request history. The hasMore guard inside
+			// requestHistory keeps the call idempotent when there's
+			// nothing left to fetch.
 			if m.cursor == 0 && len(m.messages) > 0 && !m.loadingHistory {
 				return m, m.requestHistory()
 			}
-		} else if m.cursor == -1 && len(m.messages) > 0 {
-			m.cursor = len(m.messages) - 1
+		}
+		// Scroll viewport up if cursor would now be off-screen at the top.
+		// We approximate cursor's content-line position as cursor*1; the
+		// rough heuristic is good enough for "make cursor visible." The
+		// viewport's LineUp is bounded, so over-scroll is harmless.
+		if m.viewport.YOffset > m.cursor {
+			m.viewport.ScrollUp(m.viewport.YOffset - m.cursor)
 		}
 	case "pageup":
-		// Jump up a page and request history if near top
-		m.cursor -= 20
-		if m.cursor < 0 {
-			m.cursor = 0
-		}
-		if m.cursor == 0 && len(m.messages) > 0 && !m.loadingHistory {
+		// Pure viewport scroll, cursor unchanged. Page = viewport height.
+		m.viewport.ScrollUp(m.viewport.Height)
+		// At the very top: opportunity to request history (server-side
+		// catchup of older messages). Same hasMore + loadingHistory
+		// gating as the up-arrow path.
+		if m.viewport.AtTop() && len(m.messages) > 0 && !m.loadingHistory {
 			return m, m.requestHistory()
 		}
 		return m, nil
+	case "pagedown":
+		// Pure viewport scroll, cursor unchanged.
+		m.viewport.ScrollDown(m.viewport.Height)
+		return m, nil
+	case "home":
+		// Pure viewport scroll to top, cursor unchanged.
+		m.viewport.GotoTop()
+		if len(m.messages) > 0 && !m.loadingHistory {
+			return m, m.requestHistory()
+		}
+		return m, nil
+	case "end":
+		// Jump to the latest message + scroll to bottom. Cursor moves
+		// to the last message because End semantically means "back to
+		// live conversation."
+		if len(m.messages) > 0 {
+			m.cursor = len(m.messages) - 1
+		}
+		m.viewport.GotoBottom()
+		return m, nil
 	case "down", "j":
-		if m.cursor < len(m.messages)-1 {
+		// Mirror of up/k. Snap-then-move on -1; advance cursor;
+		// viewport follows down if cursor would go off-screen.
+		if m.cursor == -1 && len(m.messages) > 0 {
+			m.cursor = len(m.messages) - 1
+		} else if m.cursor < len(m.messages)-1 {
 			m.cursor++
+		}
+		// Heuristic: if cursor is now below the visible region's
+		// bottom edge, scroll down enough to bring it into view.
+		visibleBottom := m.viewport.YOffset + m.viewport.Height - 1
+		if m.cursor > visibleBottom {
+			m.viewport.ScrollDown(m.cursor - visibleBottom)
 		}
 	case "r": // reply
 		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
@@ -1121,18 +1193,16 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 	return m, nil
 }
 
-func (m MessagesModel) View(width, height int, focused bool) string {
+// renderHeader returns the always-pinned title + topic + blank
+// separator block that sits above the scrollable message stream.
+// Header lives outside the viewport per the post-2026-04-25 layout
+// decision so the room title is always visible regardless of scroll
+// position. Returns the rendered string and the line count (so the
+// caller can subtract it from the panel height when sizing the
+// viewport).
+func (m MessagesModel) renderHeader() (string, int) {
 	var b strings.Builder
 
-	// Header (Phase 18). Two lines pinned at the top of the messages
-	// pane inside the rounded border:
-	//   - Line 1: context title — room display name, group name, other
-	//     party's display name (1:1 DMs via resolveName), or fallback
-	//   - Line 2: room topic in dim italic — rooms only, omitted when
-	//     empty or when the context is a group / 1:1 DM / no-room
-	// Plus a blank separator line before the message stream begins.
-	// The header re-renders on every View() call so topic changes from
-	// reconnect (server re-sends room_list) are picked up automatically.
 	title := m.room
 	if title != "" && m.resolveRoomName != nil {
 		title = m.resolveRoomName(title)
@@ -1141,8 +1211,6 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 		title = m.group
 	}
 	if title == "" && m.dm != "" {
-		// For 1:1 DMs, use the DM ID as the title — the app layer will
-		// resolve it to the other party's display name via resolveName.
 		if m.resolveName != nil {
 			title = m.resolveName(m.dm)
 		} else {
@@ -1153,43 +1221,60 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 		title = "no room selected"
 	}
 
-	// Line 1: bold title. searchHeaderStyle is already used by the info
-	// panel for analogous "title bar" rendering so it stays visually
-	// consistent across overlays.
 	b.WriteString(searchHeaderStyle.Render(" " + title))
 	b.WriteString("\n")
-
-	// Line 2: topic, rooms only, omitted when empty. helpDescStyle is
-	// the dim-italic muted style used elsewhere for secondary context.
-	headerLines := 2 // line 1 + blank separator
+	headerLines := 2 // title line + blank separator
 	if m.room != "" && m.roomTopic != "" {
 		b.WriteString(helpDescStyle.Render(" " + m.roomTopic))
 		b.WriteString("\n")
-		headerLines = 3 // line 1 + line 2 + blank separator
+		headerLines = 3
 	}
-	b.WriteString("\n") // blank separator before the message stream
+	b.WriteString("\n") // blank separator before the viewport
 
-	// Visible messages — bottom-aligned by default, but shifts up to
-	// keep the cursor visible when the user scrolls with keyboard/mouse.
-	// Subtract header lines so scroll math accounts for the pinned header.
-	visibleHeight := height - 2 - headerLines // borders + header
-	start := 0
-	if len(m.messages) > visibleHeight {
-		start = len(m.messages) - visibleHeight
-	}
-	// If cursor is above the visible window, shift start to show it
-	if m.cursor >= 0 && m.cursor < start {
-		start = m.cursor
-	}
-	// If cursor is below the visible window, shift start down
-	if m.cursor >= 0 && m.cursor >= start+visibleHeight {
-		start = m.cursor - visibleHeight + 1
+	return b.String(), headerLines
+}
+
+// buildContent renders the full scrollable content of the messages
+// pane (everything below the header). No height bound, no padding —
+// the viewport's job to clip and scroll. Includes:
+//   - Loading-history indicator (top, when applicable)
+//   - The full message stream (every message in m.messages, no slicing)
+//   - Cursor highlight on the selected message
+//   - Reply-to previews, reactions, attachments, inline images
+//   - Typing indicator (bottom)
+//   - Read-only / archived footer (bottom)
+//
+// Width is the viewport's content width (panel width minus borders).
+// Used for line wrapping inside lipgloss styles (e.g. selectedMsgStyle
+// .Width(width-2)) and for image-render bounds.
+//
+// imgMaxRows is the per-image height cap. With viewport adoption the
+// image is rendered into the content stream, so its height counts
+// against the viewport's total content height — picking a generous
+// fixed cap (15 rows) means an image takes ~15 lines of scrollable
+// content rather than blowing out the visible region as it did
+// pre-refactor when imgMaxRows was visibleHeight*2/3.
+func (m MessagesModel) buildContent(width int) string {
+	const imgMaxRows = 15
+
+	var b strings.Builder
+
+	// Top: loading-history indicator. Replaces the previous
+	// "shift start to show cursor at top" + "request history"
+	// scroll mechanism — now the user scrolls to the top of
+	// the viewport explicitly and sees this prompt.
+	if m.loadingHistory {
+		b.WriteString(systemMsgStyle.Render(" ── loading history ──"))
+		b.WriteString("\n")
+	} else if m.hasMore && len(m.messages) > 0 {
+		b.WriteString(systemMsgStyle.Render(" ── press up at top to load more history ──"))
+		b.WriteString("\n")
 	}
 
 	unreadShown := false
 	prevSender := ""
 	prevTS := int64(0)
-	for i := start; i < len(m.messages); i++ {
+	for i := 0; i < len(m.messages); i++ {
 		msg := m.messages[i]
 
 		// Unread divider
@@ -1295,11 +1380,12 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 				localPath := m.attachmentLocalPath(att.FileID)
 				if att.IsImage && localPath != "" && CanRenderImages() {
 					// Inline image rendering — image takes up width minus
-					// edge padding, height up to 2/3 of the visible panel.
-					imgMaxRows := visibleHeight * 2 / 3
-					if imgMaxRows < 10 {
-						imgMaxRows = 10
-					}
+					// edge padding, fixed-height cap from the buildContent
+					// outer-scope const (see imgMaxRows comment above).
+					// Pre-viewport refactor this was visibleHeight*2/3 of
+					// the visible panel; now images live in scrollable
+					// content so an image is N rows of buffer instead of
+					// "consumes 2/3 of the on-screen pane."
 					imgStr := RenderImageInline(localPath, width-8, imgMaxRows)
 					if imgStr != "" {
 						line += "\n" + imgStr
@@ -1316,12 +1402,12 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 				} else {
 					line += "\n " + fmt.Sprintf("📎 %s (%s)", att.Name, formatSize(att.Size))
 				}
-				if i == m.cursor && focused {
+				if i == m.cursor {
 					line += timestampStyle.Render("  o=open  s=save")
 				}
 			}
 
-			if i == m.cursor && focused {
+			if i == m.cursor {
 				line = selectedMsgStyle.Width(width - 2).Render(line)
 			}
 
@@ -1384,20 +1470,104 @@ func (m MessagesModel) View(width, height int, focused bool) string {
 		b.WriteString("\n")
 	}
 
-	// Pad to height
-	content := b.String()
-	lines := strings.Count(content, "\n")
-	for lines < visibleHeight {
-		content = "\n" + content
-		lines++
+	return b.String()
+}
+
+// RefreshContent rebuilds the scrollable message-stream content and
+// pushes it to the embedded viewport. Pointer receiver — mutates
+// m.viewport in place — because this is the single site where
+// auto-scroll-on-new-message has to make a state decision based on
+// the viewport's current YOffset before the content changes.
+//
+// Auto-scroll rule: if the user was at the bottom of the viewport
+// (or the viewport was empty), the new content scrolls to the new
+// bottom — preserves the "always see latest" behaviour for an active
+// chat. If the user was scrolled up reading history, position is
+// preserved — they don't get yanked to the bottom every time a new
+// message arrives.
+//
+// Called by the App on any state change that affects rendered content:
+// LoadFromDB, message appends from server broadcasts, edit / delete
+// dispatch, context switch (via SetContext), window resize, focus
+// change. Cheap to call repeatedly — content rebuild is O(N messages)
+// but N is typically small (room buffer) and viewport.SetContent is
+// O(content size) for line wrapping.
+func (m *MessagesModel) RefreshContent(width int) {
+	wasAtBottom := m.viewport.AtBottom() || m.viewport.TotalLineCount() == 0
+	content := m.buildContent(width)
+	m.viewport.SetContent(content)
+	if wasAtBottom {
+		m.viewport.GotoBottom()
+	}
+}
+
+// ScrollUp moves the viewport up by n lines without touching the cursor.
+// Used by mouse-wheel handlers — wheel scrolls without selecting a message
+// (per the cursor-vs-scroll decoupling agreed with the user). Returns
+// true if the viewport reached the top, so callers can request older
+// history when the user scrolls past the loaded buffer.
+func (m *MessagesModel) ScrollUp(n int) bool {
+	m.viewport.ScrollUp(n)
+	return m.viewport.AtTop()
+}
+
+// ScrollDown moves the viewport down by n lines without touching the cursor.
+func (m *MessagesModel) ScrollDown(n int) {
+	m.viewport.ScrollDown(n)
+}
+
+// AtTop reports whether the viewport is scrolled to the top — handy for
+// callers deciding whether to issue a history fetch.
+func (m MessagesModel) AtTop() bool {
+	return m.viewport.AtTop()
+}
+
+// View renders the messages pane. Composition:
+//   - Header (title + topic + blank separator) — always pinned at top,
+//     outside the viewport so it stays visible regardless of scroll.
+//   - Viewport — renders the scrollable content. View calls RefreshContent
+//     itself so the rendered output always reflects the current state of
+//     m.messages / m.left / m.roomRetired / m.typingUsers / etc. without
+//     callers having to remember an explicit refresh step.
+//   - Outer style — rounded border + focused/unfocused colour. focused
+//     parameter only chooses the border style; cursor highlight inside
+//     content is independent of focus (always visible so the user can
+//     see where their browse cursor sits even when typing in the
+//     compose input).
+//
+// Pointer receiver: View calls RefreshContent which mutates m.viewport's
+// stored content. The mutation only matters within the current render
+// cycle — the next View call rebuilds anyway — but it must persist long
+// enough that m.viewport.View() below sees the freshly-set content.
+// Production callers go through the App's value-receiver View, so the
+// mutation here lands on the throwaway App copy and doesn't propagate
+// back; that's fine because the explicit a.refreshMessageContent()
+// calls in app.go keep the persistent App state current for queries
+// that happen between renders (e.g. mouse-wheel AtTop checks).
+func (m *MessagesModel) View(width, height int, focused bool) string {
+	headerStr, headerLines := m.renderHeader()
+
+	contentWidth := width - 2 // panel width minus left+right borders
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	// Rebuild content to reflect any mutations since last render. Cost
+	// is O(N messages) — on typical room buffers (a few hundred
+	// messages) this is sub-millisecond. RefreshContent preserves
+	// scroll position when the user has scrolled up reading history.
+	m.RefreshContent(contentWidth)
+
+	m.viewport.Width = contentWidth
+	m.viewport.Height = height - 2 - headerLines // borders + header
+	if m.viewport.Height < 1 {
+		m.viewport.Height = 1
 	}
 
 	style := messagesPanelStyle
 	if focused {
 		style = messagesFocusedStyle
 	}
-
-	return style.Width(width).Height(height).Render(content)
+	return style.Width(width).Height(height).Render(headerStr + m.viewport.View())
 }
 
 func formatSize(b int64) string {

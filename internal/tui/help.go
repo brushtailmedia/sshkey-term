@@ -103,7 +103,7 @@ func (h HelpModel) View(width, height int) string {
 
 	leftTitle := helpHeaderStyle.Render("  Navigation")
 	rightTitle := helpHeaderStyle.Render("  Messages & Input")
-	b.WriteString(leftTitle + strings.Repeat(" ", 28-lipgloss.Width(leftTitle)) + rightTitle)
+	b.WriteString(leftTitle + spaces(28-lipgloss.Width(leftTitle)) + rightTitle)
 	b.WriteString("\n")
 	b.WriteString("  " + strings.Repeat("─", 24) + "    " + strings.Repeat("─", 24))
 	b.WriteString("\n")
@@ -124,7 +124,13 @@ func (h HelpModel) View(width, height int) string {
 			right = "  " + helpKeyStyle.Render(padRight(col2[i].key, 12)) + " " + helpDescStyle.Render(col2[i].desc)
 		}
 
-		leftPadded := left + strings.Repeat(" ", 28-visibleWidth(left))
+		// Clamp the padding count to >= 0. Some col1 descriptions are
+		// wider than the 28-cell column budget (e.g. "toggle sidebar
+		// focus" plus a 12-cell key + 3-cell prefix = 35 cells), and
+		// strings.Repeat panics on negative input. When the left
+		// content overflows the budget, skip the gap entirely — col2
+		// renders right after with a single newline boundary.
+		leftPadded := left + spaces(28-visibleWidth(left))
 		b.WriteString(leftPadded + right + "\n")
 	}
 
@@ -184,7 +190,11 @@ func (h HelpModel) View(width, height int) string {
 	b.WriteString(helpDescStyle.Render("  Press Esc or ? to close"))
 
 	content := b.String()
-	return helpStyle.Width(width - 4).Render(content)
+	innerWidth := width - 4
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	return helpStyle.Width(innerWidth).Render(content)
 }
 
 func padRight(s string, n int) string {
@@ -192,6 +202,18 @@ func padRight(s string, n int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", n-len(s))
+}
+
+// spaces returns a run of n space characters, clamping negative inputs
+// to zero. Wraps strings.Repeat so callers can compute pad widths
+// arithmetically (e.g. budget - measured) without guarding every site
+// against negative results — the panic that occurred was exactly this
+// pattern in the help layout (strings.Repeat panics on negative).
+func spaces(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.Repeat(" ", n)
 }
 
 func visibleWidth(s string) int {

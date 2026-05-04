@@ -12,6 +12,7 @@ type MemberMenuModel struct {
 	user    string
 	cursor  int
 	items   []ContextMenuItem
+	x, y    int // screen position — passed by Show, used by App overlay
 }
 
 func NewMemberMenu() MemberMenuModel {
@@ -22,6 +23,8 @@ func (m *MemberMenuModel) Show(user, displayName string, x, y int) {
 	m.visible = true
 	m.user = user
 	m.cursor = 0
+	m.x = x
+	m.y = y
 	m.items = []ContextMenuItem{
 		{Label: "Message " + displayName, Action: "message"},
 		{Label: "Create group with...", Action: "create_group"},
@@ -36,6 +39,11 @@ func (m *MemberMenuModel) Hide() {
 
 func (m *MemberMenuModel) IsVisible() bool {
 	return m.visible
+}
+
+// AnchorXY returns the (col, row) anchor where the menu should be drawn.
+func (m MemberMenuModel) AnchorXY() (int, int) {
+	return m.x, m.y
 }
 
 func (m MemberMenuModel) Update(msg tea.KeyMsg) (MemberMenuModel, tea.Cmd) {

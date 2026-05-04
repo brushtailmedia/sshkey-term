@@ -126,10 +126,17 @@ type App struct {
 	showHelpHint     bool
 	reconnectAttempt int
 
-	width           int
-	height          int
-	focus           Focus
-	layout          Layout
+	width  int
+	height int
+	focus  Focus
+	// Layout is no longer cached on the App. It's a derived value of
+	// (width, height, memberPanel.IsVisible) and is computed on
+	// demand by mouse handlers and View via computeLayout(). The
+	// previous cached `layout Layout` field was a stale-state bug —
+	// View() has a value receiver so any `a.layout = Layout{...}`
+	// assignment landed on a throwaway copy, leaving Update's mouse
+	// handlers reading zero-valued rectangles. See computeLayout's
+	// doc-comment for the full history.
 	contextMenu     ContextMenuModel
 	memberMenu      MemberMenuModel
 	passphrase      PassphraseModel
@@ -767,6 +774,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.input.SetMembers(a.activeMemberEntries())
 				a.input.SetNonMembers(a.activeNonMemberEntries())
 			}
+			// Toggling the member panel changes the messages-pane width
+			// (member column takes 18 columns when shown). The viewport
+			// content is wrapped to that width — re-wrap so it doesn't
+			// overflow or under-fill the new pane.
+			a.refreshMessageContent()
 			return a, nil
 
 		case "ctrl+p":
@@ -894,6 +906,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.onContextSwitch()
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
+				a.refreshMessageContent()
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
 					if a.messages.room != "" && a.client != nil {
@@ -1095,9 +1108,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "menu":
 			// Open MemberMenu via keyboard (Enter on a member in the panel).
 			// Same options as right-click: message, create_group, verify,
-			// profile. Screen position (0, 0) is fine — menu renders as
-			// a centered dialog regardless.
-			a.memberMenu.Show(msg.User, a.resolveDisplayName(msg.User), 0, 0)
+			// profile. Anchor at the member panel's top-left so the
+			// overlay pops up over the panel rather than down at screen
+			// origin — consistent with where mouse-clicks anchor it.
+			layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+			a.memberMenu.Show(msg.User, a.resolveDisplayName(msg.User), layout.MemberX0+1, layout.MemberY0+2)
 		case "message":
 			if a.client != nil {
 				a.client.CreateGroup([]string{msg.User}, "")
@@ -1657,6 +1672,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.onContextSwitch()
 		a.syncMessagesLeftState()
 		a.messages.LoadFromDB(a.client)
+		a.refreshMessageContent()
 		a.messages.ScrollToMessage(msg.MessageID)
 		return a, nil
 
@@ -1837,7 +1853,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "open_menu":
 			// Keyboard-triggered context menu opener (Enter on selected message).
-			// Shows the same menu the mouse right-click produces, at screen origin.
+			// Shows the same menu the mouse right-click produces. Anchor at
+			// the messages-pane left edge, near the bottom so the overlay
+			// sits above the input box — there's no precise per-message
+			// row tracking for the keyboard cursor (messages can wrap to
+			// multi-line) so the bottom-of-pane anchor is the closest
+			// equivalent to "near the user's focus."
 			isOwn := a.client != nil && msg.Msg.FromID == a.client.UserID()
 			isAdmin := a.client != nil && a.client.IsAdmin()
 			isRoom := a.messages.room != ""
@@ -1845,7 +1866,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.client != nil {
 				myEmojis = msg.Msg.UserEmojis(a.client.UserID())
 			}
-			a.contextMenu.Show(msg.Msg, 0, 0, isOwn, isAdmin, isRoom, a.pinnedBar.PinIDs(), myEmojis)
+			layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+			anchorX := layout.MessagesX0 + 2
+			anchorY := layout.MessagesY1 - 8 // overlay() clamps if too low
+			a.contextMenu.Show(msg.Msg, anchorX, anchorY, isOwn, isAdmin, isRoom, a.pinnedBar.PinIDs(), myEmojis)
 		case "react":
 			a.emojiPicker.Show(msg.Msg)
 		case "unreact":
@@ -1882,6 +1906,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
+		// Refresh messages content because the line-wrapping width
+		// changed — without this the viewport's content would still
+		// be wrapped at the old width and would render off the right
+		// edge or with stale soft-wraps after a resize.
+		a.refreshMessageContent()
 
 	case tea.MouseMsg:
 		return a.handleMouse(msg)
@@ -1931,6 +1960,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.onContextSwitch()
 			a.syncMessagesLeftState()
 			a.messages.LoadFromDB(a.client)
+			a.refreshMessageContent()
 			// Set up member list for @completion
 			a.memberPanel.Refresh(a.client.Rooms()[0], "", a.client, a.sidebar.online)
 			a.input.SetMembers(a.activeMemberEntries())
@@ -1958,6 +1988,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := a.handleServerMessage(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		// Server messages can mutate any of: messages list, edits/deletes,
+		// reactions, system events, typing indicator, topic, retired-set,
+		// left state. Rather than instrument every call site inside
+		// handleServerMessage, refresh once here — buildContent is cheap
+		// (O(messages)) and idempotent, and most server messages do
+		// touch render-affecting state.
+		a.refreshMessageContent()
 		// Continue listening
 		if a.client != nil {
 			if a.sidebar.msgCh != nil {
@@ -2117,6 +2154,13 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// Compute layout fresh from current window dimensions + panel
+	// visibility. See computeLayout's doc-comment for the bug history
+	// — pre-fix the layout was assigned in View() with a value
+	// receiver, so a.layout was always zero-valued and HitTest
+	// returned "" for every coordinate.
+	layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+
 	x := msg.X
 	y := msg.Y
 
@@ -2127,19 +2171,16 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseButtonWheelUp:
-		panel := a.layout.HitTest(x, y)
+		panel := layout.HitTest(x, y)
 		if panel == "messages" {
-			// Scroll up in messages
-			if a.messages.cursor == -1 && len(a.messages.messages) > 0 {
-				a.messages.cursor = len(a.messages.messages) - 1
-			}
-			a.messages.cursor -= 3
-			if a.messages.cursor < 0 {
-				a.messages.cursor = 0
-				// At top — request history
-				if !a.messages.loadingHistory && len(a.messages.messages) > 0 {
-					return a, a.messages.requestHistory()
-				}
+			// Wheel scrolls the viewport WITHOUT moving the cursor — this
+			// decoupling matches Slack/Discord behaviour and was the
+			// explicit user request: "when using the mouse i may not
+			// necessarily have a message highlighted before i scroll".
+			// Cursor movement remains tied to up/down arrow keys.
+			atTop := a.messages.ScrollUp(3)
+			if atTop && !a.messages.loadingHistory && len(a.messages.messages) > 0 {
+				return a, a.messages.requestHistory()
 			}
 		} else if panel == "sidebar" {
 			if a.sidebar.cursor > 0 {
@@ -2148,12 +2189,9 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseButtonWheelDown:
-		panel := a.layout.HitTest(x, y)
+		panel := layout.HitTest(x, y)
 		if panel == "messages" {
-			a.messages.cursor += 3
-			if a.messages.cursor >= len(a.messages.messages) {
-				a.messages.cursor = len(a.messages.messages) - 1
-			}
+			a.messages.ScrollDown(3)
 		} else if panel == "sidebar" {
 			if a.sidebar.cursor < a.sidebar.totalItems()-1 {
 				a.sidebar.cursor++
@@ -2166,12 +2204,18 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 // handleMouseClick processes a left click at the given coordinates.
 func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
-	panel := a.layout.HitTest(x, y)
+	// Compute layout fresh — see computeLayout's doc-comment for why
+	// we don't read from a.layout (it was a stale-state bug). All
+	// HitTest / SidebarItemAt / MessageItemAt / MemberItemAt /
+	// MessagesY0 reads in this function use this local layout.
+	layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+
+	panel := layout.HitTest(x, y)
 
 	switch panel {
 	case "sidebar":
 		a.focus = FocusSidebar
-		idx := a.layout.SidebarItemAt(y)
+		idx := layout.SidebarItemAt(y)
 		if idx >= 0 && idx < a.sidebar.totalItems() {
 			a.sidebar.cursor = idx
 			a.sidebar.updateSelection()
@@ -2181,6 +2225,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				a.onContextSwitch()
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
+				a.refreshMessageContent()
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
 					if a.messages.room != "" && a.client != nil {
@@ -2205,7 +2250,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		relY := y - a.layout.MessagesY0 - 1 // relative to panel content
+		relY := y - layout.MessagesY0 - 1 // relative to panel content
 		if a.pinnedBar.HasPins() && relY < pinnedBarRows {
 			if !a.pinnedBar.expanded {
 				// Click on collapsed bar — expand
@@ -2221,7 +2266,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		idx := a.layout.MessageItemAt(y)
+		idx := layout.MessageItemAt(y)
 		if idx >= 0 && idx < len(a.messages.messages) {
 			a.messages.cursor = idx
 			msg := a.messages.messages[idx]
@@ -2241,7 +2286,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 		if a.memberPanel.IsVisible() {
 			a.focus = FocusMembers
 			a.memberPanel.SetFocused(true)
-			idx := a.layout.MemberItemAt(y)
+			idx := layout.MemberItemAt(y)
 			if idx >= 0 && idx < len(a.memberPanel.members) {
 				a.memberPanel.cursor = idx
 				// Show member context menu
@@ -2342,9 +2387,33 @@ func (a *App) onContextSwitch() {
 	// (2) Apply the new room's topic (or clear it).
 	if a.client == nil || a.messages.room == "" {
 		a.messages.SetRoomTopic("")
-		return
+	} else {
+		a.messages.SetRoomTopic(a.client.DisplayRoomTopic(a.messages.room))
 	}
-	a.messages.SetRoomTopic(a.client.DisplayRoomTopic(a.messages.room))
+	// NB: messages-content refresh is NOT done here — onContextSwitch
+	// is typically called BEFORE LoadFromDB in the existing flow
+	// (SetContext clears messages, onContextSwitch sets topic,
+	// LoadFromDB populates from store). A refresh here would push an
+	// empty slice into the viewport. Each caller refreshes itself
+	// after LoadFromDB via a.refreshMessageContent().
+}
+
+// refreshMessageContent rebuilds the messages-pane scrollable content
+// from the current messages slice and pushes it to the viewport. Called
+// from anywhere that mutates a.messages.messages (or changes width
+// affecting line wrapping). Width is computed from the same
+// computeLayout source-of-truth used for mouse hit testing, so render
+// dimensions stay coherent with click coordinates.
+func (a *App) refreshMessageContent() {
+	if a.width == 0 || a.height == 0 {
+		return // not yet sized
+	}
+	layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+	contentWidth := layout.MessagesWidth
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	a.messages.RefreshContent(contentWidth)
 }
 
 // tryEnterEditMode scans backwards through the loaded messages for
@@ -2517,6 +2586,7 @@ func (a *App) switchToSidebarSelection() {
 	a.onContextSwitch()
 	a.syncMessagesLeftState()
 	a.messages.LoadFromDB(a.client)
+	a.refreshMessageContent()
 	if a.memberPanel.IsVisible() {
 		a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
 		if a.messages.room != "" && a.client != nil {
@@ -4290,6 +4360,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 					ReplyTo:  replyTo,
 					Mentions: mentions,
 				})
+				a.refreshMessageContent()
 			}
 			a.sendReadReceipt()
 		} else {
@@ -4595,40 +4666,20 @@ func (a App) View() string {
 		return "\n  Connecting...\n"
 	}
 
-	// Layout dimensions
-	sidebarWidth := 20
-	memberWidth := 0
-	if a.memberPanel.IsVisible() {
-		memberWidth = 18
-	}
+	// Layout dimensions for rendering. These local ints are derived
+	// from the same computeLayout source-of-truth that mouse handlers
+	// use (see internal/tui/mouse.go), kept as locals because View()
+	// uses them in many downstream rendering positions and the int
+	// form is more concise than reading struct fields each time.
+	// computeLayout is a pure function, so the values here match
+	// exactly what HitTest uses on the same width/height/visibility.
+	layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+	sidebarWidth := layout.SidebarWidth
+	memberWidth := layout.MemberWidth
+	mainWidth := layout.MessagesWidth
 	statusBarHeight := 1
 	inputHeight := 3
-	mainWidth := a.width - sidebarWidth - memberWidth - 3 // borders
-	if memberWidth > 0 {
-		mainWidth -= 1 // extra gap
-	}
-	mainHeight := a.height - statusBarHeight - inputHeight - 2
-
-	// Store layout for mouse hit testing
-	a.layout = Layout{
-		SidebarX0: 0, SidebarX1: sidebarWidth + 2,
-		SidebarY0: 0, SidebarY1: a.height - statusBarHeight - 1,
-		SidebarWidth: sidebarWidth,
-
-		MessagesX0: sidebarWidth + 2, MessagesX1: sidebarWidth + 2 + mainWidth + 2,
-		MessagesY0: 0, MessagesY1: mainHeight + 2,
-		MessagesWidth: mainWidth,
-
-		InputX0: sidebarWidth + 2, InputX1: sidebarWidth + 2 + mainWidth + 2,
-		InputY0: mainHeight + 2, InputY1: a.height - statusBarHeight - 1,
-
-		MemberX0: sidebarWidth + 2 + mainWidth + 3, MemberX1: a.width,
-		MemberY0: 0, MemberY1: a.height - statusBarHeight - 1,
-		MemberWidth: memberWidth,
-
-		StatusY: a.height - 1,
-		Height:  a.height,
-	}
+	mainHeight := layout.MessagesY1 - 2
 
 	if mainWidth < 20 {
 		mainWidth = 20
@@ -4768,10 +4819,17 @@ func (a App) View() string {
 		return a.deviceMgr.View(a.width)
 	}
 	if a.contextMenu.IsVisible() {
-		return screen + "\n" + a.contextMenu.View()
+		// True overlay — splice the menu rows into the screen at the
+		// click point without shifting layout. Anchor (cx, cy) is the
+		// click position; +1 puts the menu just below the clicked
+		// message line so it doesn't cover what the user clicked on.
+		// overlay() clamps if the menu would overflow the terminal.
+		cx, cy := a.contextMenu.AnchorXY()
+		return overlay(screen, a.contextMenu.View(), cx, cy+1, a.width, a.height)
 	}
 	if a.memberMenu.IsVisible() {
-		return screen + "\n" + a.memberMenu.View()
+		mx, my := a.memberMenu.AnchorXY()
+		return overlay(screen, a.memberMenu.View(), mx, my+1, a.width, a.height)
 	}
 	if a.passphrase.IsVisible() {
 		return a.passphrase.View(a.width)
