@@ -180,6 +180,7 @@ type MessagesModel struct {
 	resolveName      func(string) string  // user nanoid → display name (set by App)
 	resolveRoomName  func(string) string  // room nanoid → display name (set by App)
 	resolveGroupName func(string) string  // group nanoid → display name (set by App)
+	resolveDMName    func(string) string  // dm nanoid → other user's display name (set by App)
 	loadingHistory   bool
 	hasMore          bool            // server indicated more history available
 	unreadFromID     string          // first unread message ID (for divider)
@@ -1324,10 +1325,17 @@ func (m MessagesModel) renderHeader() (string, int) {
 		}
 	}
 	if title == "" && m.dm != "" {
-		if m.resolveName != nil {
-			title = m.resolveName(m.dm)
-		} else {
-			title = m.dm
+		if m.resolveDMName != nil {
+			if resolved := strings.TrimSpace(m.resolveDMName(m.dm)); resolved != "" {
+				title = resolved
+			}
+		}
+		if title == "" {
+			if m.resolveName != nil {
+				title = m.resolveName(m.dm)
+			} else {
+				title = m.dm
+			}
 		}
 	}
 	if title == "" {

@@ -199,6 +199,74 @@ func TestApp_MemberPanelMessageActionFocusesCreatedDM(t *testing.T) {
 	}
 }
 
+func TestApp_RoomInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.sidebar = NewSidebar()
+	a.sidebar.SetRooms([]string{"room_prev"})
+	a.sidebar.updateSelection()
+	a.messages.SetContext("room_prev", "", "")
+	a.infoPanel.visible = true
+	a.infoPanel.room = "room_prev"
+
+	var out bytes.Buffer
+	client.SetEncoderForTesting(a.client, protocol.NewEncoder(&out))
+
+	model, _ := a.Update(MemberActionMsg{Action: "message", User: "usr_bob"})
+	updated := model.(App)
+
+	raw, _ := json.Marshal(protocol.DMCreated{
+		Type:    "dm_created",
+		DM:      "dm_new",
+		Members: []string{"usr_alice", "usr_bob"},
+	})
+	updated.handleServerMessage(ServerMsg{Type: "dm_created", Raw: raw})
+
+	if updated.messages.dm != "dm_new" {
+		t.Fatalf("active dm = %q, want dm_new", updated.messages.dm)
+	}
+	if updated.messages.room != "" || updated.messages.group != "" {
+		t.Fatalf("expected room/group cleared after DM focus, got room=%q group=%q", updated.messages.room, updated.messages.group)
+	}
+	if updated.sidebar.SelectedDM() != "dm_new" {
+		t.Fatalf("sidebar selected dm = %q, want dm_new", updated.sidebar.SelectedDM())
+	}
+}
+
+func TestApp_GroupInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.sidebar = NewSidebar()
+	a.sidebar.SetGroups([]protocol.GroupInfo{
+		{ID: "group_prev", Name: "Project", Members: []string{"usr_alice", "usr_bob"}},
+	})
+	a.sidebar.updateSelection()
+	a.messages.SetContext("", "group_prev", "")
+	a.infoPanel.visible = true
+	a.infoPanel.group = "group_prev"
+
+	var out bytes.Buffer
+	client.SetEncoderForTesting(a.client, protocol.NewEncoder(&out))
+
+	model, _ := a.Update(MemberActionMsg{Action: "message", User: "usr_bob"})
+	updated := model.(App)
+
+	raw, _ := json.Marshal(protocol.DMCreated{
+		Type:    "dm_created",
+		DM:      "dm_new",
+		Members: []string{"usr_alice", "usr_bob"},
+	})
+	updated.handleServerMessage(ServerMsg{Type: "dm_created", Raw: raw})
+
+	if updated.messages.dm != "dm_new" {
+		t.Fatalf("active dm = %q, want dm_new", updated.messages.dm)
+	}
+	if updated.messages.room != "" || updated.messages.group != "" {
+		t.Fatalf("expected room/group cleared after DM focus, got room=%q group=%q", updated.messages.room, updated.messages.group)
+	}
+	if updated.sidebar.SelectedDM() != "dm_new" {
+		t.Fatalf("sidebar selected dm = %q, want dm_new", updated.sidebar.SelectedDM())
+	}
+}
+
 func TestApp_MemberPanelCreateGroupFocusesCreatedGroup(t *testing.T) {
 	a, _ := newEditAppHarness(t)
 	a.newConv = NewNewConv()

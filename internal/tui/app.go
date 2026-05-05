@@ -1151,6 +1151,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MemberActionMsg:
 		fromMembersPanel := a.memberPanel.IsVisible() && (a.focus == FocusMembers || a.memberMenu.IsVisible())
+		fromContextInfoPanel := a.infoPanel.IsVisible() && !a.infoPanel.isDM && (a.infoPanel.room != "" || a.infoPanel.group != "")
 		// Phase 14 admin actions keep the info panel open so the
 		// user can chain multiple operations. All other actions
 		// (message, menu, verify, profile) still close it as before.
@@ -1212,7 +1213,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.statusBar.SetError("Cannot create a DM with yourself")
 					break
 				}
-				if fromMembersPanel {
+				if fromMembersPanel || fromContextInfoPanel {
 					a.setPendingFocusCreatedDM(msg.User)
 				}
 				if err := a.client.CreateDM(msg.User); err != nil {

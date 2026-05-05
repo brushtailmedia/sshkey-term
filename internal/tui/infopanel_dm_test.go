@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // TestInfoPanel_ShowDMNilClient verifies the ShowDM fast-path when the
@@ -122,6 +124,40 @@ func TestInfoPanel_DMViewRendersBothParties(t *testing.T) {
 	}
 	if !strings.Contains(view, "Alice") {
 		t.Errorf("view missing other party entry:\n%s", view)
+	}
+}
+
+func TestInfoPanel_DMViewOmitsEnterMessageHint(t *testing.T) {
+	i := InfoPanelModel{
+		visible: true,
+		dm:      "dm_ab",
+		isDM:    true,
+		members: []memberInfo{
+			{User: "me", DisplayName: "Me"},
+			{User: "alice", DisplayName: "Alice"},
+		},
+	}
+
+	view := i.View(80)
+	if strings.Contains(view, "Enter=message") {
+		t.Errorf("DM info panel should not show Enter=message hint, got:\n%s", view)
+	}
+}
+
+func TestInfoPanel_DMEnterNoop(t *testing.T) {
+	i := InfoPanelModel{
+		visible: true,
+		dm:      "dm_ab",
+		isDM:    true,
+		members: []memberInfo{
+			{User: "me", DisplayName: "Me"},
+			{User: "alice", DisplayName: "Alice"},
+		},
+	}
+
+	_, cmd := i.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("DM info panel Enter should be a no-op, got command")
 	}
 }
 

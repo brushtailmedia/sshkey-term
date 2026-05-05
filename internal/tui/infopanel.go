@@ -252,7 +252,9 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 			i.cursor++
 		}
 	case "enter":
-		if i.cursor < len(i.members) {
+		// In a 1:1 DM info panel we're already in a DM with the selected
+		// user, so Enter should not emit another create_dm action.
+		if !i.isDM && i.cursor < len(i.members) {
 			user := i.members[i.cursor].User
 			return i, func() tea.Msg {
 				return MemberActionMsg{Action: "message", User: user}
@@ -462,7 +464,11 @@ func (i InfoPanelModel) View(width int) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpDescStyle.Render(" Enter=message  m=mute  Esc=close"))
+	if i.isDM {
+		b.WriteString(helpDescStyle.Render(" m=mute  Esc=close"))
+	} else {
+		b.WriteString(helpDescStyle.Render(" Enter=message  m=mute  Esc=close"))
+	}
 
 	return dialogStyle.Width(width - 4).Render(b.String())
 }
