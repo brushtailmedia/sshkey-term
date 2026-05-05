@@ -10,27 +10,36 @@ import (
 
 var (
 	dialogStyle = lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7C3AED")).
-		Padding(1, 2)
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#7C3AED")).
+			Padding(1, 2)
 
 	checkStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#22C55E"))
+			Foreground(lipgloss.Color("#22C55E"))
 )
 
 // NewConvModel manages the new conversation dialog.
 type NewConvModel struct {
-	visible      bool
-	memberInput  textinput.Model
-	nameInput    textinput.Model
-	allMembers   []string          // all known users (nanoids)
-	selected     map[string]bool   // selected members (nanoids)
-	suggestions  []string          // filtered member list (nanoids)
-	suggCursor   int
-	focusName    bool              // true when focus is on the name field
-	preselected  []string          // members pre-selected (nanoids)
-	resolveName  func(string) string // nanoid → display name (set by App)
+	visible     bool
+	memberInput textinput.Model
+	nameInput   textinput.Model
+	allMembers  []string        // all known users (nanoids)
+	selected    map[string]bool // selected members (nanoids)
+	suggestions []string        // filtered member list (nanoids)
+	suggCursor  int
+	focus       newConvFocus
+	preselected []string            // members pre-selected (nanoids)
+	resolveName func(string) string // nanoid → display name (set by App)
 }
+
+type newConvFocus int
+
+const (
+	newConvFocusMembers newConvFocus = iota
+	newConvFocusName
+	newConvFocusCreate
+	newConvFocusCancel
+)
 
 // CreateConvMsg is sent when the user confirms the dialog.
 type CreateConvMsg struct {
@@ -69,8 +78,8 @@ func (n *NewConvModel) Show(allMembers []string, preselected ...string) {
 	n.selected = make(map[string]bool)
 	n.memberInput.SetValue("")
 	n.nameInput.SetValue("")
-	n.memberInput.Focus()
-	n.focusName = false
+	n.focus = newConvFocusMembers
+	n.applyFocus()
 	n.suggCursor = 0
 
 	for _, m := range preselected {
@@ -119,26 +128,22 @@ func (n NewConvModel) Update(msg tea.KeyMsg) (NewConvModel, tea.Cmd) {
 		return n, nil
 
 	case "tab":
-		n.focusName = !n.focusName
-		if n.focusName {
-			n.memberInput.Blur()
-			n.nameInput.Focus()
-		} else {
-			n.nameInput.Blur()
-			n.memberInput.Focus()
-		}
+		n.advanceFocus()
 		return n, nil
 
-	case "ctrl+enter":
-		return n, n.create()
-
 	case "enter":
-		if n.focusName {
-			// Create on Enter in name field
+		switch n.focus {
+		case newConvFocusCreate:
+			return n, n.create()
+		case newConvFocusCancel:
+			n.Hide()
+			return n, nil
+		case newConvFocusName:
+			// Keep enter-to-create when name field is focused.
 			return n, n.create()
 		}
 		// Toggle member selection
-		if len(n.suggestions) > 0 && n.suggCursor < len(n.suggestions) {
+		if n.focus == newConvFocusMembers && len(n.suggestions) > 0 && n.suggCursor < len(n.suggestions) {
 			member := n.suggestions[n.suggCursor]
 			n.selected[member] = true
 			n.memberInput.SetValue("")
@@ -147,19 +152,19 @@ func (n NewConvModel) Update(msg tea.KeyMsg) (NewConvModel, tea.Cmd) {
 		return n, nil
 
 	case "up":
-		if !n.focusName && n.suggCursor > 0 {
+		if n.focus == newConvFocusMembers && n.suggCursor > 0 {
 			n.suggCursor--
 		}
 		return n, nil
 
 	case "down":
-		if !n.focusName && n.suggCursor < len(n.suggestions)-1 {
+		if n.focus == newConvFocusMembers && n.suggCursor < len(n.suggestions)-1 {
 			n.suggCursor++
 		}
 		return n, nil
 
 	case "backspace":
-		if !n.focusName && n.memberInput.Value() == "" {
+		if n.focus == newConvFocusMembers && n.memberInput.Value() == "" {
 			// Remove last selected member
 			var last string
 			for m := range n.selected {
@@ -175,14 +180,47 @@ func (n NewConvModel) Update(msg tea.KeyMsg) (NewConvModel, tea.Cmd) {
 
 	// Update the focused input
 	var cmd tea.Cmd
-	if n.focusName {
+	if n.focus == newConvFocusName {
 		n.nameInput, cmd = n.nameInput.Update(msg)
-	} else {
+	} else if n.focus == newConvFocusMembers {
 		n.memberInput, cmd = n.memberInput.Update(msg)
 		n.updateSuggestions()
 	}
 
 	return n, cmd
+}
+
+func (n *NewConvModel) focusOrder() []newConvFocus {
+	order := []newConvFocus{newConvFocusMembers}
+	if len(n.selected) > 1 {
+		order = append(order, newConvFocusName)
+	}
+	order = append(order, newConvFocusCreate, newConvFocusCancel)
+	return order
+}
+
+func (n *NewConvModel) applyFocus() {
+	n.memberInput.Blur()
+	n.nameInput.Blur()
+	switch n.focus {
+	case newConvFocusMembers:
+		n.memberInput.Focus()
+	case newConvFocusName:
+		n.nameInput.Focus()
+	}
+}
+
+func (n *NewConvModel) advanceFocus() {
+	order := n.focusOrder()
+	idx := 0
+	for i, f := range order {
+		if f == n.focus {
+			idx = i
+			break
+		}
+	}
+	n.focus = order[(idx+1)%len(order)]
+	n.applyFocus()
 }
 
 func (n *NewConvModel) create() tea.Cmd {
@@ -254,7 +292,7 @@ func (n NewConvModel) View(width int) string {
 			prefix = " " + checkStyle.Render("✓") + " "
 		}
 		line := prefix + displayName
-		if i == n.suggCursor && !n.focusName {
+		if i == n.suggCursor && n.focus == newConvFocusMembers {
 			line = completionSelectedStyle.Render(line)
 		}
 		b.WriteString(line + "\n")
@@ -266,7 +304,15 @@ func (n NewConvModel) View(width int) string {
 	}
 
 	b.WriteString("\n\n")
-	b.WriteString(helpDescStyle.Render(" Enter=add  Tab=name field  Ctrl+Enter=create  Esc=cancel"))
+	createLabel := "[Create]"
+	cancelLabel := "[Cancel]"
+	if n.focus == newConvFocusCreate {
+		createLabel = completionSelectedStyle.Render(createLabel)
+	}
+	if n.focus == newConvFocusCancel {
+		cancelLabel = completionSelectedStyle.Render(cancelLabel)
+	}
+	b.WriteString(" " + createLabel + "  " + cancelLabel)
 
 	return dialogStyle.Width(width - 4).Render(b.String())
 }

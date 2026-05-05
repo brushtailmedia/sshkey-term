@@ -1,5 +1,0 @@
-# test log
-getenv GOTMPDIR
-getenv TMPDIR
-stat /var/folders/hq/93wr6q397vd4v_3ckn_lpglc0000gn/T/TestF28_SidebarRendersVerifiedBadge1649094903/001
-open /var/folders/hq/93wr6q397vd4v_3ckn_lpglc0000gn/T
