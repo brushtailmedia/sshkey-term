@@ -165,6 +165,108 @@ func TestApp_MemberActionMessageRejectsSelf(t *testing.T) {
 	}
 }
 
+func TestApp_MemberPanelMessageActionFocusesCreatedDM(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.sidebar = NewSidebar()
+	a.sidebar.SetRooms([]string{"room_prev"})
+	a.sidebar.updateSelection()
+	a.messages.SetContext("room_prev", "", "")
+	a.memberPanel = NewMemberPanel()
+	a.memberPanel.visible = true
+	a.focus = FocusMembers
+
+	var out bytes.Buffer
+	client.SetEncoderForTesting(a.client, protocol.NewEncoder(&out))
+
+	model, _ := a.Update(MemberActionMsg{Action: "message", User: "usr_bob"})
+	updated := model.(App)
+
+	raw, _ := json.Marshal(protocol.DMCreated{
+		Type:    "dm_created",
+		DM:      "dm_new",
+		Members: []string{"usr_alice", "usr_bob"},
+	})
+	updated.handleServerMessage(ServerMsg{Type: "dm_created", Raw: raw})
+
+	if updated.messages.dm != "dm_new" {
+		t.Fatalf("active dm = %q, want dm_new", updated.messages.dm)
+	}
+	if updated.messages.room != "" || updated.messages.group != "" {
+		t.Fatalf("expected room/group cleared after DM focus, got room=%q group=%q", updated.messages.room, updated.messages.group)
+	}
+	if updated.sidebar.SelectedDM() != "dm_new" {
+		t.Fatalf("sidebar selected dm = %q, want dm_new", updated.sidebar.SelectedDM())
+	}
+}
+
+func TestApp_MemberPanelCreateGroupFocusesCreatedGroup(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.newConv = NewNewConv()
+	a.sidebar = NewSidebar()
+	a.sidebar.SetRooms([]string{"room_prev"})
+	a.sidebar.updateSelection()
+	a.messages.SetContext("room_prev", "", "")
+	a.memberPanel = NewMemberPanel()
+	a.memberPanel.visible = true
+	a.focus = FocusMembers
+
+	var out bytes.Buffer
+	client.SetEncoderForTesting(a.client, protocol.NewEncoder(&out))
+
+	model, _ := a.Update(MemberActionMsg{Action: "create_group", User: "usr_bob"})
+	updated := model.(App)
+	if !updated.newConv.IsVisible() {
+		t.Fatal("expected new group dialog to open")
+	}
+
+	model, _ = updated.Update(CreateConvMsg{
+		Members: []string{"usr_bob", "usr_carol"},
+		Name:    "Project",
+	})
+	updated = model.(App)
+
+	raw, _ := json.Marshal(protocol.GroupCreated{
+		Type:    "group_created",
+		Group:   "group_new",
+		Members: []string{"usr_alice", "usr_bob", "usr_carol"},
+		Admins:  []string{"usr_alice"},
+		Name:    "Project",
+	})
+	updated.handleServerMessage(ServerMsg{Type: "group_created", Raw: raw})
+
+	if updated.messages.group != "group_new" {
+		t.Fatalf("active group = %q, want group_new", updated.messages.group)
+	}
+	if updated.messages.room != "" || updated.messages.dm != "" {
+		t.Fatalf("expected room/dm cleared after group focus, got room=%q dm=%q", updated.messages.room, updated.messages.dm)
+	}
+	if updated.sidebar.SelectedGroup() != "group_new" {
+		t.Fatalf("sidebar selected group = %q, want group_new", updated.sidebar.SelectedGroup())
+	}
+}
+
+func TestApp_DmCreatedDoesNotStealFocusWithoutPendingIntent(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.sidebar = NewSidebar()
+	a.sidebar.SetRooms([]string{"room_prev"})
+	a.sidebar.updateSelection()
+	a.messages.SetContext("room_prev", "", "")
+
+	raw, _ := json.Marshal(protocol.DMCreated{
+		Type:    "dm_created",
+		DM:      "dm_incoming",
+		Members: []string{"usr_alice", "usr_bob"},
+	})
+	a.handleServerMessage(ServerMsg{Type: "dm_created", Raw: raw})
+
+	if a.messages.room != "room_prev" {
+		t.Fatalf("room context changed unexpectedly to %q", a.messages.room)
+	}
+	if a.messages.dm != "" {
+		t.Fatalf("dm context should remain empty, got %q", a.messages.dm)
+	}
+}
+
 func TestApp_MemberPanelMouseClickSelectsOnly_NoMenuOpen(t *testing.T) {
 	a, _ := newEditAppHarness(t)
 	a.width = 120

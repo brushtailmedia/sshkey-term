@@ -151,6 +151,19 @@ type App struct {
 	// field rather than a map because the user can only kick off one
 	// create_dm at a time via the newconv dialog.
 	pendingCreateDM pendingCreateDMState
+
+	// membersPanelCreateSource tracks whether the currently-open NewConv
+	// dialog was launched from the member panel/menu. Used to scope the
+	// auto-focus-on-created behavior to that UX path.
+	membersPanelCreateSource bool
+
+	// pendingFocusCreated* stores the expected create result (from the
+	// member panel flow). When the matching dm_created/group_created
+	// arrives, the app switches context to that conversation.
+	pendingFocusCreatedDMOther   string
+	pendingFocusCreatedGroupName string
+	pendingFocusCreatedGroupMems []string
+	pendingFocusCreatedSetAt     time.Time
 }
 
 // pendingCreateDMState records a create_dm we have sent and are waiting
@@ -171,6 +184,11 @@ const maxCreateDMAutoRetries = 3
 // after a server_busy response. Long enough that cleanup will finish,
 // short enough to feel instant to the user.
 const createDMRetryDelay = 80
+
+// pendingFocusCreatedTTL bounds how long a members-panel create intent
+// can wait for its dm_created/group_created before being discarded as
+// stale, preventing late unrelated creates from stealing focus.
+const pendingFocusCreatedTTL = 30 * time.Second
 
 // doubleQuitWindow is the time window during which a second Ctrl+Q
 // keypress bypasses the quit-confirmation dialog. Phase 17c Step 5
@@ -686,6 +704,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.newConv, cmd = a.newConv.Update(msg)
 			if !a.newConv.IsVisible() {
 				a.focus = FocusInput
+				// Dialog closed without emitting a create intent (Esc/cancel).
+				// Reset source marker so stale member-panel context can't leak
+				// into a future create flow.
+				if cmd == nil {
+					a.membersPanelCreateSource = false
+				}
 			}
 			return a, cmd
 		}
@@ -888,6 +912,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					allMembers = append(allMembers, p.User)
 				})
 				a.newConv.Show(allMembers)
+				a.membersPanelCreateSource = false
 			}
 			return a, nil
 
@@ -1125,6 +1150,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case MemberActionMsg:
+		fromMembersPanel := a.memberPanel.IsVisible() && (a.focus == FocusMembers || a.memberMenu.IsVisible())
 		// Phase 14 admin actions keep the info panel open so the
 		// user can chain multiple operations. All other actions
 		// (message, menu, verify, profile) still close it as before.
@@ -1186,7 +1212,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.statusBar.SetError("Cannot create a DM with yourself")
 					break
 				}
+				if fromMembersPanel {
+					a.setPendingFocusCreatedDM(msg.User)
+				}
 				if err := a.client.CreateDM(msg.User); err != nil {
+					a.clearPendingFocusCreated()
 					a.statusBar.SetError("Create DM failed: " + err.Error())
 				}
 			}
@@ -1203,6 +1233,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					allMembers = append(allMembers, p.User)
 				})
 				a.newConv.Show(allMembers, msg.User)
+				a.membersPanelCreateSource = fromMembersPanel
 			}
 		case "verify":
 			if a.client != nil {
@@ -1687,12 +1718,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// auto-retry path on server_busy.
 		if a.client != nil {
 			if len(msg.Members) == 1 && msg.Name == "" {
+				if a.membersPanelCreateSource {
+					a.setPendingFocusCreatedDM(msg.Members[0])
+				}
 				a.pendingCreateDM = pendingCreateDMState{
 					other:   msg.Members[0],
 					retries: maxCreateDMAutoRetries,
 				}
 				a.client.CreateDM(msg.Members[0])
 			} else if len(msg.Members) > 0 {
+				if a.membersPanelCreateSource {
+					a.setPendingFocusCreatedGroup(msg.Members, msg.Name)
+				}
 				// Soft warning at 50+ total members (49+ others + caller).
 				// Per-message wrapped keys scale linearly with member count;
 				// rooms use a shared epoch key and are more efficient for
@@ -1703,6 +1740,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.client.CreateGroup(msg.Members, msg.Name)
 			}
 		}
+		a.membersPanelCreateSource = false
 		return a, nil
 
 	case retryCreateDMMsg:
@@ -2810,6 +2848,121 @@ func (a *App) switchToSidebarSelection() {
 		a.input.SetNonMembers(a.activeNonMemberEntries())
 	}
 	a.sendReadReceipt()
+}
+
+func (a *App) setPendingFocusCreatedDM(other string) {
+	a.pendingFocusCreatedDMOther = other
+	a.pendingFocusCreatedGroupName = ""
+	a.pendingFocusCreatedGroupMems = nil
+	a.pendingFocusCreatedSetAt = time.Now()
+}
+
+func (a *App) setPendingFocusCreatedGroup(members []string, name string) {
+	a.pendingFocusCreatedDMOther = ""
+	a.pendingFocusCreatedGroupName = strings.TrimSpace(name)
+	a.pendingFocusCreatedGroupMems = append(a.pendingFocusCreatedGroupMems[:0], members...)
+	a.pendingFocusCreatedSetAt = time.Now()
+}
+
+func (a *App) clearPendingFocusCreated() {
+	a.pendingFocusCreatedDMOther = ""
+	a.pendingFocusCreatedGroupName = ""
+	a.pendingFocusCreatedGroupMems = nil
+	a.pendingFocusCreatedSetAt = time.Time{}
+}
+
+func (a *App) pendingFocusCreatedExpired() bool {
+	if a.pendingFocusCreatedSetAt.IsZero() {
+		return false
+	}
+	return time.Since(a.pendingFocusCreatedSetAt) > pendingFocusCreatedTTL
+}
+
+func (a *App) shouldFocusCreatedDM(m protocol.DMCreated) bool {
+	if a.pendingFocusCreatedDMOther == "" {
+		return false
+	}
+	if a.pendingFocusCreatedExpired() {
+		a.clearPendingFocusCreated()
+		return false
+	}
+	if a.client == nil {
+		a.clearPendingFocusCreated()
+		return false
+	}
+	self := a.client.UserID()
+	other := a.pendingFocusCreatedDMOther
+	hasSelf := false
+	hasOther := false
+	for _, member := range m.Members {
+		if member == self {
+			hasSelf = true
+		}
+		if member == other {
+			hasOther = true
+		}
+	}
+	if hasSelf && hasOther {
+		a.clearPendingFocusCreated()
+		return true
+	}
+	return false
+}
+
+func (a *App) shouldFocusCreatedGroup(m protocol.GroupCreated) bool {
+	if len(a.pendingFocusCreatedGroupMems) == 0 {
+		return false
+	}
+	if a.pendingFocusCreatedExpired() {
+		a.clearPendingFocusCreated()
+		return false
+	}
+	if a.client == nil {
+		a.clearPendingFocusCreated()
+		return false
+	}
+	if strings.TrimSpace(m.Name) != a.pendingFocusCreatedGroupName {
+		return false
+	}
+	expected := make(map[string]bool, len(a.pendingFocusCreatedGroupMems)+1)
+	expected[a.client.UserID()] = true
+	for _, member := range a.pendingFocusCreatedGroupMems {
+		expected[member] = true
+	}
+	if len(m.Members) != len(expected) {
+		return false
+	}
+	for _, member := range m.Members {
+		if !expected[member] {
+			return false
+		}
+	}
+	a.clearPendingFocusCreated()
+	return true
+}
+
+func (a *App) focusSidebarGroup(groupID string) {
+	for i, g := range a.sidebar.groups {
+		if g.ID != groupID {
+			continue
+		}
+		a.sidebar.cursor = len(a.sidebar.rooms) + i
+		a.sidebar.updateSelection()
+		a.switchToSidebarSelection()
+		return
+	}
+}
+
+func (a *App) focusSidebarDM(dmID string) {
+	for i, dm := range a.sidebar.dms {
+		if dm.ID != dmID {
+			continue
+		}
+		a.sidebar.cursor = len(a.sidebar.rooms) + len(a.sidebar.groups) + i
+		a.sidebar.updateSelection()
+		a.switchToSidebarSelection()
+		return
+	}
 }
 
 func (a *App) showInfoPanelForContext(room, group, dm string) {
@@ -4527,6 +4680,9 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				Admins:  m.Admins,
 				Name:    m.Name,
 			})
+			if a.shouldFocusCreatedGroup(m) {
+				a.focusSidebarGroup(m.Group)
+			}
 		}
 	case "group_added_to":
 		// Phase 14: a group admin added the local user to an existing
@@ -4602,6 +4758,9 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				if member == a.pendingCreateDM.other {
 					a.pendingCreateDM = pendingCreateDMState{}
 				}
+			}
+			if a.shouldFocusCreatedDM(m) {
+				a.focusSidebarDM(m.DM)
 			}
 		}
 	case "dm":
