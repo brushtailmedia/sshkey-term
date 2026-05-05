@@ -22,6 +22,9 @@ go.work.sum
 # Dependency directories
 vendor/
 
+# Local Go cache
+.gocache/
+
 # Local client data (never commit user data)
 *.db
 *.db-wal
