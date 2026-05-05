@@ -1329,6 +1329,34 @@ func (c *Client) DisplayRoomName(roomID string) string {
 	return roomID
 }
 
+// DisplayGroupName returns the display name for a group DM nanoid ID.
+// Falls back to a comma-joined member display-name list when the group has
+// no explicit name, and ultimately to the raw ID if the group is not cached.
+func (c *Client) DisplayGroupName(groupID string) string {
+	if c.store == nil {
+		return groupID
+	}
+	name, membersCSV, ok := c.store.GetGroupNameMembers(groupID)
+	if !ok {
+		return groupID
+	}
+	if strings.TrimSpace(name) != "" {
+		return name
+	}
+	var names []string
+	for _, member := range strings.Split(membersCSV, ",") {
+		member = strings.TrimSpace(member)
+		if member == "" {
+			continue
+		}
+		names = append(names, c.DisplayName(member))
+	}
+	if len(names) > 0 {
+		return strings.Join(names, ", ")
+	}
+	return groupID
+}
+
 // DisplayRoomTopic returns the topic for a room nanoid ID, or an empty
 // string if no topic is set (or the room isn't cached yet). Phase 18:
 // parallel to DisplayRoomName, wraps the store helper so TUI code can

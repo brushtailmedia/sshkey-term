@@ -228,6 +228,17 @@ func (s *Store) GetAllGroups() (map[string][2]string, error) {
 	return result, rows.Err()
 }
 
+// GetGroupNameMembers returns the cached {name,members} tuple for a group ID.
+// members is returned as a comma-separated nanoid list. ok=false means the
+// group is not present in the local cache.
+func (s *Store) GetGroupNameMembers(id string) (name, members string, ok bool) {
+	err := s.db.QueryRow(`SELECT name, members FROM groups WHERE id = ?`, id).Scan(&name, &members)
+	if err != nil {
+		return "", "", false
+	}
+	return name, members, true
+}
+
 // Phase 20 removed GetActiveGroupIDs and GetActiveRoomIDs along with
 // the client-side reconciliation walks that were their only callers.
 // Server is now authoritative via left_rooms / left_groups catchup

@@ -2053,6 +2053,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.sidebar.SetRooms(a.client.Rooms())
 		a.messages.resolveName = a.client.DisplayName
 		a.messages.resolveRoomName = a.client.DisplayRoomName
+		a.messages.resolveGroupName = a.client.DisplayGroupName
 		a.search.resolveName = a.client.DisplayName
 		if st := a.client.Store(); st != nil {
 			a.search.SetFTS(st.HasFTS())

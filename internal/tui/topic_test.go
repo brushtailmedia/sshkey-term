@@ -98,6 +98,26 @@ func TestMessagesHeader_GroupContext_NoTopicLine(t *testing.T) {
 	}
 }
 
+// TestMessagesHeader_GroupContext_UsesResolvedGroupName verifies that group
+// contexts prefer the resolved display name (when available) instead of the
+// raw group nanoid.
+func TestMessagesHeader_GroupContext_UsesResolvedGroupName(t *testing.T) {
+	m := NewMessages()
+	m.SetContext("", "group_project", "")
+	m.resolveGroupName = func(id string) string {
+		if id == "group_project" {
+			return "Project Team"
+		}
+		return id
+	}
+
+	out := stripANSI(m.View(80, 20, false))
+
+	if !strings.Contains(out, "Project Team") {
+		t.Errorf("group context should render resolved group name; got:\n%s", out)
+	}
+}
+
 // TestMessagesHeader_DMContext_NoTopicLine verifies that a 1:1 DM
 // context renders only the other party's display name — no topic
 // line, no group subtitle, just the name.

@@ -168,24 +168,25 @@ type DisplayAttachment struct {
 // the messages-render loop having no upper bound — scrolling up enough
 // blew past the pane height and corrupted the surrounding layout.
 type MessagesModel struct {
-	messages        []DisplayMessage
-	room            string
-	group           string
-	dm              string
-	roomTopic       string               // Phase 18: current room topic, rendered in the two-line header above the stream. Empty for groups/DMs/topicless rooms.
-	cursor          int                  // selected message index (-1 = none)
-	typingUsers     map[string]time.Time // user -> last typing time
-	currentUser     string               // display name — for @mention highlighting in body
-	currentUserID   string               // nanoid — for mention detection in payload
-	resolveName     func(string) string  // user nanoid → display name (set by App)
-	resolveRoomName func(string) string  // room nanoid → display name (set by App)
-	loadingHistory  bool
-	hasMore         bool            // server indicated more history available
-	unreadFromID    string          // first unread message ID (for divider)
-	retired         map[string]bool // userID -> account retired
-	left            bool            // current context is archived (read-only, user has left)
-	roomRetired     bool            // current context is a retired room (archived by admin)
-	filesDir        string          // <dataDir>/files — set by App after connect; used to derive per-attachment cached path for inline-image render
+	messages         []DisplayMessage
+	room             string
+	group            string
+	dm               string
+	roomTopic        string               // Phase 18: current room topic, rendered in the two-line header above the stream. Empty for groups/DMs/topicless rooms.
+	cursor           int                  // selected message index (-1 = none)
+	typingUsers      map[string]time.Time // user -> last typing time
+	currentUser      string               // display name — for @mention highlighting in body
+	currentUserID    string               // nanoid — for mention detection in payload
+	resolveName      func(string) string  // user nanoid → display name (set by App)
+	resolveRoomName  func(string) string  // room nanoid → display name (set by App)
+	resolveGroupName func(string) string  // group nanoid → display name (set by App)
+	loadingHistory   bool
+	hasMore          bool            // server indicated more history available
+	unreadFromID     string          // first unread message ID (for divider)
+	retired          map[string]bool // userID -> account retired
+	left             bool            // current context is archived (read-only, user has left)
+	roomRetired      bool            // current context is a retired room (archived by admin)
+	filesDir         string          // <dataDir>/files — set by App after connect; used to derive per-attachment cached path for inline-image render
 
 	// viewport owns the scrollable message-stream region. Width and
 	// Height are set by View() each render to track terminal resize +
@@ -1311,8 +1312,16 @@ func (m MessagesModel) renderHeader() (string, int) {
 	if title != "" && m.resolveRoomName != nil {
 		title = m.resolveRoomName(title)
 	}
-	if title == "" {
-		title = m.group
+	if title == "" && m.group != "" {
+		if m.resolveGroupName != nil {
+			if resolved := strings.TrimSpace(m.resolveGroupName(m.group)); resolved != "" {
+				title = resolved
+			} else {
+				title = m.group
+			}
+		} else {
+			title = m.group
+		}
 	}
 	if title == "" && m.dm != "" {
 		if m.resolveName != nil {
