@@ -9,13 +9,31 @@ import (
 func TestReplyPreview_FoundInView(t *testing.T) {
 	m := NewMessages()
 	m.messages = []DisplayMessage{
-		{ID: "msg_1", From: "Alice", Body: "the original message here", TS: 1000},
+		{ID: "msg_1", FromID: "usr_alice", From: "Alice", Body: "the original message here", TS: 1000},
 		{ID: "msg_2", From: "Bob", Body: "this is a reply", TS: 1001, ReplyTo: "msg_1"},
 	}
 
 	preview := m.replyPreview("msg_1")
 	if preview != "Alice: the original message here" {
 		t.Errorf("preview = %q", preview)
+	}
+}
+
+func TestReplyPreview_UsesResolverForFallbackFromID(t *testing.T) {
+	m := NewMessages()
+	m.resolveName = func(id string) string {
+		if id == "usr_alice" {
+			return "Alice"
+		}
+		return id
+	}
+	m.messages = []DisplayMessage{
+		{ID: "msg_1", FromID: "usr_alice", From: "usr_alice", Body: "hello", TS: 1000},
+	}
+
+	preview := m.replyPreview("msg_1")
+	if preview != "Alice: hello" {
+		t.Errorf("preview = %q, want %q", preview, "Alice: hello")
 	}
 }
 

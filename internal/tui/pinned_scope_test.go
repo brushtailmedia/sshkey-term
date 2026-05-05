@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
@@ -60,5 +61,46 @@ func TestPinnedBar_ScopedPerRoomOnSwitch(t *testing.T) {
 	a.syncPinnedBarForContext()
 	if got := a.pinnedBar.PinIDs(); !reflect.DeepEqual(got, []string{"msg_b1"}) {
 		t.Fatalf("room_b pin ids = %v, want [msg_b1]", got)
+	}
+}
+
+func TestPinnedBar_PinsPayloadUsesResolvedDisplayName(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.roomPins = make(map[string][]string)
+	a.messages.SetContext("room_a", "", "")
+	a.onContextSwitch()
+
+	client.SetProfileForTesting(a.client, &protocol.Profile{
+		User:        "usr_bob",
+		DisplayName: "Bob",
+	})
+
+	rawPinnedMsg, err := json.Marshal(protocol.Message{
+		Type: "message",
+		ID:   "msg_1",
+		From: "usr_bob",
+		Room: "room_a",
+		TS:   1,
+	})
+	if err != nil {
+		t.Fatalf("marshal pinned message: %v", err)
+	}
+
+	rawPins, err := json.Marshal(protocol.Pins{
+		Type:        "pins",
+		Room:        "room_a",
+		Messages:    []string{"msg_1"},
+		MessageData: []json.RawMessage{rawPinnedMsg},
+	})
+	if err != nil {
+		t.Fatalf("marshal pins: %v", err)
+	}
+
+	a.handleServerMessage(ServerMsg{Type: "pins", Raw: rawPins})
+	if !a.pinnedBar.HasPins() {
+		t.Fatal("expected pinned bar to have pins")
+	}
+	if got := a.pinnedBar.pins[0].From; got != "Bob" {
+		t.Fatalf("pinned preview From = %q, want Bob", got)
 	}
 }

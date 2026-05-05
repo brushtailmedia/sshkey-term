@@ -223,3 +223,32 @@ func TestApp_ContextSwitchClearsEditMode(t *testing.T) {
 		t.Fatalf("context switch should clear input, got %q", got)
 	}
 }
+
+func TestApp_ReplyActionUsesResolvedDisplayName(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	client.SetProfileForTesting(a.client, &protocol.Profile{
+		User:        "usr_bob",
+		DisplayName: "Bob",
+	})
+
+	model, _ := a.Update(MessageAction{
+		Action: "reply",
+		Msg: DisplayMessage{
+			ID:     "msg_1",
+			FromID: "usr_bob",
+			From:   "usr_bob",
+			Body:   "hello",
+		},
+	})
+	updated := model.(App)
+
+	if updated.focus != FocusInput {
+		t.Fatalf("focus = %v, want FocusInput", updated.focus)
+	}
+	if updated.input.replyTo != "msg_1" {
+		t.Fatalf("replyTo = %q, want msg_1", updated.input.replyTo)
+	}
+	if got := updated.input.replyText; got != "Bob: hello" {
+		t.Fatalf("reply text = %q, want %q", got, "Bob: hello")
+	}
+}

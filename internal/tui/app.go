@@ -1828,7 +1828,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(preview) > 50 {
 				preview = preview[:47] + "..."
 			}
-			a.input.SetReply(msg.Msg.ID, msg.Msg.From+": "+preview)
+			from := msg.Msg.From
+			if msg.Msg.FromID != "" {
+				from = a.resolveDisplayName(msg.Msg.FromID)
+			}
+			a.input.SetReply(msg.Msg.ID, from+": "+preview)
 			a.focus = FocusInput
 		case "delete":
 			if a.client != nil && (msg.Msg.FromID == a.client.UserID() || a.client.IsAdmin()) {
@@ -4697,11 +4701,12 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 						}
 					}
 					pinnedDisplayMsgs = append(pinnedDisplayMsgs, DisplayMessage{
-						ID:   pm.ID,
-						From: pm.From,
-						Body: body,
-						TS:   pm.TS,
-						Room: pm.Room,
+						ID:     pm.ID,
+						FromID: pm.From,
+						From:   a.resolveDisplayName(pm.From),
+						Body:   body,
+						TS:     pm.TS,
+						Room:   pm.Room,
 					})
 				}
 				a.pinnedBar.SetPins(m.Room, m.Messages, pinnedDisplayMsgs)

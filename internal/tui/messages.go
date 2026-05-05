@@ -1455,7 +1455,11 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 			var line string
 			if showHeader {
 				ts := time.Unix(msg.TS, 0).Format("3:04 PM")
-				header := usernameStyle.Render(msg.From)
+				from := msg.From
+				if m.resolveName != nil && msg.FromID != "" {
+					from = m.resolveName(msg.FromID)
+				}
+				header := usernameStyle.Render(from)
 				if m.retired[msg.FromID] {
 					header += " " + helpDescStyle.Render("[retired]")
 				}
@@ -1790,7 +1794,11 @@ func (m *MessagesModel) replyPreview(msgID string) string {
 			if msg.Deleted {
 				return "Deleted message"
 			}
-			preview := msg.From + ": " + msg.Body
+			from := msg.From
+			if m.resolveName != nil && msg.FromID != "" {
+				from = m.resolveName(msg.FromID)
+			}
+			preview := from + ": " + msg.Body
 			if len(preview) > 60 {
 				preview = preview[:57] + "..."
 			}
