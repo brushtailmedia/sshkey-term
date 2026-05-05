@@ -463,9 +463,9 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			}
 		}
 	case "message":
-		c.storeRoomMessage(raw)
+		c.storeRoomMessage(raw, true)
 	case "group_message":
-		c.storeGroupMessage(raw)
+		c.storeGroupMessage(raw, true)
 	case "edited":
 		c.storeEditedRoomMessage(raw)
 	case "group_edited":
@@ -990,7 +990,7 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			}
 		}
 	case "dm":
-		c.storeDMMessage(raw)
+		c.storeDMMessage(raw, true)
 	case "dm_left":
 		var dl protocol.DMLeft
 		if err := json.Unmarshal(raw, &dl); err == nil {

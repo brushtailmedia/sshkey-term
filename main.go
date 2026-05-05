@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,6 +28,7 @@ func run() error {
 	portFlag := flag.Int("port", 2222, "server port")
 	keyFlag := flag.String("key", "", "path to Ed25519 SSH key (bypasses wizard)")
 	nameFlag := flag.String("name", "", "server display name")
+	debugFlag := flag.Bool("debug", false, "enable verbose client logs in terminal")
 	flag.Parse()
 
 	configDir := config.DefaultConfigDir()
@@ -91,11 +93,9 @@ func run() error {
 		server.Port = 2222
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelWarn,
-	}))
-
 	dataDir := filepath.Join(configDir, server.Host)
+	logger, closeLogger := buildClientLogger(dataDir, *debugFlag)
+	defer closeLogger()
 
 	clientCfg := client.Config{
 		Host:                     server.Host,
@@ -125,4 +125,29 @@ func run() error {
 
 	_, err = chatProgram.Run()
 	return err
+}
+
+func buildClientLogger(dataDir string, debug bool) (*slog.Logger, func()) {
+	if debug {
+		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})), func() {}
+	}
+
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return slog.New(slog.NewTextHandler(io.Discard, nil)), func() {}
+	}
+
+	logPath := filepath.Join(dataDir, "client.log")
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return slog.New(slog.NewTextHandler(io.Discard, nil)), func() {}
+	}
+
+	logger := slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	}))
+	return logger, func() {
+		_ = f.Close()
+	}
 }

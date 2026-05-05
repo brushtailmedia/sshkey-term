@@ -47,7 +47,9 @@ func (c *Client) pubKeyForUser(userID string) ed25519.PublicKey {
 }
 
 // storeRoomMessage decrypts and stores a room message in the local DB.
-func (c *Client) storeRoomMessage(raw json.RawMessage) {
+// When warnReplay is false, replay high-water checks still run but do not
+// emit WARN logs (used for sync/history catchup where old frames are normal).
+func (c *Client) storeRoomMessage(raw json.RawMessage, warnReplay bool) {
 	if c.store == nil {
 		return
 	}
@@ -68,7 +70,7 @@ func (c *Client) storeRoomMessage(raw json.RawMessage) {
 		body = payload.Body
 		replyTo = payload.ReplyTo
 		mentions = payload.Mentions
-		c.checkReplay(msg.From, payload.DeviceID, msg.Room, "", payload.Seq)
+		c.checkReplay(msg.From, payload.DeviceID, msg.Room, "", payload.Seq, warnReplay)
 
 		for _, a := range payload.Attachments {
 			fileEpoch := a.FileEpoch
@@ -111,7 +113,7 @@ func (c *Client) storeRoomMessage(raw json.RawMessage) {
 // wrapped_key for the new member, so DecryptGroupMessage returns an
 // error and we skip InsertMessage entirely. Mirrors storeReaction's
 // "can't decrypt — don't persist garbage" pattern.
-func (c *Client) storeGroupMessage(raw json.RawMessage) {
+func (c *Client) storeGroupMessage(raw json.RawMessage, warnReplay bool) {
 	if c.store == nil {
 		return
 	}
@@ -128,7 +130,7 @@ func (c *Client) storeGroupMessage(raw json.RawMessage) {
 		return
 	}
 
-	c.checkReplay(msg.From, payload.DeviceID, "", msg.Group, payload.Seq)
+	c.checkReplay(msg.From, payload.DeviceID, "", msg.Group, payload.Seq, warnReplay)
 
 	var attachments []store.StoredAttachment
 	for _, a := range payload.Attachments {
@@ -155,7 +157,7 @@ func (c *Client) storeGroupMessage(raw json.RawMessage) {
 }
 
 // storeDMMessage decrypts and stores a 1:1 DM message in the local DB.
-func (c *Client) storeDMMessage(raw json.RawMessage) {
+func (c *Client) storeDMMessage(raw json.RawMessage, warnReplay bool) {
 	if c.store == nil {
 		return
 	}
@@ -176,7 +178,7 @@ func (c *Client) storeDMMessage(raw json.RawMessage) {
 		body = payload.Body
 		replyTo = payload.ReplyTo
 		mentions = payload.Mentions
-		c.checkReplay(msg.From, payload.DeviceID, "", msg.DM, payload.Seq)
+		c.checkReplay(msg.From, payload.DeviceID, "", msg.DM, payload.Seq, warnReplay)
 
 		for _, a := range payload.Attachments {
 			attachments = append(attachments, store.StoredAttachment{
@@ -515,7 +517,8 @@ func (c *Client) storeReaction(raw json.RawMessage) {
 }
 
 // checkReplay checks for replay attacks using seq high-water marks.
-func (c *Client) checkReplay(sender, deviceID, room, group string, seq int64) {
+// warn controls whether stale/non-monotonic frames should emit a WARN log.
+func (c *Client) checkReplay(sender, deviceID, room, group string, seq int64, warn bool) {
 	if c.store == nil || seq == 0 {
 		return
 	}
@@ -528,16 +531,34 @@ func (c *Client) checkReplay(sender, deviceID, room, group string, seq int64) {
 
 	existing, err := c.store.GetSeqMark(key)
 	if err == nil && seq <= existing {
-		c.logger.Warn("possible replay detected",
-			"sender", sender,
-			"device", deviceID,
-			"seq", seq,
-			"high_water", existing,
-		)
+		if warn && c.logger != nil {
+			c.logger.Warn("possible replay detected",
+				"sender", sender,
+				"device", deviceID,
+				"seq", seq,
+				"high_water", existing,
+			)
+		}
 		return
 	}
 
 	c.store.StoreSeqMark(key, seq)
+}
+
+// handleCatchupMessage persists a message carried inside sync/history catchup.
+// Catchup frames are expected to include older seq values, so replay warnings
+// are suppressed while still enforcing high-water updates.
+func (c *Client) handleCatchupMessage(msgType string, raw json.RawMessage) {
+	switch msgType {
+	case "message":
+		c.storeRoomMessage(raw, false)
+	case "group_message":
+		c.storeGroupMessage(raw, false)
+	case "dm":
+		c.storeDMMessage(raw, false)
+	default:
+		c.handleInternal(msgType, raw)
+	}
 }
 
 // StoreProfile pins a user's key on first encounter, warns on change.

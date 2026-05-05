@@ -156,7 +156,7 @@ func (c *Client) handleSyncBatchKeys(raw json.RawMessage) {
 			continue
 		}
 
-		c.handleInternal(msgType, msgRaw)
+		c.handleCatchupMessage(msgType, msgRaw)
 
 		if c.cfg.OnMessage != nil {
 			c.cfg.OnMessage(msgType, msgRaw)
@@ -197,7 +197,7 @@ func (c *Client) handleHistoryKeys(raw json.RawMessage) {
 		if err != nil {
 			continue
 		}
-		c.handleInternal(msgType, msgRaw)
+		c.handleCatchupMessage(msgType, msgRaw)
 	}
 
 	for _, reactRaw := range result.Reactions {

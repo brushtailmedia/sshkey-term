@@ -104,3 +104,32 @@ func TestPinnedBar_PinsPayloadUsesResolvedDisplayName(t *testing.T) {
 		t.Fatalf("pinned preview From = %q, want Bob", got)
 	}
 }
+
+func TestPinnedBar_CollapsesOnRoomSwitch(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.roomPins = map[string][]string{
+		"room_a": []string{"msg_a1"},
+		"room_b": []string{"msg_b1"},
+	}
+	a.messages.messages = []DisplayMessage{
+		{ID: "msg_a1", From: "alice", Body: "room a", Room: "room_a"},
+		{ID: "msg_b1", From: "bob", Body: "room b", Room: "room_b"},
+	}
+
+	a.messages.SetContext("room_a", "", "")
+	a.onContextSwitch()
+	a.pinnedBar.Toggle() // expanded in room_a
+	if !a.pinnedBar.expanded {
+		t.Fatal("expected pinned bar expanded before switch")
+	}
+
+	a.messages.SetContext("room_b", "", "")
+	a.onContextSwitch()
+
+	if a.pinnedBar.expanded {
+		t.Fatal("pinned bar should collapse on context switch")
+	}
+	if got := a.pinnedBar.PinIDs(); !reflect.DeepEqual(got, []string{"msg_b1"}) {
+		t.Fatalf("room_b pin ids = %v, want [msg_b1]", got)
+	}
+}

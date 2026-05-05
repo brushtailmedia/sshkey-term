@@ -2498,6 +2498,9 @@ func (a *App) onContextSwitch() {
 		a.input.ExitEditMode()
 		a.input.ClearInput()
 	}
+	// Pinned-bar expansion is context-local UX. Collapsing on switch
+	// avoids stealing keyboard focus in the new room/DM/group.
+	a.pinnedBar.expanded = false
 	// (2) Apply the new room's topic (or clear it).
 	if a.client == nil || a.messages.room == "" {
 		a.messages.SetRoomTopic("")
