@@ -415,6 +415,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Ctrl+C is the universal panic-button: ALWAYS quit, regardless
+		// of which modal/overlay has focus. Pre-2026-05-05 the Ctrl+C
+		// handler lived inside the bottom-of-Update key switch, AFTER
+		// every modal-IsVisible() intercept. Modals that didn't include
+		// a "ctrl+c" branch in their own Update (e.g. ConnectFailedModel
+		// — only handles r/c/q/esc) silently dropped the keypress, and
+		// the user reported the app couldn't be quit on connection-error.
+		// Lifted to the very top of the dispatcher so it can never be
+		// swallowed.
+		if msg.Type == tea.KeyCtrlC {
+			if a.client != nil {
+				a.client.Close()
+			}
+			return a, tea.Quit
+		}
+
 		// Connection failed overlay (first-run)
 		if a.connectFailed.IsVisible() {
 			var cmd tea.Cmd
@@ -702,11 +718,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case "ctrl+c":
-			if a.client != nil {
-				a.client.Close()
-			}
-			return a, tea.Quit
+		// ctrl+c is handled at the top of the dispatcher (above every
+		// modal IsVisible check) so it can't be swallowed by any
+		// overlay that lacks its own ctrl+c branch. See the early
+		// return above.
 
 		case "ctrl+q":
 			// Phase 17c Step 5 polish: double-press Ctrl+Q within

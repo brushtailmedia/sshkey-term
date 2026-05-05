@@ -49,6 +49,52 @@ func TestApp_EscDismissesMemberMenu(t *testing.T) {
 	}
 }
 
+// TestApp_CtrlCQuitsThroughConnectFailed pins the user's report
+// (2026-05-05): with the connection-failed overlay visible, Ctrl+C
+// silently failed because connectFailed.Update doesn't have a
+// "ctrl+c" branch (only r/c/q/esc). The fix lifted Ctrl+C handling
+// to the top of App.Update so no modal can swallow it.
+func TestApp_CtrlCQuitsThroughConnectFailed(t *testing.T) {
+	a := App{}
+	a.connectFailed.Show("connection refused", "SHA256:abc", "ssh-ed25519 AAA")
+	if !a.connectFailed.IsVisible() {
+		t.Fatal("precondition: connectFailed should be visible")
+	}
+
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("Ctrl+C should return a tea.Cmd (tea.Quit), got nil")
+	}
+	// We can't easily compare against tea.Quit (it's a function value),
+	// but we can verify it produces a tea.QuitMsg when invoked.
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Errorf("Ctrl+C cmd produced %T, want tea.QuitMsg", msg)
+	}
+}
+
+// TestApp_CtrlCQuitsThroughContextMenu — same pattern, exercising
+// a different overlay to confirm the fix is universal not
+// connectFailed-specific.
+func TestApp_CtrlCQuitsThroughContextMenu(t *testing.T) {
+	a := App{}
+	a.contextMenu = NewContextMenu()
+	a.contextMenu.Show(
+		DisplayMessage{ID: "m1", FromID: "u1", From: "alice", Body: "hi"},
+		5, 5,
+		false, false, false,
+		nil, nil,
+	)
+
+	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("Ctrl+C should return a tea.Cmd (tea.Quit), got nil")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Errorf("Ctrl+C cmd produced %T, want tea.QuitMsg", cmd())
+	}
+}
+
 // TestApp_NonEscRoutesToContextMenuUpdate verifies the App-level
 // Esc handler doesn't accidentally swallow OTHER keys — Up/Down/Enter
 // must still flow through to the menu's Update so navigation works.

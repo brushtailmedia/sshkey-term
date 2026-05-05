@@ -110,7 +110,33 @@ func (c *Client) handleEpochConfirmed(raw json.RawMessage) {
 	)
 }
 
-// handleSyncBatchKeys unwraps and stores epoch keys from a sync batch.
+// handleSyncBatchKeys unwraps and stores epoch keys from a sync batch,
+// then persists every inner message and reaction to the local DB before
+// forwarding them to the UI.
+//
+// 2026-05-05 fix — pre-fix this only stored epoch keys and forwarded
+// inner messages via OnMessage; the storeRoomMessage / storeGroupMessage
+// / storeDMMessage / storeReaction paths in handleInternal were never
+// reached for sync_batch contents. So:
+//
+//   - Sync'd messages lived only in TUI memory (not in the local DB).
+//     Next context switch / restart, they were gone.
+//   - storeReaction's orphan-check (`parent message in DB?`) failed for
+//     every sync'd reaction, since the parent was never stored. The
+//     reaction was silently dropped on the client side.
+//   - The TUI's sync_batch handler still emitted reactions via
+//     AddReactionDecrypted (in-memory) and SyncReactionsForMessage
+//     (clears + reloads from DB). The reload found nothing — the
+//     newly-added in-memory reactions were immediately wiped.
+//
+// Net effect: scrolled-back room reactions appeared to "flash on then
+// disappear" or just never render.
+//
+// Fix: handleInternal each inner message AND each inner reaction. That
+// runs the storage side-effects (decrypt, signature verify, persist)
+// and primes the parent-in-DB check for subsequent reactions. The
+// existing OnMessage forward of inner messages is preserved so the
+// TUI's display-side handlers are unaffected.
 func (c *Client) handleSyncBatchKeys(raw json.RawMessage) {
 	var batch protocol.SyncBatch
 	if err := json.Unmarshal(raw, &batch); err != nil {
@@ -121,20 +147,39 @@ func (c *Client) handleSyncBatchKeys(raw json.RawMessage) {
 		c.storeEpochKey(ek.Room, ek.Epoch, ek.WrappedKey)
 	}
 
-	// Also try to decrypt messages in the batch and forward them
+	// Persist + forward each inner message. Persist FIRST so a
+	// reaction in the same batch (same iteration of the read loop)
+	// finds its parent when storeReaction's orphan check runs.
 	for _, msgRaw := range batch.Messages {
 		msgType, err := protocol.TypeOf(msgRaw)
 		if err != nil {
 			continue
 		}
 
+		c.handleInternal(msgType, msgRaw)
+
 		if c.cfg.OnMessage != nil {
 			c.cfg.OnMessage(msgType, msgRaw)
 		}
 	}
+
+	// Persist reactions. The TUI's sync_batch handler iterates
+	// batch.Reactions itself for display, so we don't need to forward
+	// them via OnMessage — only the storage side is missing.
+	for _, reactRaw := range batch.Reactions {
+		c.handleInternal("reaction", reactRaw)
+	}
 }
 
-// handleHistoryKeys unwraps epoch keys from a history result.
+// handleHistoryKeys unwraps epoch keys from a history result and
+// persists the inner messages + reactions to the local DB, mirroring
+// handleSyncBatchKeys for the same reason. See that function's
+// doc-comment for the bug history.
+//
+// Unlike sync_batch, history_result inner items are NOT forwarded via
+// OnMessage — the TUI receives the outer history_result and unmarshals
+// the inner Messages/Reactions itself for display. This function only
+// adds the storage side of the equation.
 func (c *Client) handleHistoryKeys(raw json.RawMessage) {
 	var result protocol.HistoryResult
 	if err := json.Unmarshal(raw, &result); err != nil {
@@ -143,6 +188,20 @@ func (c *Client) handleHistoryKeys(raw json.RawMessage) {
 
 	for _, ek := range result.EpochKeys {
 		c.storeEpochKey(ek.Room, ek.Epoch, ek.WrappedKey)
+	}
+
+	// Persist inner messages first so the orphan check in
+	// storeReaction passes when reactions are processed below.
+	for _, msgRaw := range result.Messages {
+		msgType, err := protocol.TypeOf(msgRaw)
+		if err != nil {
+			continue
+		}
+		c.handleInternal(msgType, msgRaw)
+	}
+
+	for _, reactRaw := range result.Reactions {
+		c.handleInternal("reaction", reactRaw)
 	}
 }
 
