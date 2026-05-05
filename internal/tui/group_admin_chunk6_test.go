@@ -343,13 +343,57 @@ func TestParseGroupcreateArgs_Empty(t *testing.T) {
 // --- Input parser coverage for new commands ---
 
 func TestInputParser_AuditMembersAdminsRouteToAppWithGroup(t *testing.T) {
-	for _, cmd := range []string{"/audit", "/members", "/admins"} {
+	for _, cmd := range []string{"/audit", "/admins"} {
 		i := &InputModel{}
 		i.handleCommand(cmd, nil, "", "group_x", "")
 		sc := i.PendingCommand()
 		if sc == nil || sc.Command != cmd || sc.Group != "group_x" {
 			t.Errorf("%s should route with group, got %+v", cmd, sc)
 		}
+	}
+}
+
+func TestInputParser_MembersRoutesToAppInAnyContext(t *testing.T) {
+	contexts := []struct {
+		name        string
+		room, group string
+		dm          string
+	}{
+		{name: "room", room: "room_x"},
+		{name: "group", group: "group_x"},
+		{name: "dm", dm: "dm_x"},
+	}
+	for _, tc := range contexts {
+		t.Run(tc.name, func(t *testing.T) {
+			i := &InputModel{}
+			i.handleCommand("/members", nil, tc.room, tc.group, tc.dm)
+			sc := i.PendingCommand()
+			if sc == nil || sc.Command != "/members" {
+				t.Fatalf("/members should route in %s context, got %+v", tc.name, sc)
+			}
+		})
+	}
+}
+
+func TestInputParser_InfoRoutesToAppInAnyContext(t *testing.T) {
+	contexts := []struct {
+		name        string
+		room, group string
+		dm          string
+	}{
+		{name: "room", room: "room_x"},
+		{name: "group", group: "group_x"},
+		{name: "dm", dm: "dm_x"},
+	}
+	for _, tc := range contexts {
+		t.Run(tc.name, func(t *testing.T) {
+			i := &InputModel{}
+			i.handleCommand("/info", nil, tc.room, tc.group, tc.dm)
+			sc := i.PendingCommand()
+			if sc == nil || sc.Command != "/info" {
+				t.Fatalf("/info should route in %s context, got %+v", tc.name, sc)
+			}
+		})
 	}
 }
 
@@ -362,11 +406,19 @@ func TestInputParser_AuditCarriesNumericArg(t *testing.T) {
 	}
 }
 
-func TestInputParser_AuditOutsideGroupDropped(t *testing.T) {
+func TestInputParser_AuditOutsideGroupRoutesToApp(t *testing.T) {
 	i := &InputModel{}
 	i.handleCommand("/audit", nil, "room_x", "", "")
-	if sc := i.PendingCommand(); sc != nil {
-		t.Errorf("/audit in room context should drop, got %+v", sc)
+	if sc := i.PendingCommand(); sc == nil || sc.Command != "/audit" {
+		t.Errorf("/audit in room context should route, got %+v", sc)
+	}
+}
+
+func TestInputParser_AdminsOutsideGroupRoutesToApp(t *testing.T) {
+	i := &InputModel{}
+	i.handleCommand("/admins", nil, "room_x", "", "")
+	if sc := i.PendingCommand(); sc == nil || sc.Command != "/admins" {
+		t.Errorf("/admins in room context should route, got %+v", sc)
 	}
 }
 

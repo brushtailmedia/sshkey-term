@@ -89,7 +89,7 @@ type App struct {
 	transferConfirm TransferConfirmModel
 	// Attachment save-as dialog (post-v0.2.0 image fix follow-up)
 	saveAttachment SaveAttachmentModel
-	// Phase 14 read-only overlays (/audit, /members, /admins)
+	// Phase 14 read-only overlays (/audit, /admins)
 	auditOverlay   AuditOverlayModel
 	membersOverlay MembersOverlayModel
 	// Phase 14 last-admin inline promote picker — shown when the
@@ -816,7 +816,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+m":
 			a.memberPanel.Toggle()
 			if a.memberPanel.IsVisible() {
-				a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
+				a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online)
 				// Request actual room membership from server (lazy)
 				if a.messages.room != "" && a.client != nil {
 					a.client.RequestRoomMembers(a.messages.room)
@@ -855,18 +855,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 
 		case "ctrl+i":
-			if a.client != nil {
-				if a.messages.room != "" {
-					a.infoPanel.ShowRoom(a.messages.room, a.client, a.sidebar.online)
-					// Request actual room membership from server (lazy)
-					a.client.RequestRoomMembers(a.messages.room)
-				} else if a.messages.group != "" {
-					a.infoPanel.ShowGroup(a.messages.group, a.client, a.sidebar.online)
-				} else if a.messages.dm != "" {
-					a.infoPanel.ShowDM(a.messages.dm, a.client, a.sidebar.online)
-				}
-			}
+			a.showInfoPanelForContext(a.messages.room, a.messages.group, a.messages.dm)
 			return a, nil
+
+		case "i":
+			// Alternative to Ctrl+I for terminals/tmux setups where Ctrl+I
+			// is captured (or conflated with Tab). Keep this scoped to the
+			// messages pane so normal typing in the input field is unaffected.
+			if a.focus == FocusMessages {
+				a.showInfoPanelForContext(a.messages.room, a.messages.group, a.messages.dm)
+				return a, nil
+			}
+			// Not in messages focus: let the key continue to normal handlers
+			// (notably the input field) instead of swallowing typed "i".
 
 		case "ctrl+n":
 			// Get all known user names from profiles
@@ -929,13 +930,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 
 		case "esc":
-			// Phase 15: Esc in input-focus edit mode cancels the in-progress
-			// edit (clear buffer + exit edit state) rather than only changing
-			// panel focus. This branch must run before the generic focus reset
-			// to avoid leaving the input in zombie edit mode.
-			if a.focus == FocusInput && a.input.IsEditing() {
-				a.input.ExitEditMode()
-				a.input.ClearInput()
+			// Esc in input focus cancels compose state (reply/edit/draft)
+			// instead of being swallowed as a no-op. Outside input focus,
+			// Esc returns focus to the input panel.
+			if a.focus == FocusInput {
+				if a.input.IsEditing() || a.input.IsReplying() || !a.input.IsEmpty() {
+					a.input.ResetComposeState()
+				}
 				return a, nil
 			}
 			a.focus = FocusInput
@@ -959,7 +960,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.syncPinnedBarForContext()
 				a.refreshMessageContent()
 				if a.memberPanel.IsVisible() {
-					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
+					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online)
 					if a.messages.room != "" && a.client != nil {
 						a.client.RequestRoomMembers(a.messages.room)
 					}
@@ -1171,16 +1172,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the input. Future: could open an inline prompt.
 			a.statusBar.SetError("Use /add @user to add a new member to this group")
 		case "menu":
-			// Open MemberMenu via keyboard (Enter on a member in the panel).
-			// Same options as right-click: message, create_group, verify,
-			// profile. Anchor at the member panel's top-left so the
-			// overlay pops up over the panel rather than down at screen
-			// origin — consistent with where mouse-clicks anchor it.
+			// Open MemberMenu for the currently selected member. Mouse
+			// clicks in the member pane only move selection; Enter is the
+			// explicit action that opens this menu.
+			// Anchor at the member panel's top-left so the overlay pops up
+			// over the panel rather than down at screen origin.
 			layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
 			a.memberMenu.Show(msg.User, a.resolveDisplayName(msg.User), layout.MemberX0+1, layout.MemberY0+2)
 		case "message":
 			if a.client != nil {
-				a.client.CreateGroup([]string{msg.User}, "")
+				if msg.User == a.client.UserID() {
+					a.statusBar.SetError("Cannot create a DM with yourself")
+					break
+				}
+				if err := a.client.CreateDM(msg.User); err != nil {
+					a.statusBar.SetError("Create DM failed: " + err.Error())
+				}
 			}
 		case "create_group":
 			if a.client != nil {
@@ -1832,7 +1839,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Msg.FromID != "" {
 				from = a.resolveDisplayName(msg.Msg.FromID)
 			}
-			a.input.SetReply(msg.Msg.ID, from+": "+preview)
+			a.input.SetReplyContext(msg.Msg.ID, from+": "+preview, msg.Msg.Room, msg.Msg.Group, msg.Msg.DM)
 			a.focus = FocusInput
 		case "delete":
 			if a.client != nil && (msg.Msg.FromID == a.client.UserID() || a.client.IsAdmin()) {
@@ -2044,7 +2051,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.syncPinnedBarForContext()
 			a.refreshMessageContent()
 			// Set up member list for @completion
-			a.memberPanel.Refresh(a.client.Rooms()[0], "", a.client, a.sidebar.online)
+			a.memberPanel.Refresh(a.client.Rooms()[0], "", "", a.client, a.sidebar.online)
 			a.input.SetMembers(a.activeMemberEntries())
 			a.input.SetNonMembers(a.activeNonMemberEntries())
 		}
@@ -2325,7 +2332,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				a.syncPinnedBarForContext()
 				a.refreshMessageContent()
 				if a.memberPanel.IsVisible() {
-					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
+					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online)
 					if a.messages.room != "" && a.client != nil {
 						a.client.RequestRoomMembers(a.messages.room)
 					}
@@ -2403,9 +2410,6 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			idx := layout.MemberItemAt(y)
 			if idx >= 0 && idx < len(a.memberPanel.members) {
 				a.memberPanel.cursor = idx
-				// Show member context menu
-				user := a.memberPanel.members[idx].User
-				a.memberMenu.Show(user, a.resolveDisplayName(user), x, y)
 			}
 		}
 
@@ -2466,13 +2470,10 @@ func (a *App) setUnreadDividerAfter(lastReadID string) {
 //
 // Side effects in order:
 //
-//  1. **Exit edit mode** if the user had a half-finished edit in the
-//     previous context. Dispatching that edit after a context switch
-//     would either land in the wrong conversation (if the new context
-//     is active) or silently no-op (if the new context is empty),
-//     both of which are bad user experience. The buffer is cleared
-//     along with the edit flag so the user doesn't ship an orphaned
-//     body on their next keystroke. Phase 15.
+//  1. **Clear compose state** from the previous context: draft text,
+//     reply target, and edit mode. Without this, reply/edit metadata
+//     can leak across context boundaries (room/group/DM), causing sends
+//     to carry stale intent into the wrong conversation.
 //
 //  2. **Apply the new room's topic** (or clear it in non-room
 //     contexts). Reads from the local DB via
@@ -2485,19 +2486,17 @@ func (a *App) setUnreadDividerAfter(lastReadID string) {
 //     line only until the next context switch. Phase 18.
 //
 // This helper REPLACES the older `applyRoomTopic` — which only ran
-// the topic-resolution step and had edit-mode cleanup piggybacked
-// onto it. Piggybacking was a bug waiting to happen because the
+// the topic-resolution step and had partial compose cleanup piggybacked
+// onto it. That was a bug waiting to happen because the
 // cleared-context call sites (`SetContext("", "", "")` for a deleted
 // or retired room, left group, etc.) never called `applyRoomTopic`,
-// so edit mode was left hanging with a stale target in a
-// now-non-existent context.  Every SetContext site now calls this
+// so compose state could be left hanging with stale targets in a
+// now-non-existent context. Every SetContext site now calls this
 // single helper, which closes the gap.
 func (a *App) onContextSwitch() {
-	// (1) Exit edit mode on every context switch.
-	if a.input.IsEditing() {
-		a.input.ExitEditMode()
-		a.input.ClearInput()
-	}
+	// (1) Clear compose state on every context switch. This prevents
+	// draft/reply/edit carry-over across rooms/groups/DMs.
+	a.input.ResetComposeState()
 	// Pinned-bar expansion is context-local UX. Collapsing on switch
 	// avoids stealing keyboard focus in the new room/DM/group.
 	a.pinnedBar.expanded = false
@@ -2765,7 +2764,7 @@ func (a *App) switchToSidebarSelection() {
 	a.syncPinnedBarForContext()
 	a.refreshMessageContent()
 	if a.memberPanel.IsVisible() {
-		a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
+		a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online)
 		if a.messages.room != "" && a.client != nil {
 			a.client.RequestRoomMembers(a.messages.room)
 		}
@@ -2773,6 +2772,61 @@ func (a *App) switchToSidebarSelection() {
 		a.input.SetNonMembers(a.activeNonMemberEntries())
 	}
 	a.sendReadReceipt()
+}
+
+func (a *App) showInfoPanelForContext(room, group, dm string) {
+	if a.client == nil {
+		return
+	}
+	if room != "" {
+		a.infoPanel.ShowRoom(room, a.client, a.sidebar.online)
+		// Request actual room membership from server (lazy).
+		if a.client.Enc() != nil {
+			_ = a.client.RequestRoomMembers(room)
+		}
+		return
+	}
+	if group != "" {
+		a.infoPanel.ShowGroup(group, a.client, a.sidebar.online)
+		return
+	}
+	if dm != "" {
+		a.infoPanel.ShowDM(dm, a.client, a.sidebar.online)
+		return
+	}
+	a.statusBar.SetError("No active room, group, or DM")
+}
+
+func (a *App) showMemberPanelForContext(room, group, dm string) {
+	if a.client == nil {
+		a.statusBar.SetError("/members unavailable - not connected")
+		return
+	}
+	if room == "" && group == "" && dm == "" {
+		a.statusBar.SetError("No active room, group, or DM")
+		return
+	}
+	// /members is a toggle: close when already open.
+	if a.memberPanel.IsVisible() {
+		a.memberPanel.Toggle()
+		if a.focus == FocusMembers {
+			a.focus = FocusMessages
+			a.memberPanel.SetFocused(false)
+		}
+		a.refreshMessageContent()
+		return
+	}
+	a.memberPanel.Toggle()
+	a.memberPanel.Refresh(room, group, dm, a.client, a.sidebar.online)
+	if room != "" {
+		if a.client.Enc() != nil {
+			_ = a.client.RequestRoomMembers(room)
+		}
+	}
+	a.input.SetMembers(a.activeMemberEntries())
+	a.input.SetNonMembers(a.activeNonMemberEntries())
+	// Member panel visibility changes pane widths; re-wrap content.
+	a.refreshMessageContent()
 }
 
 // activeMemberNames returns the member list for @completion, excluding
@@ -3139,15 +3193,12 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		a.handleGroupAdminCommand(sc)
 	case "/whoami":
 		a.handleWhoamiCommand(sc)
-	case "/groupinfo":
-		if sc.Group == "" || a.client == nil {
-			return
-		}
-		a.infoPanel.ShowGroup(sc.Group, a.client, a.sidebar.online)
+	case "/groupinfo", "/info":
+		a.showInfoPanelForContext(sc.Room, sc.Group, sc.DM)
 	case "/audit":
 		a.handleAuditCommand(sc)
 	case "/members":
-		a.handleMembersOverlayCommand(sc, false)
+		a.showMemberPanelForContext(sc.Room, sc.Group, sc.DM)
 	case "/admins":
 		a.handleMembersOverlayCommand(sc, true)
 	case "/role":
@@ -3193,7 +3244,12 @@ func (a *App) handleTopicCommand(sc *SlashCommandMsg) {
 // for the current group. Default N is 10; user can override with
 // /audit 50 for a longer view.
 func (a *App) handleAuditCommand(sc *SlashCommandMsg) {
-	if sc.Group == "" || a.client == nil {
+	if sc.Group == "" {
+		a.statusBar.SetError("/audit only works inside a group DM")
+		return
+	}
+	if a.client == nil {
+		a.statusBar.SetError("/audit unavailable - not connected")
 		return
 	}
 	limit := 10
@@ -3219,12 +3275,17 @@ func (a *App) handleAuditCommand(sc *SlashCommandMsg) {
 	a.auditOverlay.Show(sc.Group, groupName, events, a.resolveDisplayName)
 }
 
-// handleMembersOverlayCommand opens the /members (all) or /admins
-// (filtered) overlay for the current group. Reads from the client's
+// handleMembersOverlayCommand opens the /admins (filtered) overlay for the
+// current group. Reads from the client's
 // in-memory groupMembers + groupAdmins maps at Show time; the
 // overlay is one-shot and doesn't update live.
 func (a *App) handleMembersOverlayCommand(sc *SlashCommandMsg, adminsOnly bool) {
-	if sc.Group == "" || a.client == nil {
+	if sc.Group == "" {
+		a.statusBar.SetError(sc.Command + " only works inside a group DM")
+		return
+	}
+	if a.client == nil {
+		a.statusBar.SetError(sc.Command + " unavailable - not connected")
 		return
 	}
 	members := a.client.GroupMembers(sc.Group)
@@ -4839,7 +4900,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		if m.Code == "unknown_group" && a.messages.group != "" {
 			if st := a.client.Store(); st != nil {
 				if !st.IsGroupLeft(a.messages.group) {
-					a.statusBar.SetError("Your admin status may have changed — try /groupinfo to refresh")
+					a.statusBar.SetError("Your admin status may have changed — try /info to refresh")
 				}
 			}
 		}
@@ -4855,6 +4916,15 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 func (a App) View() string {
 	if a.width == 0 || a.height == 0 {
 		return "Loading..."
+	}
+
+	// Connect-failed overlay takes precedence over the err+!connected
+	// raw-error fallback below. ErrMsg sets a.err AND calls
+	// connectFailed.Show() on first-time auth failures, and we want
+	// the guided overlay (with copy-key, retry, and pending-approval
+	// framing) to render rather than the raw SSH library error.
+	if a.connectFailed.IsVisible() {
+		return a.connectFailed.View(a.width)
 	}
 
 	if a.err != nil && !a.connected {
@@ -4967,9 +5037,6 @@ func (a App) View() string {
 	}
 	if a.emojiPicker.IsVisible() {
 		return a.emojiPicker.View()
-	}
-	if a.connectFailed.IsVisible() {
-		return a.connectFailed.View(a.width)
 	}
 	if a.pendingPanel.IsVisible() {
 		return a.pendingPanel.View(a.width)

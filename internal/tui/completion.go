@@ -8,16 +8,16 @@ import (
 
 var (
 	completionStyle = lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7C3AED")).
-		Padding(0, 1)
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#7C3AED")).
+			Padding(0, 1)
 
 	completionSelectedStyle = lipgloss.NewStyle().
-		Background(lipgloss.Color("#7C3AED")).
-		Foreground(lipgloss.Color("#FFFFFF"))
+				Background(lipgloss.Color("#7C3AED")).
+				Foreground(lipgloss.Color("#FFFFFF"))
 
 	completionDescStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#64748B"))
+				Foreground(lipgloss.Color("#64748B"))
 )
 
 // CompletionItem is a single completion suggestion.
@@ -200,10 +200,11 @@ func completeCommands(prefix string) *CompletionModel {
 		{Text: "/demote ", Display: "/demote", Description: "demote from admin"},
 		{Text: "/transfer ", Display: "/transfer", Description: "promote + leave"},
 		// Phase 14 status commands
-		{Text: "/members", Display: "/members", Description: "list members"},
+		{Text: "/members", Display: "/members", Description: "open member panel"},
 		{Text: "/admins", Display: "/admins", Description: "list admins"},
 		{Text: "/role ", Display: "/role", Description: "show user's role"},
 		{Text: "/whoami", Display: "/whoami", Description: "show your role"},
+		{Text: "/info", Display: "/info", Description: "open info panel"},
 		{Text: "/groupinfo", Display: "/groupinfo", Description: "group info panel"},
 		{Text: "/audit", Display: "/audit", Description: "recent admin actions"},
 		{Text: "/undo", Display: "/undo", Description: "revert last kick (30s)"},

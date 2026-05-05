@@ -1,0 +1,5 @@
+./group_admin.go
+./keys.go
+./messages.go
+./room_events.go
+./store.go

@@ -64,6 +64,21 @@ func TestSidebar_RoomLeftButNotRetiredShowsLeft(t *testing.T) {
 	}
 }
 
+// TestSidebar_RoomLeftMarkerVisibleWhenNameIsLong ensures status markers stay
+// visible even when names are long enough to truncate in narrow sidebar widths.
+func TestSidebar_RoomLeftMarkerVisibleWhenNameIsLong(t *testing.T) {
+	s := NewSidebar()
+	roomID := "room_with_a_very_long_name_that_must_be_truncated"
+	s.SetRooms([]string{roomID})
+	s.MarkRoomLeft(roomID)
+
+	// Sidebar width in app layout is 20, so content width is 18.
+	view := s.View(20, 20, false)
+	if !strings.Contains(view, "(left)") {
+		t.Errorf("left marker should remain visible after truncation, got:\n%s", view)
+	}
+}
+
 // TestSidebar_ActiveRoomNoMarker verifies an active, unread room renders
 // without any state markers.
 func TestSidebar_ActiveRoomNoMarker(t *testing.T) {

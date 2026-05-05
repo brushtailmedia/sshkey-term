@@ -82,23 +82,45 @@ func (c ConnectFailedModel) View(width int) string {
 		return ""
 	}
 
+	// The server returns "account retired" for retired logins and
+	// "key not authorized" for everything else (unknown / pending /
+	// blocked fingerprints). The client can't distinguish pending
+	// from blocked on the wire — both surface as the same generic
+	// rejection — so we frame the common case (new user, queued for
+	// approval) and branch separately for the retired case where
+	// retry will not help.
+	retired := strings.Contains(c.errMsg, "account retired")
+
 	var b strings.Builder
-	b.WriteString(searchHeaderStyle.Render(" Connection Failed"))
-	b.WriteString("\n\n")
-	b.WriteString("  The server rejected your key.\n")
-	b.WriteString("  Your admin may not have added you yet,\n")
-	b.WriteString("  or the account may have been retired.\n\n")
+	if retired {
+		b.WriteString(searchHeaderStyle.Render(" Account Retired"))
+		b.WriteString("\n\n")
+		b.WriteString("  This account has been retired by the server\n")
+		b.WriteString("  operator. Logins are no longer accepted.\n\n")
+		b.WriteString("  If you believe this is in error, contact the\n")
+		b.WriteString("  server operator out of band.\n\n")
+	} else {
+		b.WriteString(searchHeaderStyle.Render(" Pending Approval"))
+		b.WriteString("\n\n")
+		b.WriteString("  Your key isn't authorized on this server yet.\n")
+		b.WriteString("  Your fingerprint has been added to the server's\n")
+		b.WriteString("  pending-keys queue. Send your public key (below)\n")
+		b.WriteString("  to the server operator and ask them to approve it.\n\n")
+		b.WriteString("  Once approved, press [r] to retry.\n\n")
+	}
 
 	b.WriteString("  Fingerprint:\n")
 	b.WriteString("  " + searchHeaderStyle.Render(c.fingerprint) + "\n\n")
 
 	if c.pubKey != "" {
-		display := c.pubKey
-		if len(display) > 50 {
-			display = display[:50] + "..."
-		}
+		// Render the FULL key — lipgloss wraps to the dialog width.
+		// Truncating with "..." was hostile UX: if the OSC 52 copy
+		// fails (common in tmux without passthrough or in terminals
+		// that don't support OSC 52), the user has nothing to fall
+		// back on. Showing the full key lets them mouse-select-copy
+		// or transcribe manually as a last resort.
 		b.WriteString("  Public key:\n")
-		b.WriteString("  " + helpDescStyle.Render(display) + "\n\n")
+		b.WriteString("  " + helpDescStyle.Render(c.pubKey) + "\n\n")
 	}
 
 	b.WriteString("  " + searchHeaderStyle.Render("[r]") + " Retry connection\n")

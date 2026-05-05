@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
@@ -13,27 +14,27 @@ import (
 
 var (
 	sidebarStyle = lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#64748B"))
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#64748B"))
 
 	sidebarFocusedStyle = lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7C3AED"))
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#7C3AED"))
 
 	sidebarHeaderStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#64748B"))
+				Bold(true).
+				Foreground(lipgloss.Color("#64748B"))
 
 	selectedStyle = lipgloss.NewStyle().
-		Background(lipgloss.Color("#7C3AED")).
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Bold(true)
+			Background(lipgloss.Color("#7C3AED")).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Bold(true)
 
 	unreadStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#7C3AED")).
-		Bold(true)
+			Foreground(lipgloss.Color("#7C3AED")).
+			Bold(true)
 
-	onlineDot = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render("●")
+	onlineDot  = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render("●")
 	offlineDot = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B")).Render("○")
 
 	// archivedStyle greys out sidebar entries for rooms/conversations the
@@ -50,22 +51,22 @@ var (
 
 // SidebarModel manages the sidebar panel.
 type SidebarModel struct {
-	rooms         []string
-	groups        []protocol.GroupInfo
-	dms           []protocol.DMInfo
-	unread        map[string]int    // room/group/dm -> count
-	online        map[string]bool   // user -> online
-	retired       map[string]bool   // user -> retired
-	leftGroups    map[string]bool   // group ID -> user has left (archived, read-only)
-	leftRooms     map[string]bool   // room ID -> user has left (archived, read-only)
-	retiredRooms  map[string]bool   // room ID -> room was retired by an admin (archived, read-only)
-	cursor        int               // position in the combined list
-	selectedRoom  string
-	selectedGroup string
-	selectedDM    string
-	resolveName       func(string) string // user nanoid → display name (set by App)
-	resolveRoomName   func(string) string // room nanoid → display name (set by App)
-	resolveVerified   func(string) bool   // user nanoid → safety-number verified flag (set by App)
+	rooms           []string
+	groups          []protocol.GroupInfo
+	dms             []protocol.DMInfo
+	unread          map[string]int  // room/group/dm -> count
+	online          map[string]bool // user -> online
+	retired         map[string]bool // user -> retired
+	leftGroups      map[string]bool // group ID -> user has left (archived, read-only)
+	leftRooms       map[string]bool // room ID -> user has left (archived, read-only)
+	retiredRooms    map[string]bool // room ID -> room was retired by an admin (archived, read-only)
+	cursor          int             // position in the combined list
+	selectedRoom    string
+	selectedGroup   string
+	selectedDM      string
+	resolveName     func(string) string // user nanoid → display name (set by App)
+	resolveRoomName func(string) string // room nanoid → display name (set by App)
+	resolveVerified func(string) bool   // user nanoid → safety-number verified flag (set by App)
 	// Phase 14: resolveIsLocalAdmin returns true if the local user is
 	// currently an admin of the given group. Reads authoritative state
 	// from the client layer's in-memory admin set (which is updated
@@ -74,12 +75,12 @@ type SidebarModel struct {
 	// If nil, the sidebar falls back to checking GroupInfo.Admins
 	// from its cached slice (which only refreshes on group_list).
 	resolveIsLocalAdmin func(string) bool
-	selfUserID          string              // the current user's ID (for DM "other party" resolve)
+	selfUserID          string // the current user's ID (for DM "other party" resolve)
 
 	// For message forwarding (set by App)
 	msgCh         chan ServerMsg
 	errCh         chan error
-	keyWarnCh     chan KeyChangeEvent     // Phase 21 F3.a
+	keyWarnCh     chan KeyChangeEvent       // Phase 21 F3.a
 	attachReadyCh chan AttachmentReadyEvent // auto-preview image downloads
 }
 
@@ -436,8 +437,73 @@ func (s *SidebarModel) updateSelection() {
 	}
 }
 
+// fitSidebarLine composes a one-line sidebar row while preserving the suffix
+// (state markers like "(left)" / "(retired)" / unread counts). It truncates
+// the name segment first so important state remains visible in narrow widths.
+func fitSidebarLine(prefix, name, suffix string, contentWidth int) string {
+	if contentWidth < 1 {
+		return ""
+	}
+	fixed := ansi.StringWidth(prefix) + ansi.StringWidth(suffix)
+	nameBudget := contentWidth - fixed
+	if nameBudget < 0 {
+		return ansi.Truncate(prefix+suffix, contentWidth, "")
+	}
+	truncTail := ""
+	if nameBudget >= 3 {
+		truncTail = "..."
+	}
+	namePart := ansi.Truncate(name, nameBudget, truncTail)
+	line := prefix + namePart + suffix
+	return ansi.Truncate(line, contentWidth, "")
+}
+
+// fitSidebarLinePreferName is used for DM rows where the contact identity is
+// the primary affordance. It ensures some portion of the name remains visible
+// by trimming suffix badges first when space is tight.
+func fitSidebarLinePreferName(prefix, name, suffix string, contentWidth int) string {
+	if contentWidth < 1 {
+		return ""
+	}
+	prefixWidth := ansi.StringWidth(prefix)
+	if prefixWidth >= contentWidth {
+		return ansi.Truncate(prefix, contentWidth, "")
+	}
+	available := contentWidth - prefixWidth
+	if name == "" {
+		return ansi.Truncate(prefix+suffix, contentWidth, "")
+	}
+
+	// Keep at least one visible name cell when there is room, trimming
+	// suffix badges first so DM rows don't collapse to a bare status dot.
+	maxSuffixWidth := available - 1
+	if maxSuffixWidth < 0 {
+		maxSuffixWidth = 0
+	}
+	suffixPart := suffix
+	if ansi.StringWidth(suffixPart) > maxSuffixWidth {
+		suffixPart = ansi.Truncate(suffixPart, maxSuffixWidth, "")
+	}
+	nameBudget := available - ansi.StringWidth(suffixPart)
+	if nameBudget < 1 {
+		nameBudget = available
+		suffixPart = ""
+	}
+	truncTail := ""
+	if nameBudget >= 3 {
+		truncTail = "..."
+	}
+	namePart := ansi.Truncate(name, nameBudget, truncTail)
+	line := prefix + namePart + suffixPart
+	return ansi.Truncate(line, contentWidth, "")
+}
+
 func (s SidebarModel) View(width, height int, focused bool) string {
 	var b strings.Builder
+	contentWidth := width - 2
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
 
 	// Rooms header
 	b.WriteString(sidebarHeaderStyle.Render(" Rooms"))
@@ -450,19 +516,20 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 		}
 		isLeft := s.leftRooms[room]
 		isRetired := s.retiredRooms[room]
-		line := " # " + displayName
+		suffix := ""
 		// Retired takes visual priority over left — a retired room is
 		// archived for everyone, whereas left is user-specific. Show the
 		// more "permanent" label so users know re-adding them to the
 		// room isn't possible.
 		if isRetired {
-			line += " " + helpDescStyle.Render("(retired)")
+			suffix += " " + helpDescStyle.Render("(retired)")
 		} else if isLeft {
-			line += " " + helpDescStyle.Render("(left)")
+			suffix += " " + helpDescStyle.Render("(left)")
 		}
 		if count, ok := s.unread[room]; ok && count > 0 && !isLeft && !isRetired {
-			line += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
+			suffix += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
 		}
+		line := fitSidebarLine(" # ", displayName, suffix, contentWidth)
 
 		// Grey out archived rooms (left or retired)
 		if isLeft || isRetired {
@@ -470,7 +537,7 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 		}
 
 		if i == s.cursor && focused {
-			line = selectedStyle.Width(width - 2).Render(line)
+			line = selectedStyle.Width(contentWidth).Render(line)
 		}
 
 		b.WriteString(line)
@@ -495,9 +562,6 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 				names = append(names, displayName)
 			}
 			name = strings.Join(names, ", ")
-			if len(name) > width-6 {
-				name = name[:width-9] + "..."
-			}
 		}
 
 		dot := offlineDot
@@ -534,22 +598,23 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 			}
 		}
 
-		line := " " + dot + " "
+		prefix := " " + dot + " "
 		if isLocalAdmin && !isLeft {
 			// Muted star before the group name. Using the same
 			// helpDescStyle as the bracket markers for consistency.
-			line += helpDescStyle.Render("★") + " "
+			prefix += helpDescStyle.Render("★") + " "
 		}
-		line += name
+		suffix := ""
 		if anyRetired {
-			line += " " + helpDescStyle.Render("[retired]")
+			suffix += " " + helpDescStyle.Render("[retired]")
 		}
 		if isLeft {
-			line += " " + helpDescStyle.Render("(left)")
+			suffix += " " + helpDescStyle.Render("(left)")
 		}
 		if count, ok := s.unread[g.ID]; ok && count > 0 && !isLeft {
-			line += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
+			suffix += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
 		}
+		line := fitSidebarLine(prefix, name, suffix, contentWidth)
 
 		// Grey out archived groups
 		if isLeft {
@@ -558,7 +623,7 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 
 		idx := len(s.rooms) + i
 		if idx == s.cursor && focused {
-			line = selectedStyle.Width(width - 2).Render(line)
+			line = selectedStyle.Width(contentWidth).Render(line)
 		}
 
 		b.WriteString(line)
@@ -593,20 +658,22 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 				dot = onlineDot
 			}
 
-			line := " " + dot + " " + name
+			prefix := " " + dot + " "
+			suffix := ""
 			if other != "" && s.resolveVerified != nil && s.resolveVerified(other) {
-				line += " " + verifiedMarker
+				suffix += " " + verifiedMarker
 			}
 			if s.retired[other] {
-				line += " " + helpDescStyle.Render("[retired]")
+				suffix += " " + helpDescStyle.Render("[retired]")
 			}
 			if count, ok := s.unread[dm.ID]; ok && count > 0 {
-				line += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
+				suffix += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
 			}
+			line := fitSidebarLinePreferName(prefix, name, suffix, contentWidth)
 
 			idx := len(s.rooms) + len(s.groups) + i
 			if idx == s.cursor && focused {
-				line = selectedStyle.Width(width - 2).Render(line)
+				line = selectedStyle.Width(contentWidth).Render(line)
 			}
 
 			b.WriteString(line)

@@ -55,10 +55,10 @@ type WizardModel struct {
 	keyCursor int
 
 	// Key generation
-	genPathInput   textinput.Model
-	genPassInput   textinput.Model
-	genConfirm     textinput.Model
-	genFocused     int // 0=path, 1=pass, 2=confirm
+	genPathInput textinput.Model
+	genPassInput textinput.Model
+	genConfirm   textinput.Model
+	genFocused   int // 0=path, 1=pass, 2=confirm
 
 	// Phase 16 Gap 4: zxcvbn warn-and-confirm state. When the user
 	// submits a borderline passphrase (warn tier), we display the
@@ -81,9 +81,9 @@ type WizardModel struct {
 	exportInput textinput.Model
 
 	// Server
-	serverInputs []textinput.Model
+	serverInputs  []textinput.Model
 	serverFocused int
-	serverLabels []string
+	serverLabels  []string
 
 	// Key fingerprint (set after selection/generation)
 	keyFingerprint string
@@ -253,9 +253,13 @@ func (w WizardModel) updateKeySelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				w.err = "Only Ed25519 keys are supported. Select another or generate a new one."
 				return w, nil
 			}
-			w.result.KeyPath = key.Path
-			w.keyFingerprint = w.computeFingerprint(key.Path)
-			w.embedNameInPubKey(key.Path)
+			managedPath, fingerprint, err := w.copyKeyToManagedStoreAndRewriteName(key.Path)
+			if err != nil {
+				w.err = err.Error()
+				return w, nil
+			}
+			w.result.KeyPath = managedPath
+			w.keyFingerprint = fingerprint
 			w.err = ""
 			w.step = WizardBackup
 		} else if w.keyCursor == len(w.keys) {
@@ -295,15 +299,13 @@ func (w WizardModel) updateKeyImport(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			w.err = "File not found: " + path
 			return w, nil
 		}
-		// Check it's Ed25519
-		data, _ := os.ReadFile(path + ".pub")
-		if len(data) > 0 && !strings.HasPrefix(string(data), "ssh-ed25519") {
-			w.err = "Not an Ed25519 key"
+		managedPath, fingerprint, err := w.copyKeyToManagedStoreAndRewriteName(path)
+		if err != nil {
+			w.err = err.Error()
 			return w, nil
 		}
-		w.result.KeyPath = path
-		w.keyFingerprint = w.computeFingerprint(path)
-		w.embedNameInPubKey(path)
+		w.result.KeyPath = managedPath
+		w.keyFingerprint = fingerprint
 		w.err = ""
 		w.step = WizardBackup
 	case "esc":
@@ -705,37 +707,84 @@ func (w *WizardModel) setGenFocus(idx int) {
 	}
 }
 
-// embedNameInPubKey updates the .pub file comment to include the chosen name.
-func (w WizardModel) embedNameInPubKey(keyPath string) {
-	if w.chosenName == "" {
-		return
+// copyKeyToManagedStoreAndRewriteName copies an existing private/public key
+// pair into ~/.sshkey-term/keys and rewrites the .pub comment to the chosen
+// display name. This path is strict: any copy or rewrite failure aborts
+// progression so setup cannot silently continue with mismatched identity data.
+func (w WizardModel) copyKeyToManagedStoreAndRewriteName(srcKeyPath string) (string, string, error) {
+	src := srcKeyPath
+	if strings.HasPrefix(src, "~/") {
+		home, _ := os.UserHomeDir()
+		src = filepath.Join(home, src[2:])
 	}
-	pubPath := keyPath + ".pub"
-	data, err := os.ReadFile(pubPath)
+
+	pubPath := src + ".pub"
+	pubData, err := os.ReadFile(pubPath)
 	if err != nil {
-		return
+		return "", "", fmt.Errorf("read public key failed (%s): %w", pubPath, err)
 	}
-	// SSH pub key format: "type base64 [comment]\n"
-	// Strip existing comment and replace with chosen name
-	line := strings.TrimSpace(string(data))
-	parts := strings.SplitN(line, " ", 3) // type, base64, [optional comment]
-	if len(parts) >= 2 {
-		newLine := parts[0] + " " + parts[1] + " " + w.chosenName + "\n"
-		os.WriteFile(pubPath, []byte(newLine), 0644)
+	pubKey, _, _, _, err := ssh.ParseAuthorizedKey(pubData)
+	if err != nil {
+		return "", "", fmt.Errorf("parse public key failed (%s): %w", pubPath, err)
 	}
+	if pubKey.Type() != "ssh-ed25519" {
+		return "", "", fmt.Errorf("only Ed25519 keys are supported, got %s", pubKey.Type())
+	}
+
+	privData, err := os.ReadFile(src)
+	if err != nil {
+		return "", "", fmt.Errorf("read private key failed (%s): %w", src, err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	keysDir := filepath.Join(home, ".sshkey-term", "keys")
+	if err := os.MkdirAll(keysDir, 0700); err != nil {
+		return "", "", fmt.Errorf("create key directory failed (%s): %w", keysDir, err)
+	}
+
+	fingerprint := ssh.FingerprintSHA256(pubKey)
+	dstBase := filepath.Join(keysDir, managedKeyFilename(fingerprint))
+
+	if err := os.WriteFile(dstBase, privData, 0600); err != nil {
+		return "", "", fmt.Errorf("write private key failed (%s): %w", dstBase, err)
+	}
+
+	pubLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pubKey)))
+	if w.chosenName != "" {
+		pubLine += " " + w.chosenName
+	}
+	pubLine += "\n"
+	if err := os.WriteFile(dstBase+".pub", []byte(pubLine), 0644); err != nil {
+		return "", "", fmt.Errorf("write public key failed (%s.pub): %w", dstBase, err)
+	}
+
+	return dstBase, fingerprint, nil
 }
 
-func (w WizardModel) computeFingerprint(keyPath string) string {
-	data, err := os.ReadFile(keyPath)
-	if err != nil {
-		return ""
+func managedKeyFilename(fingerprint string) string {
+	token := strings.TrimPrefix(fingerprint, "SHA256:")
+	var b strings.Builder
+	for _, r := range token {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
 	}
-	signer, err := ssh.ParsePrivateKey(data)
-	if err != nil {
-		// Try without passphrase parsing
-		return ""
+	if b.Len() == 0 {
+		b.WriteString("key")
 	}
-	return ssh.FingerprintSHA256(signer.PublicKey())
+	return "id_ed25519_" + b.String()
 }
 
 // -- View --

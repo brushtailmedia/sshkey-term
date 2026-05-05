@@ -148,18 +148,18 @@ func (h HelpModel) renderContent(width int) string {
 	_ = width
 
 	navRows := []helpRow{
-		{"Tab", "toggle sidebar focus"},
-		{"Ctrl+K", "quick switch"},
-		{"Ctrl+N", "new group DM"},
-		{"Ctrl+M", "member panel"},
-		{"Ctrl+P", "pinned messages"},
-		{"Ctrl+I", "room/group info"},
-		{"Ctrl+F", "search"},
+		{"tab", "toggle sidebar focus"},
+		{"Ctrl+k", "quick switch"},
+		{"Ctrl+n", "new group DM"},
+		{"Ctrl+m", "member panel"},
+		{"Ctrl+p", "pinned messages"},
+		{"i / Ctrl+i", "room/group/DM info"},
+		{"Ctrl+f", "search"},
 		{"Ctrl+,", "settings"},
 		{"Ctrl+1-9", "switch server"},
-		{"Alt+↑/↓", "prev/next room"},
+		{"Alt/Option+↑/↓", "prev/next room"},
 		{"↑/↓ j/k", "navigate"},
-		{"PgUp/PgDn", "scroll history"},
+		{"pgup/pgdn", "scroll history"},
 	}
 	msgRows := []helpRow{
 		{"r", "reply to selected"},
@@ -211,7 +211,7 @@ func (h HelpModel) renderContent(width int) string {
 	// Slash commands. Phase 14: admin-gated verbs are included only
 	// when showAdminCommands is true (local user is an admin of the
 	// currently-active group). Status commands that don't mutate
-	// state (/members, /admins, /role, /whoami, /groupinfo, /audit)
+	// state (/members, /admins, /role, /whoami, /info, /groupinfo, /audit)
 	// are always shown.
 	type cmdEntry struct {
 		cmd, desc string
@@ -232,10 +232,11 @@ func (h HelpModel) renderContent(width int) string {
 		{cmd: "/pending", desc: "pending keys (admin)"},
 		{cmd: "/mykey", desc: "copy public key"},
 		// Phase 14 status commands (group-context, any member)
-		{cmd: "/members", desc: "list group members"},
+		{cmd: "/members", desc: "open member panel"},
 		{cmd: "/admins", desc: "list group admins"},
 		{cmd: "/role <user>", desc: "show a user's role"},
 		{cmd: "/whoami", desc: "show your own role"},
+		{cmd: "/info", desc: "open info panel"},
 		{cmd: "/groupinfo", desc: "open group info panel"},
 		{cmd: "/audit [N]", desc: "recent admin actions"},
 		// Phase 14 admin verbs (group-context, admin-only)

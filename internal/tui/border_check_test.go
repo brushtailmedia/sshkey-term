@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
 // TestPanelComposition_FitsInsideTerminal pins the central layout
@@ -234,3 +236,53 @@ func TestPanelComposition_MessagesBorderSurvives(t *testing.T) {
 	}
 }
 
+// TestPanelComposition_LongSidebarRowsDoNotPushTopBorderOffscreen guards a
+// regression where long sidebar rows wrapped, making the sidebar taller than
+// the body budget and causing terminal scroll by one row (missing top borders).
+func TestPanelComposition_LongSidebarRowsDoNotPushTopBorderOffscreen(t *testing.T) {
+	const termWidth = 120
+	const termHeight = 40
+
+	layout := computeLayout(termWidth, termHeight, false)
+
+	sb := NewSidebar()
+	sb.selfUserID = "usr_self"
+	sb.SetRooms([]string{"room_with_a_very_long_name_that_would_otherwise_wrap_in_sidebar"})
+	sb.SetGroups([]protocol.GroupInfo{
+		{
+			ID:      "grp_1",
+			Members: []string{"usr_X39baHmKonsL4SyQVUmbU", "usr_partner_with_long_name"},
+		},
+	})
+	sb.SetDMs([]protocol.DMInfo{
+		{
+			ID:      "dm_1",
+			Members: []string{"usr_self", "usr_other_with_an_extremely_long_display_name_0123456789"},
+		},
+	})
+	sb.resolveName = func(u string) string { return u }
+	sb.resolveRoomName = func(r string) string { return r }
+
+	sidebarInnerHeight := layout.SidebarY1 - layout.SidebarY0 - 2
+	sidebar := sb.View(layout.SidebarWidth, sidebarInnerHeight, true)
+
+	m := NewMessages()
+	m.SetContext("general", "", "")
+	mainHeight := layout.MessagesY1 - 2
+	messages := m.View(layout.MessagesWidth, mainHeight, false)
+
+	body := joinH(sidebar, messages)
+	bodyRows := strings.Split(body, "\n")
+	// Body (before status bar) must fit the body budget exactly.
+	if len(bodyRows) > layout.SidebarY1-layout.SidebarY0 {
+		t.Fatalf("body rows = %d, want <= %d; long sidebar rows are wrapping",
+			len(bodyRows), layout.SidebarY1-layout.SidebarY0)
+	}
+	if len(bodyRows) == 0 {
+		t.Fatal("empty body")
+	}
+	row0 := stripANSIForOverlay(bodyRows[0])
+	if !strings.Contains(row0, "╭") || !strings.Contains(row0, "╮") {
+		t.Fatalf("row 0 missing top borders: %q", row0)
+	}
+}

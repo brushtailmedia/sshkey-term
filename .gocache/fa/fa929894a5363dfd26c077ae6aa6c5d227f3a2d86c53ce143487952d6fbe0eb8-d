@@ -1,0 +1,7 @@
+./categories.go
+./codec.go
+./corrid.go
+./messages.go
+./categories_test.go
+./codec_test.go
+./corrid_test.go

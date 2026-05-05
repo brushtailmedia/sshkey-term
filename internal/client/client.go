@@ -1382,6 +1382,14 @@ func SetUserIDForTesting(c *Client, userID string) {
 	c.userID = userID
 }
 
+// SetEncoderForTesting attaches a protocol encoder from an external package.
+// Production code initializes c.enc during Connect/Reconnect; this helper lets
+// package-external tests capture outbound frames without a live SSH session.
+// Do not call from production code.
+func SetEncoderForTesting(c *Client, enc *protocol.Encoder) {
+	c.enc = enc
+}
+
 // GroupMembers returns the member list for a group DM.
 func (c *Client) GroupMembers(groupID string) []string {
 	c.mu.RLock()

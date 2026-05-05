@@ -841,25 +841,57 @@ Opened from Settings → Manage devices:
 
 ---
 
-## Connection Failed Overlay
+## Connect-Failed Overlay
 
-Shown on first-run when the server rejects the connection (unknown key):
+Shown on first-run when the server rejects the connection. Two
+variants based on the server's error string:
+
+**Pending approval** (unknown / pending / blocked key — the common
+case for new users):
 
 ```
-┌─ Connection Failed ──────────────────┐
-│                                       │
-│  Your SSH key is not recognized.      │
-│  Share your public key with the       │
-│  server admin:                        │
-│                                       │
-│  ssh-ed25519 AAAA...  alice@laptop    │
-│  [Copy to clipboard]                  │
-│                                       │
-│  Fingerprint: SHA256:abc123...        │
-│                                       │
-│  Once approved, reconnect.            │
-│  [Retry]  [Quit]                      │
-└───────────────────────────────────────┘
+┌─ Pending Approval ───────────────────────────────────┐
+│                                                       │
+│  Your key isn't authorized on this server yet.        │
+│  Your fingerprint has been added to the server's      │
+│  pending-keys queue. Send your public key (below)     │
+│  to the server operator and ask them to approve it.   │
+│                                                       │
+│  Once approved, press [r] to retry.                   │
+│                                                       │
+│  Fingerprint:                                         │
+│  SHA256:abc123...                                     │
+│                                                       │
+│  Public key:                                          │
+│  ssh-ed25519 AAAA...                                  │
+│                                                       │
+│  [r] Retry connection                                 │
+│  [c] Copy public key to clipboard                     │
+│  [q] Quit                                             │
+└───────────────────────────────────────────────────────┘
+```
+
+**Retired account** (server returned "account retired"):
+
+```
+┌─ Account Retired ────────────────────────────────────┐
+│                                                       │
+│  This account has been retired by the server         │
+│  operator. Logins are no longer accepted.             │
+│                                                       │
+│  If you believe this is in error, contact the         │
+│  server operator out of band.                         │
+│                                                       │
+│  Fingerprint:                                         │
+│  SHA256:abc123...                                     │
+│                                                       │
+│  Public key:                                          │
+│  ssh-ed25519 AAAA...                                  │
+│                                                       │
+│  [r] Retry connection                                 │
+│  [c] Copy public key to clipboard                     │
+│  [q] Quit                                             │
+└───────────────────────────────────────────────────────┘
 ```
 
 ---

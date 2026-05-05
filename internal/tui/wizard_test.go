@@ -392,9 +392,11 @@ func TestConnectFailed_View(t *testing.T) {
 	view := cf.View(60)
 
 	checks := []string{
-		"Connection Failed",
-		"rejected your key",
-		"admin may not have added you",
+		"Pending Approval",
+		"isn't authorized",
+		"pending-keys queue",
+		"server operator",
+		"approve",
 		"SHA256:xK9m",
 		"ssh-ed25519",
 		"[r] Retry",
@@ -500,6 +502,87 @@ func TestWizard_MouseWelcome(t *testing.T) {
 	}
 
 	t.Log("mouse welcome: click advances to choose name")
+}
+
+func TestWizard_ExistingKeyCopiedToManagedStoreAndRewritten(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	srcDir := filepath.Join(t.TempDir(), "source_keys")
+	if err := os.MkdirAll(srcDir, 0700); err != nil {
+		t.Fatalf("mkdir source_keys: %v", err)
+	}
+	srcKey := filepath.Join(srcDir, "id_ed25519")
+	if _, err := generateEd25519KeyFile(srcKey, "", "oldcomment"); err != nil {
+		t.Fatalf("generate source key: %v", err)
+	}
+
+	w := NewWizard()
+	advanceToKeySelect(&w) // chosenName = testuser
+	w.keys = []keyEntry{{Path: srcKey, Type: "ed25519"}}
+	w.keyCursor = 0
+
+	sendSpecial(&w, tea.KeyEnter)
+	if w.step != WizardBackup {
+		t.Fatalf("step = %d, want WizardBackup (err: %s)", w.step, w.err)
+	}
+	if w.err != "" {
+		t.Fatalf("unexpected wizard error: %s", w.err)
+	}
+	if w.result.KeyPath == srcKey {
+		t.Fatalf("key path should be managed copy, got original path %q", w.result.KeyPath)
+	}
+	wantDir := filepath.Join(homeDir, ".sshkey-term", "keys")
+	if filepath.Dir(w.result.KeyPath) != wantDir {
+		t.Fatalf("managed key dir = %q, want %q", filepath.Dir(w.result.KeyPath), wantDir)
+	}
+	if _, err := os.Stat(w.result.KeyPath); err != nil {
+		t.Fatalf("managed private key missing: %v", err)
+	}
+	gotPub, err := os.ReadFile(w.result.KeyPath + ".pub")
+	if err != nil {
+		t.Fatalf("read managed pub: %v", err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(string(gotPub)), "testuser") {
+		t.Fatalf("managed pub comment not rewritten to chosen name: %q", strings.TrimSpace(string(gotPub)))
+	}
+	srcPub, err := os.ReadFile(srcKey + ".pub")
+	if err != nil {
+		t.Fatalf("read source pub: %v", err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(string(srcPub)), "oldcomment") {
+		t.Fatalf("source pub should remain unchanged, got %q", strings.TrimSpace(string(srcPub)))
+	}
+	if w.keyFingerprint == "" {
+		t.Fatal("key fingerprint should be set for managed copied key")
+	}
+}
+
+func TestWizard_ImportMissingPublicKeyFailsExplicitly(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	srcKey := filepath.Join(t.TempDir(), "id_ed25519")
+	if _, err := generateEd25519KeyFile(srcKey, "", "importme"); err != nil {
+		t.Fatalf("generate source key: %v", err)
+	}
+	if err := os.Remove(srcKey + ".pub"); err != nil {
+		t.Fatalf("remove source pub: %v", err)
+	}
+
+	w := NewWizard()
+	advanceToKeySelect(&w)
+	w.step = WizardKeyImport
+	w.importInput.SetValue(srcKey)
+	w.importInput.Focus()
+
+	sendSpecial(&w, tea.KeyEnter)
+	if w.step != WizardKeyImport {
+		t.Fatalf("step = %d, want WizardKeyImport after import failure", w.step)
+	}
+	if !contains(w.err, "read public key failed") {
+		t.Fatalf("expected explicit public key read error, got %q", w.err)
+	}
 }
 
 func TestConnectFailed_Mouse(t *testing.T) {

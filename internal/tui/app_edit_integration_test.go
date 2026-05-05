@@ -224,6 +224,42 @@ func TestApp_ContextSwitchClearsEditMode(t *testing.T) {
 	}
 }
 
+func TestApp_ContextSwitchClearsReplyAndDraft(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.messages.SetContext("room_a", "", "")
+	a.input.SetReplyContext("msg_1", "Bob: hello", "room_a", "", "")
+	a.input.textInput.SetValue("half-written reply")
+	a.input.textInput.SetCursor(len("half-written reply"))
+
+	a.messages.SetContext("room_b", "", "")
+	a.onContextSwitch()
+
+	if a.input.IsReplying() {
+		t.Fatal("context switch should clear reply state")
+	}
+	if got := a.input.Value(); got != "" {
+		t.Fatalf("context switch should clear draft input, got %q", got)
+	}
+}
+
+func TestApp_EscCancelsReplyAndClearsDraft(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.messages.SetContext("room_a", "", "")
+	a.input.SetReplyContext("msg_1", "Bob: hello", "room_a", "", "")
+	a.input.textInput.SetValue("draft")
+	a.input.textInput.SetCursor(len("draft"))
+
+	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated := model.(App)
+
+	if updated.input.IsReplying() {
+		t.Fatal("esc should cancel reply state in input focus")
+	}
+	if got := updated.input.Value(); got != "" {
+		t.Fatalf("esc should clear draft input, got %q", got)
+	}
+}
+
 func TestApp_ReplyActionUsesResolvedDisplayName(t *testing.T) {
 	a, _ := newEditAppHarness(t)
 	client.SetProfileForTesting(a.client, &protocol.Profile{
@@ -250,5 +286,9 @@ func TestApp_ReplyActionUsesResolvedDisplayName(t *testing.T) {
 	}
 	if got := updated.input.replyText; got != "Bob: hello" {
 		t.Fatalf("reply text = %q, want %q", got, "Bob: hello")
+	}
+	if updated.input.replyRoom != "" || updated.input.replyGroup != "" || updated.input.replyDM != "" {
+		t.Fatalf("reply context should be empty when action carries no context, got room=%q group=%q dm=%q",
+			updated.input.replyRoom, updated.input.replyGroup, updated.input.replyDM)
 	}
 }

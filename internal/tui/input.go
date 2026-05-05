@@ -13,14 +13,14 @@ import (
 
 var (
 	inputStyle = lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#64748B")).
-		Padding(0, 1)
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#64748B")).
+			Padding(0, 1)
 
 	inputFocusedStyle = lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7C3AED")).
-		Padding(0, 1)
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#7C3AED")).
+				Padding(0, 1)
 )
 
 // InputModel manages the text input bar.
@@ -28,8 +28,11 @@ type InputModel struct {
 	textInput      textinput.Model
 	replyTo        string           // message ID being replied to
 	replyText      string           // preview of the message being replied to
+	replyRoom      string           // room context where reply target was selected
+	replyGroup     string           // group context where reply target was selected
+	replyDM        string           // dm context where reply target was selected
 	lastTypingSent time.Time        // throttle typing indicators
-	completion     *CompletionModel  // active completion popup
+	completion     *CompletionModel // active completion popup
 	members        []MemberEntry    // current room/group members for @completion
 	// Phase 14: non-member pool for /add target completion. Populated
 	// alongside members from the client's profile cache, filtered to
@@ -227,6 +230,14 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 	}
 
 	switch msg.String() {
+	case "esc":
+		// Input-local cancel: clear compose state (reply/edit/draft).
+		// App-level Esc handling routes here only in some paths, but
+		// keeping this local guard makes behavior deterministic.
+		if i.replyTo != "" || i.editMode || i.textInput.Value() != "" || (i.completion != nil && i.completion.visible) {
+			i.ResetComposeState()
+		}
+		return i, nil
 	case "tab":
 		// Trigger completion. Phase 14: use CompleteWithContext so
 		// admin-verb @-arguments filter to the right data source
@@ -252,14 +263,21 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 		}
 
 		// Send message — extract @mentions from body
+		replyTo := i.replyTo
+		if replyTo != "" && !i.replyContextMatches(room, group, dm) {
+			// Defensive fail-closed guard: never let a reply target
+			// selected in one context leak into another context's send.
+			replyTo = ""
+			i.clearReply()
+		}
 		if c != nil {
 			mentions := i.ExtractMentions(text)
 			if room != "" {
-				c.SendRoomMessage(room, text, i.replyTo, mentions)
+				c.SendRoomMessage(room, text, replyTo, mentions)
 			} else if group != "" {
-				c.SendGroupMessage(group, text, i.replyTo, mentions)
+				c.SendGroupMessage(group, text, replyTo, mentions)
 			} else if dm != "" {
-				c.SendDMMessage(dm, text, i.replyTo, mentions)
+				c.SendDMMessage(dm, text, replyTo, mentions)
 			}
 			i.didSend = true
 		}
@@ -305,6 +323,37 @@ func (i *InputModel) SetTextInputWidth(width int) {
 func (i *InputModel) SetReply(msgID, previewText string) {
 	i.replyTo = msgID
 	i.replyText = previewText
+	i.replyRoom = ""
+	i.replyGroup = ""
+	i.replyDM = ""
+}
+
+// SetReplyContext sets reply state and remembers which conversation context
+// it belongs to. This lets send-time logic fail-closed if context changes and
+// stale reply metadata somehow survives.
+func (i *InputModel) SetReplyContext(msgID, previewText, room, group, dm string) {
+	i.replyTo = msgID
+	i.replyText = previewText
+	i.replyRoom = room
+	i.replyGroup = group
+	i.replyDM = dm
+}
+
+// IsReplying reports whether a reply target is currently active.
+func (i InputModel) IsReplying() bool {
+	return i.replyTo != ""
+}
+
+// ResetComposeState clears text, reply, edit, and completion state.
+// Used by Esc cancellation and context switches.
+func (i *InputModel) ResetComposeState() {
+	i.clearReply()
+	i.editMode = false
+	i.editTarget = ""
+	i.textInput.Reset()
+	i.completion = nil
+	i.mouseSeqState = 0
+	i.mouseSeqBuf = i.mouseSeqBuf[:0]
 }
 
 // Value returns the current input text. Used by the app to inspect input
@@ -360,6 +409,13 @@ func (i InputModel) EditTarget() string {
 func (i *InputModel) clearReply() {
 	i.replyTo = ""
 	i.replyText = ""
+	i.replyRoom = ""
+	i.replyGroup = ""
+	i.replyDM = ""
+}
+
+func (i InputModel) replyContextMatches(room, group, dm string) bool {
+	return i.replyRoom == room && i.replyGroup == group && i.replyDM == dm
 }
 
 // SlashCommandMsg is sent to the app when the user types a slash command that needs app-level handling.
@@ -445,14 +501,16 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		if group != "" {
 			i.pendingCmd = &SlashCommandMsg{Command: cmd, Group: group}
 		}
-	case "/audit", "/members", "/admins":
-		// Phase 14 read-only overlays scoped to the current group.
-		// /audit takes an optional numeric argument for the row
-		// limit; /members and /admins take no args. Dropped outside
-		// a group context — the app layer never sees them.
-		if group != "" {
-			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Group: group}
-		}
+	case "/info", "/members":
+		// /info and /members work in room, group, and DM contexts.
+		// The app layer resolves the active-context behavior and can
+		// surface a clear error when no context is active.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
+	case "/audit", "/admins":
+		// Route to app in any context so the app can surface a clear
+		// status error when not in a group DM instead of silently
+		// dropping the command.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	case "/role":
 		// Phase 14: readout of a target user's role in the current
 		// group. Status bar message, no dialog. Requires a target

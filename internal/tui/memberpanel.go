@@ -5,18 +5,19 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 )
 
 var (
 	memberPanelStyle = lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#64748B"))
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#64748B"))
 
 	memberPanelFocusedStyle = lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7C3AED"))
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#7C3AED"))
 )
 
 // MemberPanelModel manages the persistent right-side member panel.
@@ -51,8 +52,8 @@ func (m *MemberPanelModel) SetFocused(focused bool) {
 	m.focused = focused
 }
 
-// Refresh updates the member list for the current room or group DM.
-func (m *MemberPanelModel) Refresh(room, group string, c *client.Client, online map[string]bool) {
+// Refresh updates the member list for the current room, group DM, or 1:1 DM.
+func (m *MemberPanelModel) Refresh(room, group, dm string, c *client.Client, online map[string]bool) {
 	m.members = nil
 	m.cursor = 0
 
@@ -80,6 +81,28 @@ func (m *MemberPanelModel) Refresh(room, group string, c *client.Client, online 
 	} else if room != "" {
 		// Room members will be populated by SetRoomMembers when the server
 		// responds to room_members. The caller sends the request.
+	} else if dm != "" {
+		// 1:1 DM members come from the cached pair.
+		pair := c.DMMembers(dm)
+		seen := make(map[string]bool)
+		for _, user := range pair {
+			if user == "" || seen[user] {
+				continue
+			}
+			seen[user] = true
+			p := c.Profile(user)
+			displayName := user
+			if p != nil {
+				displayName = p.DisplayName
+			}
+			retired, _ := c.IsRetired(user)
+			m.members = append(m.members, memberPanelEntry{
+				User:        user,
+				DisplayName: displayName,
+				Online:      online[user],
+				Retired:     retired,
+			})
+		}
 	}
 
 	// Check verified status from store
@@ -162,9 +185,8 @@ func (m MemberPanelModel) Update(msg tea.KeyMsg) (MemberPanelModel, tea.Cmd) {
 			m.cursor++
 		}
 	case "enter":
-		// Open member menu (keyboard equivalent of right-click on the
-		// member). Consistent with Enter on a message opening the
-		// context menu.
+		// Open member menu for the selected row. Mouse clicks in the
+		// member pane only move selection; Enter is the explicit open.
 		if m.cursor < len(m.members) {
 			user := m.members[m.cursor].User
 			return m, func() tea.Msg {
@@ -209,9 +231,19 @@ func (m MemberPanelModel) View(width, height int) string {
 		}
 
 		line := " " + dot + " " + name
+		// Keep each member row to a single visual line. Long names (for example
+		// nanoids) previously wrapped in the narrow 18-col panel, which shifted
+		// visual row positions and broke mouse hit-testing.
+		contentWidth := width - 2
+		if contentWidth < 1 {
+			contentWidth = 1
+		}
+		line = ansi.Truncate(line, contentWidth, "")
 
 		if i == m.cursor && m.focused {
-			line = selectedStyle.Width(width - 2).Render(line)
+			// Selected rows are padded/highlighted to full width; truncation above
+			// guarantees this render path remains single-line.
+			line = selectedStyle.Width(contentWidth).Render(line)
 		}
 
 		b.WriteString(line + "\n")
