@@ -1182,7 +1182,7 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 			}
 		}
 		m.ensureCursorVisible()
-	case "pageup":
+	case "pageup", "pgup":
 		// Pure viewport scroll, cursor unchanged. Page = viewport height.
 		m.viewport.ScrollUp(m.viewport.Height)
 		// At the very top: opportunity to request history (server-side
@@ -1192,7 +1192,7 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 			return m, m.requestHistory()
 		}
 		return m, nil
-	case "pagedown":
+	case "pagedown", "pgdown":
 		// Pure viewport scroll, cursor unchanged.
 		m.viewport.ScrollDown(m.viewport.Height)
 		return m, nil
