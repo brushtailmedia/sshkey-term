@@ -316,6 +316,90 @@ func (s SidebarModel) totalItems() int {
 	return len(s.rooms) + len(s.groups) + len(s.dms)
 }
 
+// CursorAtRow maps a visual row inside the sidebar's bordered content
+// area (0-indexed; row 0 is the "Rooms" header line) to a cursor
+// index, or -1 if the row falls on a header / blank separator / out
+// of range.
+//
+// Mirrors the section layout written by View():
+//
+//	row 0                              "Rooms" header
+//	rows 1..len(rooms)                 room items                      → cursor 0..len(rooms)-1
+//	row len(rooms)+1                   blank separator
+//	row len(rooms)+2                   "Messages" header
+//	rows len(rooms)+3..               group items                      → cursor len(rooms)..len(rooms)+len(groups)-1
+//	(DMs section omitted when empty — matches the `if len(s.dms) > 0`
+//	 guard in View)
+//	row +1                             blank separator
+//	row +1                             "DMs" header
+//	rows +1..                          dm items                        → cursor len(rooms)+len(groups)..total-1
+//
+// Mouse click handler in app.go uses this instead of the dumb
+// `y - 1` that ignored the headers and section gaps. Pre-2026-05-05
+// every click landed on the wrong item — and clicks on header /
+// blank rows still returned a (wrong) item index, jumping the
+// cursor unexpectedly.
+func (s SidebarModel) CursorAtRow(visualRow int) int {
+	if visualRow < 0 {
+		return -1
+	}
+	row := 0
+
+	// "Rooms" header
+	if visualRow == row {
+		return -1
+	}
+	row++
+
+	// Room items.
+	for i := range s.rooms {
+		if visualRow == row {
+			return i
+		}
+		row++
+	}
+
+	// Blank separator + "Messages" header.
+	if visualRow == row {
+		return -1 // blank
+	}
+	row++
+	if visualRow == row {
+		return -1 // "Messages" header
+	}
+	row++
+
+	// Group items.
+	for i := range s.groups {
+		if visualRow == row {
+			return len(s.rooms) + i
+		}
+		row++
+	}
+
+	// DMs section is conditionally rendered (only when len(s.dms) > 0).
+	if len(s.dms) == 0 {
+		return -1
+	}
+	if visualRow == row {
+		return -1 // blank
+	}
+	row++
+	if visualRow == row {
+		return -1 // "DMs" header
+	}
+	row++
+
+	for i := range s.dms {
+		if visualRow == row {
+			return len(s.rooms) + len(s.groups) + i
+		}
+		row++
+	}
+
+	return -1
+}
+
 func (s SidebarModel) Update(msg tea.KeyMsg, c *client.Client) (SidebarModel, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":

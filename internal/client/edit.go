@@ -63,9 +63,7 @@ func (c *Client) EditRoomMessage(msgID, room, newBody string) error {
 	c.mu.Lock()
 	epoch := c.currentEpoch[room]
 	key := c.epochKeys[room][epoch]
-	seqKey := "room:" + room
-	c.seqCounters[seqKey]++
-	seq := c.seqCounters[seqKey]
+	seq := c.nextSeqLocked("room:"+room, room)
 	c.mu.Unlock()
 
 	if key == nil {
@@ -124,9 +122,7 @@ func (c *Client) EditGroupMessage(msgID, group, newBody string) error {
 	mentions := extractMentionsFromBody(newBody)
 
 	c.mu.Lock()
-	seqKey := "group:" + group
-	c.seqCounters[seqKey]++
-	seq := c.seqCounters[seqKey]
+	seq := c.nextSeqLocked("group:"+group, group)
 	c.mu.Unlock()
 
 	payload := protocol.DecryptedPayload{
@@ -185,9 +181,7 @@ func (c *Client) EditDMMessage(msgID, dmID, newBody string) error {
 	mentions := extractMentionsFromBody(newBody)
 
 	c.mu.Lock()
-	seqKey := "dm:" + dmID
-	c.seqCounters[seqKey]++
-	seq := c.seqCounters[seqKey]
+	seq := c.nextSeqLocked("dm:"+dmID, dmID)
 	c.mu.Unlock()
 
 	payload := protocol.DecryptedPayload{

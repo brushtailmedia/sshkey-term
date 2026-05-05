@@ -46,6 +46,29 @@ type InputModel struct {
 	// exits. editTarget is also cleared on context switch by the app.
 	editMode   bool
 	editTarget string
+
+	// mouseSeqState tracks an in-progress SGR-1006 mouse-event leak
+	// arriving char-by-char. The original looksLikeLeakedMouseEvent
+	// filter only catches sequences that arrive as a single multi-rune
+	// KeyMsg; some terminal/tmux configurations split each char into
+	// its own KeyMsg, slipping past that filter. This small state
+	// machine handles the chunked case:
+	//   0: idle
+	//   1: just consumed a single `[` (held back, not yet committed)
+	//   2: confirmed mouse-seq start (saw `[<`); drop chars until M/m
+	//
+	// State 1 holds a single `[` for one keystroke. If the next rune
+	// is `<`, we transition to state 2 and drop everything up to the
+	// terminator. If the next rune is anything else, we flush the
+	// held `[` and process the new rune normally — so a user typing
+	// `[hello]` sees a 1-keystroke delay on the `[` then everything
+	// works.
+	mouseSeqState int
+	// mouseSeqBuf holds the digits/semicolons portion of a candidate
+	// `[<...M` sequence while we're in state 2. If the candidate turns
+	// out to be malformed, we flush `[<` + mouseSeqBuf back into the
+	// text input so normal user text isn't lost.
+	mouseSeqBuf []rune
 }
 
 func NewInput() InputModel {
@@ -64,7 +87,115 @@ func (i InputModel) Init() tea.Cmd {
 	return textinput.Blink
 }
 
+// looksLikeLeakedMouseEvent detects SGR-1006 mouse-event byte sequences
+// that arrive as keyboard runes when the outer terminal/tmux config
+// fails to enable mouse-mode passthrough properly. The protocol is
+// `ESC [ < button ; col ; row M-or-m`; if the leading ESC is dropped
+// (a common tmux-with-low-escape-time symptom), Bubble Tea can't tell
+// the bytes apart from typed text and routes them to KeyRunes. Without
+// this filter, scrolling the mouse over the input pane prints garbage
+// like `[<64;54;21M[<64;54;21M…` into the compose buffer.
+//
+// Conservative match: must start with `[<`, contain only digits and
+// semicolons until a terminating `M` or `m`. A user typing `[<` as
+// part of a real message is unaffected because they wouldn't follow
+// it with the exact digits-semis-M shape.
+func looksLikeLeakedMouseEvent(runes []rune) bool {
+	if len(runes) < 6 {
+		return false
+	}
+	if runes[0] != '[' || runes[1] != '<' {
+		return false
+	}
+	// After `[<`, expect digits/semicolons ending with M or m.
+	i := 2
+	sawDigit := false
+	for i < len(runes) {
+		r := runes[i]
+		switch {
+		case r >= '0' && r <= '9':
+			sawDigit = true
+			i++
+		case r == ';':
+			i++
+		case r == 'M' || r == 'm':
+			return sawDigit && i == len(runes)-1
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm string) (InputModel, tea.Cmd) {
+	// Defensive: drop bytes that look like mouse-event escape sequences
+	// missing their leading ESC. Handle arbitrary chunking shapes:
+	// single-rune, multi-rune, and multiple `[<...M` sequences packed
+	// into one KeyMsg.
+	if msg.Type == tea.KeyRunes {
+		var out []rune
+		for _, r := range msg.Runes {
+			for {
+				again := false
+				switch i.mouseSeqState {
+				case 0:
+					if r == '[' {
+						i.mouseSeqState = 1
+					} else {
+						out = append(out, r)
+					}
+				case 1:
+					if r == '<' {
+						i.mouseSeqState = 2
+						i.mouseSeqBuf = i.mouseSeqBuf[:0]
+						break
+					}
+					// Not a mouse sequence; flush held '[' and reprocess r.
+					out = append(out, '[')
+					i.mouseSeqState = 0
+					again = true
+				case 2:
+					switch {
+					case r >= '0' && r <= '9', r == ';':
+						i.mouseSeqBuf = append(i.mouseSeqBuf, r)
+					case r == 'M' || r == 'm':
+						// Valid leaked mouse event: drop it.
+						i.mouseSeqState = 0
+						i.mouseSeqBuf = i.mouseSeqBuf[:0]
+					default:
+						// Malformed candidate: flush as normal text.
+						out = append(out, '[', '<')
+						out = append(out, i.mouseSeqBuf...)
+						i.mouseSeqBuf = i.mouseSeqBuf[:0]
+						i.mouseSeqState = 0
+						again = true
+					}
+				}
+				if !again {
+					break
+				}
+			}
+		}
+		if len(out) == 0 {
+			return i, nil
+		}
+		msg.Runes = out
+	} else if i.mouseSeqState != 0 {
+		// A non-rune event arrived while we were holding candidate bytes.
+		// Flush candidate back to text so user input isn't stranded.
+		if i.mouseSeqState == 1 {
+			cur := i.textInput.Value()
+			i.textInput.SetValue(cur + "[")
+			i.textInput.SetCursor(len(cur) + 1)
+		} else if i.mouseSeqState == 2 {
+			cur := i.textInput.Value()
+			i.textInput.SetValue(cur + "[<" + string(i.mouseSeqBuf))
+			i.textInput.SetCursor(len(cur) + 2 + len(i.mouseSeqBuf))
+			i.mouseSeqBuf = i.mouseSeqBuf[:0]
+		}
+		i.mouseSeqState = 0
+	}
+
 	// Handle completion popup if active
 	if i.completion != nil && i.completion.visible {
 		switch msg.String() {
@@ -150,6 +281,25 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 	var cmd tea.Cmd
 	i.textInput, cmd = i.textInput.Update(msg)
 	return i, cmd
+}
+
+// SetTextInputWidth configures the textinput's horizontal pan window
+// width. Called by the App on tea.WindowSizeMsg so the value persists
+// across keystrokes (input.View can't persist mutations because it
+// has a value receiver, see the comment in View). Triggers
+// handleOverflow via SetCursor so offset/offsetRight indices update
+// immediately.
+//
+// width is the cells available for the textinput's value (i.e. AFTER
+// subtracting prompt + cursor + borders + padding from the panel
+// width). Callers should compute it via layoutInputContentWidth in
+// app.go.
+func (i *InputModel) SetTextInputWidth(width int) {
+	if width < 1 {
+		width = 1
+	}
+	i.textInput.Width = width
+	i.textInput.SetCursor(i.textInput.Position())
 }
 
 func (i *InputModel) SetReply(msgID, previewText string) {
@@ -424,29 +574,73 @@ func containsMention(body, target string) bool {
 	}
 }
 
-func (i InputModel) View(width int, focused bool) string {
-	var b strings.Builder
-
-	// Completion popup (above input)
-	if i.completion != nil && i.completion.visible {
-		b.WriteString(i.completion.View(width))
-		b.WriteString("\n")
+// BannerRows reports how many rows the reply-preview / edit-mode
+// banner will occupy when rendered ABOVE the input box. Used by the
+// App's View to compute mainHeight: messages pane shrinks by this
+// amount so the total mainPanel height stays constant.
+//
+// The banner lives outside the bordered input box so the input pane
+// is ALWAYS exactly 3 rows tall — pre-2026-05-04 it grew to 4 rows
+// when reply was active, which caused a transient "two input boxes"
+// stale-render artifact in Bubble Tea's diff renderer when the
+// height shrank back to 3 after send. The user reported this as
+// "two input boxes after I hit enter" that resolved on the next
+// event. With the banner extracted, input height is constant and
+// the artifact can't occur.
+func (i InputModel) BannerRows() int {
+	if i.replyTo != "" || i.editMode {
+		return 1
 	}
+	return 0
+}
 
+// BannerView renders the reply-preview or edit-mode banner. Returns
+// an empty string when no banner is active, so callers can
+// unconditionally splice the result into mainPanel without
+// branching. width is the content-area width (= mainWidth in app.go
+// View) — the banner uses it to truncate the preview to fit.
+func (i InputModel) BannerView(width int) string {
 	if i.replyTo != "" {
 		preview := i.replyText
 		if len(preview) > width-20 {
 			preview = preview[:width-23] + "..."
 		}
-		b.WriteString(replyRefStyle.Render(" ↳ replying to: " + preview))
+		return replyRefStyle.Render(" ↳ replying to: " + preview)
+	}
+	if i.editMode {
+		return replyRefStyle.Render(" ✎ editing message — Esc to cancel")
+	}
+	return ""
+}
+
+func (i InputModel) View(width int, focused bool) string {
+	var b strings.Builder
+
+	// Completion popup (above input). Stays inside the input.View
+	// output because it's a transient overlay that shows above the
+	// input box only while completing — it doesn't share the
+	// banner's "fixed slot" semantics.
+	if i.completion != nil && i.completion.visible {
+		b.WriteString(i.completion.View(width))
 		b.WriteString("\n")
 	}
 
-	// Phase 15: edit mode indicator, same style as the reply indicator.
-	if i.editMode {
-		b.WriteString(replyRefStyle.Render(" ✎ editing message — Esc to cancel"))
-		b.WriteString("\n")
-	}
+	// Note: textinput.Width is configured by the App via
+	// InputModel.SetTextInputWidth on tea.WindowSizeMsg — NOT here.
+	// View has a value receiver, so any mutation of i.textInput.Width
+	// here would land on a throwaway copy and the next input.Update
+	// would see Width=0. The persistent assignment on resize keeps
+	// the horizontal pan window correctly sized across keystrokes.
+	// See layoutInputContentWidth in layout.go for the cell math.
+	// Setting Width alone doesn't update the textinput's offset/
+	// offsetRight viewport indices — those are recomputed only inside
+	// handleOverflow, which runs from SetValue / SetCursor. Without
+	// triggering it, View() renders the FULL value and lipgloss wraps
+	// the long line into multiple visual rows, blowing out the input
+	// pane's height (the user's "more than one line breaks layout"
+	// report). Re-set the cursor to its current position to force the
+	// recompute; SetCursor calls handleOverflow internally.
+	i.textInput.SetCursor(i.textInput.Position())
 
 	b.WriteString(i.textInput.View())
 
@@ -455,5 +649,11 @@ func (i InputModel) View(width int, focused bool) string {
 		style = inputFocusedStyle
 	}
 
+	// Note: no .Height() on the style. The completion popup, reply
+	// preview, and edit-mode indicator legitimately stack above the
+	// textinput when active, so inner height is variable. The
+	// textinput.Width clamp above is what stops legit-long-text from
+	// wrapping into multiple rows; that's the root of the user's
+	// "input pushes into the sidebar" report.
 	return style.Width(width).Render(b.String())
 }

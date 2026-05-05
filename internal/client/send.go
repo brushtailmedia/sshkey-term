@@ -20,6 +20,37 @@ func (c *Client) SendRoomMessage(room, body string, replyTo string, mentions []s
 	return c.SendRoomMessageFull(room, body, replyTo, mentions, nil)
 }
 
+// nextSeqLocked returns the next monotonic seq for a target (room /
+// group / dm) and persists the seqCounters' new high-water as a
+// side effect by virtue of the next inbound broadcast eventually
+// hitting checkReplay.
+//
+// Caller MUST hold c.mu — every send-path invocation already locks
+// c.mu around epoch/key reads, and seq generation is part of the
+// same critical section.
+//
+// 2026-05-05 fix: pre-fix the counter started at 0 every restart
+// because seqCounters is map[string]int64 in-memory only. After 54
+// messages in session 1 (high_water=54 in the encrypted DB), session
+// 2 would start from 0, send seq=1, the server would broadcast it
+// back to us, and our own checkReplay would see `seq=1, high_water=54`
+// and DROP our own message (and log the noisy "possible replay
+// detected" warning that surfaced the bug). Fix is lazy-restore: on
+// the first send to a target this session, seed the in-memory counter
+// from the persisted high-water if one exists. Subsequent sends in
+// the same session run from the in-memory counter as before — only
+// pay the DB read on the first send.
+func (c *Client) nextSeqLocked(seqKey, target string) int64 {
+	if c.seqCounters[seqKey] == 0 && c.store != nil && c.userID != "" {
+		markKey := c.userID + ":" + c.cfg.DeviceID + ":" + target
+		if persisted, err := c.store.GetSeqMark(markKey); err == nil && persisted > 0 {
+			c.seqCounters[seqKey] = persisted
+		}
+	}
+	c.seqCounters[seqKey]++
+	return c.seqCounters[seqKey]
+}
+
 // SendRoomMessageFull is the full-featured room sender with attachments.
 // Attachments reference file_ids from prior UploadFile calls; their contents
 // are NOT encrypted here (the file bytes were already encrypted with the
@@ -29,9 +60,7 @@ func (c *Client) SendRoomMessageFull(room, body string, replyTo string, mentions
 	c.mu.Lock()
 	epoch := c.currentEpoch[room]
 	key := c.epochKeys[room][epoch]
-	seqKey := "room:" + room
-	c.seqCounters[seqKey]++
-	seq := c.seqCounters[seqKey]
+	seq := c.nextSeqLocked("room:"+room, room)
 	c.mu.Unlock()
 
 	if key == nil {
@@ -174,9 +203,7 @@ func (c *Client) SendGroupMessage(group, body string, replyTo string, mentions [
 func (c *Client) SendGroupMessageFull(group, body, replyTo string, mentions []string, attachments []protocol.Attachment) error {
 	// Build payload
 	c.mu.Lock()
-	seqKey := "group:" + group
-	c.seqCounters[seqKey]++
-	seq := c.seqCounters[seqKey]
+	seq := c.nextSeqLocked("group:"+group, group)
 	c.mu.Unlock()
 
 	payload := protocol.DecryptedPayload{
@@ -417,9 +444,7 @@ func (c *Client) SendRoomReaction(room, targetMsgID, emoji string) error {
 	c.mu.Lock()
 	epoch := c.currentEpoch[room]
 	key := c.epochKeys[room][epoch]
-	seqKey := "room:" + room
-	c.seqCounters[seqKey]++
-	seq := c.seqCounters[seqKey]
+	seq := c.nextSeqLocked("room:"+room, room)
 	c.mu.Unlock()
 
 	if key == nil {
@@ -468,9 +493,7 @@ func (c *Client) SendGroupReaction(group, targetMsgID, emoji string) error {
 	}
 
 	c.mu.Lock()
-	seqKey := "group:" + group
-	c.seqCounters[seqKey]++
-	seq := c.seqCounters[seqKey]
+	seq := c.nextSeqLocked("group:"+group, group)
 	c.mu.Unlock()
 
 	reactionPayload := protocol.DecryptedReaction{
@@ -722,9 +745,7 @@ func (c *Client) SendDMMessage(dmID, body string, replyTo string, mentions []str
 // SendDMMessageFull sends a 1:1 DM message with attachments.
 func (c *Client) SendDMMessageFull(dmID, body, replyTo string, mentions []string, attachments []protocol.Attachment) error {
 	c.mu.Lock()
-	seqKey := "dm:" + dmID
-	c.seqCounters[seqKey]++
-	seq := c.seqCounters[seqKey]
+	seq := c.nextSeqLocked("dm:"+dmID, dmID)
 	c.mu.Unlock()
 
 	payload := protocol.DecryptedPayload{
@@ -878,9 +899,7 @@ func (c *Client) SendDMReaction(dmID, targetMsgID, emoji string) error {
 	}
 
 	c.mu.Lock()
-	seqKey := "dm:" + dmID
-	c.seqCounters[seqKey]++
-	seq := c.seqCounters[seqKey]
+	seq := c.nextSeqLocked("dm:"+dmID, dmID)
 	c.mu.Unlock()
 
 	reactionPayload := protocol.DecryptedReaction{

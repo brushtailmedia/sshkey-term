@@ -429,15 +429,36 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
-		// Member menu intercepts all keys
+		// Member menu intercepts all keys. Esc is handled here at the
+		// App level (not delegated to the menu's Update) — defensive
+		// against any subtle routing or value-receiver issue that
+		// would otherwise leave the menu stuck open. Hide is a
+		// pointer-receiver method on an addressable field, so the
+		// mutation propagates back via the App.Update return value.
 		if a.memberMenu.IsVisible() {
+			if msg.Type == tea.KeyEsc {
+				a.memberMenu.Hide()
+				return a, nil
+			}
 			var cmd tea.Cmd
 			a.memberMenu, cmd = a.memberMenu.Update(msg)
 			return a, cmd
 		}
 
-		// Context menu intercepts all keys
+		// Context menu intercepts all keys. Same Esc-at-App-level
+		// pattern as memberMenu above. The user reported (2026-05-05)
+		// that pressing Esc with the menu open did NOT dismiss the
+		// menu — they could only close it by selecting an item. The
+		// inner ContextMenuModel.Update has a `case "esc": c.Hide()`
+		// branch that passed unit tests, so the bug must be in the
+		// real-world routing somewhere; rather than chase it through
+		// Bubble Tea internals or terminal-specific key delivery,
+		// guarantee the dismissal here.
 		if a.contextMenu.IsVisible() {
+			if msg.Type == tea.KeyEsc {
+				a.contextMenu.Hide()
+				return a, nil
+			}
 			var cmd tea.Cmd
 			a.contextMenu, cmd = a.contextMenu.Update(msg)
 			return a, cmd
@@ -583,8 +604,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Help screen intercepts all keys when visible
 		if a.help.IsVisible() {
-			if msg.String() == "esc" || msg.String() == "?" {
-				a.help.Hide()
+			a.help.Update(msg, a.width, a.height)
+			if !a.help.IsVisible() {
 				a.focus = FocusInput
 			}
 			return a, nil
@@ -901,8 +922,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 			// Check if sidebar selected a new room/conversation
-			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group {
-				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
+			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group || a.sidebar.SelectedDM() != a.messages.dm {
+				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), a.sidebar.SelectedDM())
 				a.onContextSwitch()
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
@@ -1596,6 +1617,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				err = a.client.SendRoomReaction(msg.Target.Room, msg.Target.ID, msg.Emoji)
 			} else if msg.Target.Group != "" {
 				err = a.client.SendGroupReaction(msg.Target.Group, msg.Target.ID, msg.Emoji)
+			} else if msg.Target.DM != "" {
+				err = a.client.SendDMReaction(msg.Target.DM, msg.Target.ID, msg.Emoji)
+			} else {
+				err = fmt.Errorf("unknown message context")
 			}
 			if err != nil {
 				a.statusBar.SetError("React failed: " + err.Error())
@@ -1911,6 +1936,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// be wrapped at the old width and would render off the right
 		// edge or with stale soft-wraps after a resize.
 		a.refreshMessageContent()
+		// Resize the textinput's pan window. If we set Width only in
+		// input.View (value-receiver render path), the assignment
+		// lands on a throwaway copy and the next input.Update sees
+		// Width=0 — handleOverflow then doesn't clip, the value
+		// renders in full, and lipgloss wraps to a 2nd inner row,
+		// blowing the input box up to 4 rows. Setting it here on
+		// the persistent App state makes the panning actually engage
+		// across keystrokes.
+		a.input.SetTextInputWidth(layoutInputContentWidth(a.width, a.memberPanel.IsVisible()))
 
 	case tea.MouseMsg:
 		return a.handleMouse(msg)
@@ -1922,8 +1956,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Populate sidebar and messages
 		a.sidebar.SetRooms(a.client.Rooms())
-		a.messages.currentUser = a.client.DisplayName(a.client.UserID())
-		a.messages.currentUserID = a.client.UserID()
 		a.messages.resolveName = a.client.DisplayName
 		a.messages.resolveRoomName = a.client.DisplayRoomName
 		a.search.resolveName = a.client.DisplayName
@@ -1967,7 +1999,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.input.SetNonMembers(a.activeNonMemberEntries())
 		}
 
-		a.statusBar.SetUser(a.client.DisplayName(a.client.UserID()), a.client.IsAdmin())
+		a.syncLocalIdentityUI()
 		a.statusBar.SetConnected(true)
 		a.updateTitle()
 
@@ -1988,6 +2020,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := a.handleServerMessage(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+		// Profile events can arrive after connectedWithClient. Refresh local
+		// identity sinks so status bar + mention highlighting stop showing raw
+		// nanoid fallbacks once display-name cache is hydrated.
+		a.syncLocalIdentityUI()
 		// Server messages can mutate any of: messages list, edits/deletes,
 		// reactions, system events, typing indicator, topic, retired-set,
 		// left state. Rather than instrument every call site inside
@@ -2133,6 +2169,10 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.settings, cmd = a.settings.HandleMouse(msg)
 		return a, cmd
 	}
+	if a.help.IsVisible() {
+		a.help.Update(msg, a.width, a.height)
+		return a, nil
+	}
 
 	// Other overlays are keyboard-only. Listing them here consumes any
 	// mouse event (click / wheel / drag) that arrives while the overlay
@@ -2140,7 +2180,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// don't bleed through to the sidebar / messages / compose input
 	// underneath. Any new modal with the same behaviour must be added
 	// to this list or it will silently pass clicks through.
-	if a.help.IsVisible() || a.search.IsVisible() || a.quickSwitch.IsVisible() || a.threadPanel.IsVisible() || a.newConv.IsVisible() ||
+	if a.search.IsVisible() || a.quickSwitch.IsVisible() || a.threadPanel.IsVisible() || a.newConv.IsVisible() ||
 		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.pendingPanel.IsVisible() ||
 		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
 		a.quitConfirm.IsVisible() || a.leaveConfirm.IsVisible() || a.leaveRoomConfirm.IsVisible() ||
@@ -2215,13 +2255,20 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 	switch panel {
 	case "sidebar":
 		a.focus = FocusSidebar
-		idx := layout.SidebarItemAt(y)
+		// Walk the section layout to map click row → cursor index.
+		// Pre-2026-05-05 used layout.SidebarItemAt which returned
+		// `y - 1`, ignoring the "Rooms"/"Messages"/"DMs" headers and
+		// the blank separators between sections — so clicks selected
+		// the wrong item, and clicks on header/blank rows still
+		// returned a (wrong) index.
+		visualRow := y - layout.SidebarY0 - 1
+		idx := a.sidebar.CursorAtRow(visualRow)
 		if idx >= 0 && idx < a.sidebar.totalItems() {
 			a.sidebar.cursor = idx
 			a.sidebar.updateSelection()
 			// Switch to selected room/conversation
-			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group {
-				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
+			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group || a.sidebar.SelectedDM() != a.messages.dm {
+				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), a.sidebar.SelectedDM())
 				a.onContextSwitch()
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
@@ -2266,20 +2313,26 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		idx := layout.MessageItemAt(y)
+		// Click maps to a message via the rowMap built during the
+		// most recent RefreshContent. Account for the panel's top
+		// border (1 row) + the header rows (returned by HeaderLines)
+		// to get the viewport row. MessageAtViewportRow then folds in
+		// viewport.YOffset to handle scrolled-content correctly.
+		//
+		// Click only SELECTS the message (highlights via cursor) and
+		// switches focus — Enter is the trigger that opens the
+		// context menu, via the existing keyboard `enter` path in
+		// MessagesModel.Update which emits MessageAction{open_menu}.
+		// Pre-2026-05-05 click also called contextMenu.Show directly,
+		// which (a) opened the menu without giving the user a chance
+		// to confirm the selection target, and (b) used a broken
+		// row→index mapping (`y - 1`) that ignored multi-row messages
+		// and viewport scroll.
+		viewportRow := y - layout.MessagesY0 - 1 - a.messages.HeaderLines()
+		idx := a.messages.MessageAtViewportRow(viewportRow)
 		if idx >= 0 && idx < len(a.messages.messages) {
 			a.messages.cursor = idx
-			msg := a.messages.messages[idx]
-			if !msg.IsSystem {
-				isOwn := a.client != nil && msg.FromID == a.client.UserID()
-				isAdmin := a.client != nil && a.client.IsAdmin()
-				isRoom := a.messages.room != ""
-				var myEmojis []string
-				if a.client != nil {
-					myEmojis = msg.UserEmojis(a.client.UserID())
-				}
-				a.contextMenu.Show(msg, x, y, isOwn, isAdmin, isRoom, a.pinnedBar.PinIDs(), myEmojis)
-			}
+			a.focus = FocusMessages
 		}
 
 	case "members":
@@ -2523,7 +2576,24 @@ func (a *App) updateTitle() {
 	UpdateTitle(serverName, total)
 }
 
-// sendReadReceipt sends a read receipt for the latest message in the active room/conversation.
+// syncLocalIdentityUI refreshes all UI fields that present the local user's
+// identity. At first connect, DisplayName may briefly fall back to raw userID
+// until profile frames arrive; calling this after server messages updates the
+// status bar and mention-highlighting identity once the profile cache is warm.
+func (a *App) syncLocalIdentityUI() {
+	if a.client == nil {
+		return
+	}
+	userID := a.client.UserID()
+	if userID == "" {
+		return
+	}
+	name := a.client.DisplayName(userID)
+	a.messages.currentUser = name
+	a.messages.currentUserID = userID
+	a.statusBar.SetUser(name, a.client.IsAdmin())
+}
+
 // resolveDisplayName maps a username (nanoid) to its display name for system
 // messages. Falls back to the raw username if no profile is available.
 func (a *App) resolveDisplayName(username string) string {
@@ -2540,6 +2610,7 @@ func (a *App) resolveRoomDisplayName(roomID string) string {
 	return roomID
 }
 
+// sendReadReceipt sends a read receipt for the latest message in the active room/conversation.
 func (a *App) sendReadReceipt() {
 	if a.client == nil {
 		return
@@ -2579,10 +2650,10 @@ func (a *App) sendReadReceipt() {
 // switchToSidebarSelection switches the messages context to whatever the
 // sidebar currently has selected. Used by Alt+Up/Down and quick switch.
 func (a *App) switchToSidebarSelection() {
-	if a.sidebar.SelectedRoom() == a.messages.room && a.sidebar.SelectedGroup() == a.messages.group {
+	if a.sidebar.SelectedRoom() == a.messages.room && a.sidebar.SelectedGroup() == a.messages.group && a.sidebar.SelectedDM() == a.messages.dm {
 		return
 	}
-	a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), "")
+	a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), a.sidebar.SelectedDM())
 	a.onContextSwitch()
 	a.syncMessagesLeftState()
 	a.messages.LoadFromDB(a.client)
@@ -4394,12 +4465,19 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		}
 	case "reaction":
 		var m protocol.Reaction
-		json.Unmarshal(msg.Raw, &m)
-		a.messages.AddReactionDecrypted(m, a.client)
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.messages.AddReactionDecrypted(m, a.client)
+			// Reconcile from the local DB copy (written by client.handleInternal
+			// before OnMessage dispatch) so render state matches persisted state
+			// even if live decryption or in-memory merge paths drift.
+			a.messages.SyncReactionsForMessage(a.client, m.ID)
+		}
 	case "reaction_removed":
 		var m protocol.ReactionRemoved
-		json.Unmarshal(msg.Raw, &m)
-		a.messages.RemoveReaction(m.ReactionID)
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.messages.RemoveReaction(m.ReactionID)
+			a.messages.SyncReactionsForMessage(a.client, m.ID)
+		}
 	case "sync_batch":
 		var batch protocol.SyncBatch
 		json.Unmarshal(msg.Raw, &batch)
@@ -4668,7 +4746,7 @@ func (a App) View() string {
 
 	// Layout dimensions for rendering. These local ints are derived
 	// from the same computeLayout source-of-truth that mouse handlers
-	// use (see internal/tui/mouse.go), kept as locals because View()
+	// use (see internal/tui/layout.go), kept as locals because View()
 	// uses them in many downstream rendering positions and the int
 	// form is more concise than reading struct fields each time.
 	// computeLayout is a pure function, so the values here match
@@ -4689,14 +4767,33 @@ func (a App) View() string {
 	}
 
 	// Render panels
-	sidebar := a.sidebar.View(sidebarWidth, a.height-statusBarHeight-1, a.focus == FocusSidebar)
+	// Sidebar inner-content height (style.Height arg). Sidebar's outer
+	// rendered height = inner + 2 borders, so to span rows 0..bodyEnd
+	// (= height - statusBarHeight rows) we pass height - statusBarHeight
+	// - 2. Pre-fix this was `-1` which made sidebar render one row
+	// taller than the messages+input column on the right; the extra row
+	// pushed the screen one row past the terminal and scrolled the top
+	// borders off.
+	sidebar := a.sidebar.View(sidebarWidth, a.height-statusBarHeight-2, a.focus == FocusSidebar)
 
 	var mainPanel string
 	if a.search.IsVisible() {
 		searchView := a.search.View(mainWidth, mainHeight+inputHeight)
 		mainPanel = searchView
 	} else {
-		msgHeight := mainHeight
+		// Reply-preview / edit-mode banner — sits BETWEEN messages and
+		// input as a single styled row (no border). Lives outside the
+		// input box so the input pane stays at fixed 3 rows; the
+		// messages pane shrinks by `bannerRows` to keep mainPanel's
+		// total height constant. See InputModel.BannerView for the bug
+		// history.
+		bannerRows := a.input.BannerRows()
+		banner := a.input.BannerView(mainWidth)
+		if banner != "" {
+			banner += "\n"
+		}
+
+		msgHeight := mainHeight - bannerRows
 		if a.showHelpHint {
 			msgHeight-- // make room for the hint
 		}
@@ -4711,14 +4808,16 @@ func (a App) View() string {
 		} else {
 			input = a.input.View(mainWidth, a.focus == FocusInput)
 		}
-		mainPanel = messages + "\n" + hint + input
+		mainPanel = messages + "\n" + hint + banner + input
 	}
 
 	status := a.statusBar.View(a.width)
 
 	var body string
 	if a.memberPanel.IsVisible() {
-		members := a.memberPanel.View(memberWidth, a.height-statusBarHeight-1)
+		// See comment on sidebar.View above — same -2 to account for
+		// the rounded border's 2-row vertical frame.
+		members := a.memberPanel.View(memberWidth, a.height-statusBarHeight-2)
 		body = joinHorizontal(sidebar, joinHorizontal(mainPanel, members))
 	} else {
 		body = joinHorizontal(sidebar, mainPanel)

@@ -22,37 +22,37 @@ var (
 	usernameStyle = lipgloss.NewStyle().Bold(true)
 
 	timestampStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#64748B"))
+			Foreground(lipgloss.Color("#64748B"))
 
 	systemMsgStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#64748B")).
-		Italic(true)
+			Foreground(lipgloss.Color("#64748B")).
+			Italic(true)
 
 	replyRefStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#64748B")).
-		Italic(true)
+			Foreground(lipgloss.Color("#64748B")).
+			Italic(true)
 
 	reactionStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#7C3AED"))
+			Foreground(lipgloss.Color("#7C3AED"))
 
 	mentionStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#7C3AED")).
-		Bold(true)
+			Foreground(lipgloss.Color("#7C3AED")).
+			Bold(true)
 
 	mentionBorder = lipgloss.NewStyle().
-		BorderStyle(lipgloss.Border{Left: "▐"}).
-		BorderForeground(lipgloss.Color("#7C3AED"))
+			BorderStyle(lipgloss.Border{Left: "▐"}).
+			BorderForeground(lipgloss.Color("#7C3AED"))
 
 	messagesPanelStyle = lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#64748B"))
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#64748B"))
 
 	messagesFocusedStyle = lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#7C3AED"))
+				BorderStyle(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("#7C3AED"))
 
 	selectedMsgStyle = lipgloss.NewStyle().
-		Background(lipgloss.Color("#1E1E2E"))
+				Background(lipgloss.Color("#1E1E2E"))
 )
 
 // DisplayMessage is a message ready for rendering.
@@ -168,24 +168,24 @@ type DisplayAttachment struct {
 // the messages-render loop having no upper bound — scrolling up enough
 // blew past the pane height and corrupted the surrounding layout.
 type MessagesModel struct {
-	messages       []DisplayMessage
-	room           string
-	group          string
-	dm             string
-	roomTopic      string // Phase 18: current room topic, rendered in the two-line header above the stream. Empty for groups/DMs/topicless rooms.
-	cursor         int  // selected message index (-1 = none)
-	typingUsers    map[string]time.Time // user -> last typing time
-	currentUser    string               // display name — for @mention highlighting in body
-	currentUserID  string               // nanoid — for mention detection in payload
-	resolveName     func(string) string // user nanoid → display name (set by App)
-	resolveRoomName func(string) string // room nanoid → display name (set by App)
-	loadingHistory bool
-	hasMore        bool              // server indicated more history available
-	unreadFromID   string            // first unread message ID (for divider)
-	retired        map[string]bool   // userID -> account retired
-	left           bool              // current context is archived (read-only, user has left)
-	roomRetired    bool              // current context is a retired room (archived by admin)
-	filesDir       string            // <dataDir>/files — set by App after connect; used to derive per-attachment cached path for inline-image render
+	messages        []DisplayMessage
+	room            string
+	group           string
+	dm              string
+	roomTopic       string               // Phase 18: current room topic, rendered in the two-line header above the stream. Empty for groups/DMs/topicless rooms.
+	cursor          int                  // selected message index (-1 = none)
+	typingUsers     map[string]time.Time // user -> last typing time
+	currentUser     string               // display name — for @mention highlighting in body
+	currentUserID   string               // nanoid — for mention detection in payload
+	resolveName     func(string) string  // user nanoid → display name (set by App)
+	resolveRoomName func(string) string  // room nanoid → display name (set by App)
+	loadingHistory  bool
+	hasMore         bool            // server indicated more history available
+	unreadFromID    string          // first unread message ID (for divider)
+	retired         map[string]bool // userID -> account retired
+	left            bool            // current context is archived (read-only, user has left)
+	roomRetired     bool            // current context is a retired room (archived by admin)
+	filesDir        string          // <dataDir>/files — set by App after connect; used to derive per-attachment cached path for inline-image render
 
 	// viewport owns the scrollable message-stream region. Width and
 	// Height are set by View() each render to track terminal resize +
@@ -193,6 +193,13 @@ type MessagesModel struct {
 	// (called from the App on any message-slice change) — including
 	// the auto-scroll-to-bottom-if-was-at-bottom rule.
 	viewport viewport.Model
+
+	// rowMap[i] is the 0-indexed content row at which message i begins.
+	// Rebuilt each RefreshContent call from buildContent's second return.
+	// Used by MessageAtViewportRow to translate a click coordinate back
+	// to a message index — the click handler in app.go reads this via
+	// the accessor method, doesn't reach in directly.
+	rowMap []int
 }
 
 // SetFilesDir wires the per-server file cache directory into the render
@@ -245,6 +252,51 @@ func (m *MessagesModel) ScrollToMessage(msgID string) bool {
 		}
 	}
 	return false
+}
+
+// selectedMessageRowSpan returns the inclusive [start,end] content-row span for
+// the currently selected message. Rows are in viewport-content coordinates
+// (same space as viewport.YOffset), not message indexes.
+func (m MessagesModel) selectedMessageRowSpan() (start, end int, ok bool) {
+	if m.cursor < 0 || m.cursor >= len(m.messages) || len(m.rowMap) != len(m.messages) {
+		return 0, 0, false
+	}
+	start = m.rowMap[m.cursor]
+	if m.cursor+1 < len(m.rowMap) {
+		end = m.rowMap[m.cursor+1] - 1
+	} else {
+		end = m.viewport.TotalLineCount() - 1
+	}
+	if end < start {
+		end = start
+	}
+	return start, end, true
+}
+
+// ensureCursorVisible scrolls the viewport so the selected message remains
+// visible after keyboard navigation. Uses rowMap-derived content rows, not
+// message indexes, so wrapped/multi-line messages behave correctly.
+func (m *MessagesModel) ensureCursorVisible() {
+	start, end, ok := m.selectedMessageRowSpan()
+	if !ok || m.viewport.Height <= 0 {
+		return
+	}
+	visibleTop := m.viewport.YOffset
+	visibleBottom := visibleTop + m.viewport.Height - 1
+	if start < visibleTop {
+		m.viewport.ScrollUp(visibleTop - start)
+		return
+	}
+	if end > visibleBottom {
+		msgHeight := end - start + 1
+		// If a single message is taller than the viewport, pin its first row
+		// at the top so navigation always lands on the start of the message.
+		if msgHeight > m.viewport.Height {
+			m.viewport.ScrollDown(start - visibleTop)
+			return
+		}
+		m.viewport.ScrollDown(end - visibleBottom)
+	}
 }
 
 // SetRetired updates the set of known-retired users. Called by the app when
@@ -964,6 +1016,49 @@ func (m *MessagesModel) addReactionRecord(msgID, reactionID, user, emoji string)
 	}
 }
 
+// SyncReactionsForMessage replaces a single message's in-memory reaction state
+// with the canonical rows from the local DB. This is used after live
+// reaction/reaction_removed frames so UI state matches persisted state even if
+// a transient live-merge path misses.
+func (m *MessagesModel) SyncReactionsForMessage(c *client.Client, msgID string) {
+	if c == nil || msgID == "" {
+		return
+	}
+	st := c.Store()
+	if st == nil {
+		return
+	}
+
+	msgIdx := -1
+	for i, msg := range m.messages {
+		if msg.ID == msgID {
+			msgIdx = i
+			break
+		}
+	}
+	if msgIdx < 0 {
+		return
+	}
+
+	// Clear tracker entries currently attached to this message before reloading.
+	for _, byEmoji := range m.messages[msgIdx].ReactionsByUser {
+		for _, ids := range byEmoji {
+			for _, rid := range ids {
+				delete(reactionTracker, rid)
+			}
+		}
+	}
+	m.messages[msgIdx].ReactionsByUser = nil
+
+	reactions, err := st.GetReactionsForMessages([]string{msgID})
+	if err != nil {
+		return
+	}
+	for _, r := range reactions {
+		m.addReactionRecord(r.MessageID, r.ReactionID, r.User, r.Emoji)
+	}
+}
+
 // reactionMeta records everything needed to undo a reaction.
 type reactionMeta struct {
 	msgID string
@@ -1063,16 +1158,11 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 			// requestHistory keeps the call idempotent when there's
 			// nothing left to fetch.
 			if m.cursor == 0 && len(m.messages) > 0 && !m.loadingHistory {
+				m.ensureCursorVisible()
 				return m, m.requestHistory()
 			}
 		}
-		// Scroll viewport up if cursor would now be off-screen at the top.
-		// We approximate cursor's content-line position as cursor*1; the
-		// rough heuristic is good enough for "make cursor visible." The
-		// viewport's LineUp is bounded, so over-scroll is harmless.
-		if m.viewport.YOffset > m.cursor {
-			m.viewport.ScrollUp(m.viewport.YOffset - m.cursor)
-		}
+		m.ensureCursorVisible()
 	case "pageup":
 		// Pure viewport scroll, cursor unchanged. Page = viewport height.
 		m.viewport.ScrollUp(m.viewport.Height)
@@ -1111,12 +1201,7 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 		} else if m.cursor < len(m.messages)-1 {
 			m.cursor++
 		}
-		// Heuristic: if cursor is now below the visible region's
-		// bottom edge, scroll down enough to bring it into view.
-		visibleBottom := m.viewport.YOffset + m.viewport.Height - 1
-		if m.cursor > visibleBottom {
-			m.viewport.ScrollDown(m.cursor - visibleBottom)
-		}
+		m.ensureCursorVisible()
 	case "r": // reply
 		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
 			return m, func() tea.Msg {
@@ -1254,10 +1339,23 @@ func (m MessagesModel) renderHeader() (string, int) {
 // fixed cap (15 rows) means an image takes ~15 lines of scrollable
 // content rather than blowing out the visible region as it did
 // pre-refactor when imgMaxRows was visibleHeight*2/3.
-func (m MessagesModel) buildContent(width int) string {
+// buildContent renders the full scrollable content + a row map.
+//
+// The returned rowMap has one entry per message: rowMap[i] is the
+// 0-indexed content row at which message i begins. Used by mouse
+// click handling to translate a viewport row back to a message
+// index — see MessageAtViewportRow. Length == len(m.messages).
+//
+// Counting is done against the EMITTED line shape (count of '\n' in
+// the rendered line + 1), not against the message struct, so any
+// component that adds rows (reply preview, reactions, attachments,
+// inline images) is automatically accounted for.
+func (m MessagesModel) buildContent(width int) (string, []int) {
 	const imgMaxRows = 15
 
 	var b strings.Builder
+	rowMap := make([]int, len(m.messages))
+	currentRow := 0
 
 	// Top: loading-history indicator. Replaces the previous
 	// "shift start to show cursor at top" + "request history"
@@ -1266,9 +1364,11 @@ func (m MessagesModel) buildContent(width int) string {
 	if m.loadingHistory {
 		b.WriteString(systemMsgStyle.Render(" ── loading history ──"))
 		b.WriteString("\n")
+		currentRow++
 	} else if m.hasMore && len(m.messages) > 0 {
 		b.WriteString(systemMsgStyle.Render(" ── press up at top to load more history ──"))
 		b.WriteString("\n")
+		currentRow++
 	}
 
 	unreadShown := false
@@ -1282,10 +1382,19 @@ func (m MessagesModel) buildContent(width int) string {
 			divider := systemMsgStyle.Render(" ── new messages ──────────────────────────")
 			b.WriteString(divider + "\n")
 			unreadShown = true
+			currentRow++
 		}
+
+		// Record which content row this message starts on. The mouse
+		// click handler uses this map to map a click row back to a
+		// message index — see MessageAtViewportRow.
+		rowMap[i] = currentRow
+
+		var lineRows int
 
 		if msg.IsSystem {
 			line := systemMsgStyle.Render(" ── " + msg.SystemText + " ──")
+			lineRows = strings.Count(line, "\n") + 1
 			b.WriteString(line)
 			prevSender = ""
 			prevTS = 0
@@ -1299,6 +1408,7 @@ func (m MessagesModel) buildContent(width int) string {
 				tombstone = "message removed by " + deleterName
 			}
 			line := systemMsgStyle.Render(" ── " + tombstone + " ──")
+			lineRows = strings.Count(line, "\n") + 1
 			b.WriteString(line)
 			prevSender = ""
 			prevTS = 0
@@ -1411,9 +1521,11 @@ func (m MessagesModel) buildContent(width int) string {
 				line = selectedMsgStyle.Width(width - 2).Render(line)
 			}
 
+			lineRows = strings.Count(line, "\n") + 1
 			b.WriteString(line)
 		}
 		b.WriteString("\n")
+		currentRow += lineRows
 	}
 
 	// Typing indicator
@@ -1470,7 +1582,7 @@ func (m MessagesModel) buildContent(width int) string {
 		b.WriteString("\n")
 	}
 
-	return b.String()
+	return b.String(), rowMap
 }
 
 // RefreshContent rebuilds the scrollable message-stream content and
@@ -1494,11 +1606,50 @@ func (m MessagesModel) buildContent(width int) string {
 // O(content size) for line wrapping.
 func (m *MessagesModel) RefreshContent(width int) {
 	wasAtBottom := m.viewport.AtBottom() || m.viewport.TotalLineCount() == 0
-	content := m.buildContent(width)
+	content, rowMap := m.buildContent(width)
+	m.rowMap = rowMap
 	m.viewport.SetContent(content)
 	if wasAtBottom {
 		m.viewport.GotoBottom()
 	}
+}
+
+// MessageAtViewportRow translates a click row (0-indexed within the
+// VIEWPORT, NOT the panel as a whole — caller subtracts header rows
+// and the top border before passing in) to the message index
+// underneath that row. Returns -1 if the row falls outside any
+// message (e.g. on the loading-history banner, the unread divider,
+// or the trailing typing indicator / left-banner).
+//
+// Accounts for viewport scroll position: contentRow is computed as
+// viewportRow + viewport.YOffset, so a click on the same screen
+// position resolves to a different message depending on how far the
+// user has scrolled.
+func (m MessagesModel) MessageAtViewportRow(viewportRow int) int {
+	if viewportRow < 0 || len(m.rowMap) == 0 {
+		return -1
+	}
+	contentRow := viewportRow + m.viewport.YOffset
+	// rowMap is sorted ascending by construction (each subsequent
+	// message starts at or after the previous one's start). Walk
+	// linearly — len(rowMap) is bounded by the room buffer (small).
+	last := -1
+	for i, start := range m.rowMap {
+		if start > contentRow {
+			break
+		}
+		last = i
+	}
+	return last
+}
+
+// HeaderLines returns the number of rows the header takes ABOVE the
+// viewport in View output. Mouse handlers in app.go subtract this
+// (plus 1 for the top border) from a click's terminal-y to get the
+// viewport row, which they then pass to MessageAtViewportRow.
+func (m MessagesModel) HeaderLines() int {
+	_, lines := m.renderHeader()
+	return lines
 }
 
 // ScrollUp moves the viewport up by n lines without touching the cursor.
