@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/config"
@@ -2172,12 +2173,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			// First-ever connection failed — show guidance overlay
 			// with key info so the user can share with admin
-			fp := ""
-			pubKey := ""
-			if a.client != nil {
-				fp = a.client.KeyFingerprint()
-				pubKey = a.client.PublicKeyAuthorized()
-			}
+			fp, pubKey := a.connectFailedKeyInfo()
 			if fp == "" {
 				// Client didn't initialize — read key directly
 				fp = "unknown"
@@ -2191,6 +2187,48 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return a, tea.Batch(cmds...)
+}
+
+// connectFailedKeyInfo returns fingerprint + authorized key for the
+// pending-approval overlay. On first connect failure, a.client is still nil
+// (Connect() failed before ConnectedMsg), so we fall back to reading
+// KeyPath+".pub" directly.
+func (a App) connectFailedKeyInfo() (string, string) {
+	if a.client != nil {
+		fp := strings.TrimSpace(a.client.KeyFingerprint())
+		pub := strings.TrimSpace(a.client.PublicKeyAuthorized())
+		if fp != "" || pub != "" {
+			return fp, pub
+		}
+	}
+	return keyInfoFromPubPath(a.cfg.KeyPath)
+}
+
+func keyInfoFromPubPath(keyPath string) (string, string) {
+	path := strings.TrimSpace(keyPath)
+	if path == "" {
+		return "", ""
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, path[2:])
+		}
+	}
+	pubPath := path + ".pub"
+	pubData, err := os.ReadFile(pubPath)
+	if err != nil {
+		return "", ""
+	}
+	pubLine := strings.TrimSpace(string(pubData))
+	if pubLine == "" {
+		return "", ""
+	}
+	pubKey, _, _, _, err := ssh.ParseAuthorizedKey(pubData)
+	if err != nil {
+		// Keep the full key text for copy/share even if parse fails.
+		return "", pubLine
+	}
+	return ssh.FingerprintSHA256(pubKey), pubLine
 }
 
 // handleMouse processes mouse events — clicks and scroll wheel.
