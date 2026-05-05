@@ -200,6 +200,14 @@ type MessagesModel struct {
 	// to a message index — the click handler in app.go reads this via
 	// the accessor method, doesn't reach in directly.
 	rowMap []int
+
+	// pinnedBar is the rendered pinned-messages bar (PinnedBarModel.View
+	// output). Sticks at the top of the panel above the viewport, OUTSIDE
+	// the scroll region — always visible regardless of how far the user
+	// has scrolled. Set by App.View via SetPinnedBar before each render;
+	// empty string when there are no pins or the model is in collapsed-
+	// state-without-pins.
+	pinnedBar string
 }
 
 // SetFilesDir wires the per-server file cache directory into the render
@@ -244,10 +252,21 @@ func NewMessages() MessagesModel {
 
 // ScrollToMessage sets the cursor to the message with the given ID.
 // Returns true if the message was found.
+// ScrollToMessage moves the selection cursor to the message with the
+// given ID and scrolls the viewport so the row is visible. Returns
+// true if the message was found in the loaded buffer.
+//
+// Pre-2026-05-05 this only set the cursor — name was misleading
+// because the viewport position didn't change. Callers (pinned-bar
+// jump, reply-to-parent navigation) needed a follow-up scroll. Now
+// the function does both: cursor + scroll, via the existing
+// ensureCursorVisible helper which respects multi-row messages and
+// the rowMap.
 func (m *MessagesModel) ScrollToMessage(msgID string) bool {
 	for i, msg := range m.messages {
 		if msg.ID == msgID {
 			m.cursor = i
+			m.ensureCursorVisible()
 			return true
 		}
 	}
@@ -1652,6 +1671,26 @@ func (m MessagesModel) HeaderLines() int {
 	return lines
 }
 
+// SetPinnedBar installs the pre-rendered pinned-messages bar string
+// that View will splice in between the room header and the viewport.
+// Pointer receiver because View is value-receiver — this needs to
+// persist across renders. App.View calls this every render with the
+// current PinnedBarModel.View output (or empty string when no pins).
+func (m *MessagesModel) SetPinnedBar(s string) {
+	m.pinnedBar = s
+}
+
+// PinnedBarRows reports how many rows the pinned bar will occupy in
+// the rendered View. Mouse click handlers add this to the
+// header/border offset when computing which viewport row a click
+// landed on.
+func (m MessagesModel) PinnedBarRows() int {
+	if m.pinnedBar == "" {
+		return 0
+	}
+	return strings.Count(m.pinnedBar, "\n") + 1
+}
+
 // ScrollUp moves the viewport up by n lines without touching the cursor.
 // Used by mouse-wheel handlers — wheel scrolls without selecting a message
 // (per the cursor-vs-scroll decoupling agreed with the user). Returns
@@ -1673,9 +1712,12 @@ func (m MessagesModel) AtTop() bool {
 	return m.viewport.AtTop()
 }
 
-// View renders the messages pane. Composition:
+// View renders the messages pane. Composition (top → bottom):
 //   - Header (title + topic + blank separator) — always pinned at top,
 //     outside the viewport so it stays visible regardless of scroll.
+//   - Pinned-messages bar (when set via SetPinnedBar) — also outside the
+//     viewport, sticks just below the header. Collapsed → 1 row;
+//     expanded → header + per-pin rows + hint footer. Never scrolls.
 //   - Viewport — renders the scrollable content. View calls RefreshContent
 //     itself so the rendered output always reflects the current state of
 //     m.messages / m.left / m.roomRetired / m.typingUsers / etc. without
@@ -1708,8 +1750,15 @@ func (m *MessagesModel) View(width, height int, focused bool) string {
 	// scroll position when the user has scrolled up reading history.
 	m.RefreshContent(contentWidth)
 
+	pinnedRows := m.PinnedBarRows()
+	pinnedSection := ""
+	if pinnedRows > 0 {
+		// Trailing newline so viewport.View() starts on its own row.
+		pinnedSection = m.pinnedBar + "\n"
+	}
+
 	m.viewport.Width = contentWidth
-	m.viewport.Height = height - 2 - headerLines // borders + header
+	m.viewport.Height = height - 2 - headerLines - pinnedRows // borders + header + pinned bar
 	if m.viewport.Height < 1 {
 		m.viewport.Height = 1
 	}
@@ -1718,7 +1767,7 @@ func (m *MessagesModel) View(width, height int, focused bool) string {
 	if focused {
 		style = messagesFocusedStyle
 	}
-	return style.Width(width).Height(height).Render(headerStr + m.viewport.View())
+	return style.Width(width).Height(height).Render(headerStr + pinnedSection + m.viewport.View())
 }
 
 func formatSize(b int64) string {

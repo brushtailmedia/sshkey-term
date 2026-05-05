@@ -116,6 +116,7 @@ type App struct {
 	quickSwitch    QuickSwitchModel
 	threadPanel    ThreadPanelModel
 	pinnedBar      PinnedBarModel
+	roomPins       map[string][]string // room_id -> pinned message IDs (context-scoped cache)
 
 	// Config state
 	appConfig        *config.Config
@@ -225,6 +226,7 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		passphrase:      NewPassphrase(),
 		passphraseCh:    make(chan []byte, 1),
 		passphraseCache: make(map[string][]byte),
+		roomPins:        make(map[string][]string),
 		appConfig:       appCfg,
 		configDir:       configDir,
 		serverIdx:       serverIdx,
@@ -717,6 +719,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
+		// Expanded pinned-bar takes keyboard focus: up/down navigates
+		// the pin list, Enter jumps to the selected pin, u unpins, and
+		// Ctrl+P or Esc collapses. Without this intercept the keys
+		// fell through to the input/messages handlers (since
+		// PinnedBarModel.Update was never called from anywhere) — the
+		// user reported all the listed shortcuts were dead.
+		if a.pinnedBar.expanded {
+			var cmd tea.Cmd
+			a.pinnedBar, cmd = a.pinnedBar.Update(msg)
+			return a, cmd
+		}
+
 		switch msg.String() {
 		// ctrl+c is handled at the top of the dispatcher (above every
 		// modal IsVisible check) so it can't be swallowed by any
@@ -942,6 +956,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.onContextSwitch()
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
+				a.syncPinnedBarForContext()
 				a.refreshMessageContent()
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
@@ -1078,6 +1093,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				ID:   msg.MessageID,
 			})
 		}
+		return a, nil
+
+	case PinnedJumpMsg:
+		// Pressed Enter (or clicked) on a pin in the expanded bar.
+		// ScrollToMessage moves the cursor to the message AND scrolls
+		// the viewport so the row is visible. Focus shifts to the
+		// messages pane so the cursor highlight is rendered (cursor
+		// highlight is style-independent of focus, but the user's
+		// next up/down/r/e/etc. key naturally targets messages once
+		// focus is there). The pinned bar's own Update has already
+		// set p.expanded = false before emitting this message, so
+		// the bar is collapsed by the time the App renders.
+		a.messages.ScrollToMessage(msg.MessageID)
+		a.focus = FocusMessages
 		return a, nil
 
 	case MuteToggleMsg:
@@ -1712,6 +1741,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.onContextSwitch()
 		a.syncMessagesLeftState()
 		a.messages.LoadFromDB(a.client)
+		a.syncPinnedBarForContext()
 		a.refreshMessageContent()
 		a.messages.ScrollToMessage(msg.MessageID)
 		return a, nil
@@ -2007,6 +2037,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.onContextSwitch()
 			a.syncMessagesLeftState()
 			a.messages.LoadFromDB(a.client)
+			a.syncPinnedBarForContext()
 			a.refreshMessageContent()
 			// Set up member list for @completion
 			a.memberPanel.Refresh(a.client.Rooms()[0], "", a.client, a.sidebar.online)
@@ -2287,6 +2318,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				a.onContextSwitch()
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
+				a.syncPinnedBarForContext()
 				a.refreshMessageContent()
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
@@ -2303,47 +2335,57 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 	case "messages":
 		a.focus = FocusMessages
 
-		// Check if click is on the pinned bar (top 1-2 rows of messages panel)
-		pinnedBarRows := 0
-		if a.pinnedBar.HasPins() {
-			pinnedBarRows = 1 // collapsed = 1 row
-			if a.pinnedBar.expanded {
-				pinnedBarRows = len(a.pinnedBar.pins) + 2 // header + pins + hint
-			}
-		}
+		// Layout inside the messages panel (top → bottom):
+		//   row 0                         top border
+		//   rows 1..headerLines           room header (title / topic / blank)
+		//   rows ..pinnedBarRows          pinned-bar (only if HasPins)
+		//   rows ..viewport.Height        scrollable viewport
+		//   last row                      bottom border
+		//
+		// `relY` is the y coord relative to the panel's first content
+		// row (= y - MessagesY0 - 1 for the top border). Pinned bar
+		// sits AFTER the header — pre-2026-05-05 click handler treated
+		// pinnedBarRows as starting at relY=0 which is now the room
+		// header.
+		headerLines := a.messages.HeaderLines()
+		pinnedBarRows := a.messages.PinnedBarRows()
+		relY := y - layout.MessagesY0 - 1 // 0-indexed inside panel content area
 
-		relY := y - layout.MessagesY0 - 1 // relative to panel content
-		if a.pinnedBar.HasPins() && relY < pinnedBarRows {
+		// Click on the pinned bar.
+		if a.pinnedBar.HasPins() && relY >= headerLines && relY < headerLines+pinnedBarRows {
+			pinRel := relY - headerLines // 0-indexed within pinned bar
 			if !a.pinnedBar.expanded {
 				// Click on collapsed bar — expand
 				a.pinnedBar.Toggle()
-			} else if relY > 0 && relY <= len(a.pinnedBar.pins) {
-				// Click on a specific pin — jump to it
-				pinIdx := relY - 1
+			} else if pinRel > 0 && pinRel <= len(a.pinnedBar.pins) {
+				// Expanded: row 0 is the "Pinned (N)" header, then
+				// per-pin rows, then the hint footer. Click on a
+				// pin row jumps to it — same shape as Enter on the
+				// keyboard: scroll, select, collapse the bar, focus
+				// moves to messages.
+				pinIdx := pinRel - 1
 				if pinIdx >= 0 && pinIdx < len(a.pinnedBar.pins) {
+					id := a.pinnedBar.pins[pinIdx].ID
 					a.pinnedBar.cursor = pinIdx
-					a.messages.ScrollToMessage(a.pinnedBar.pins[pinIdx].ID)
+					a.pinnedBar.expanded = false
+					a.messages.ScrollToMessage(id)
+					a.focus = FocusMessages
 				}
 			}
 			return a, nil
 		}
 
 		// Click maps to a message via the rowMap built during the
-		// most recent RefreshContent. Account for the panel's top
-		// border (1 row) + the header rows (returned by HeaderLines)
-		// to get the viewport row. MessageAtViewportRow then folds in
-		// viewport.YOffset to handle scrolled-content correctly.
+		// most recent RefreshContent. Subtract panel top border (1)
+		// + header rows + pinned-bar rows to get the viewport row.
+		// MessageAtViewportRow then folds in viewport.YOffset to
+		// handle scrolled-content correctly.
 		//
 		// Click only SELECTS the message (highlights via cursor) and
 		// switches focus — Enter is the trigger that opens the
 		// context menu, via the existing keyboard `enter` path in
 		// MessagesModel.Update which emits MessageAction{open_menu}.
-		// Pre-2026-05-05 click also called contextMenu.Show directly,
-		// which (a) opened the menu without giving the user a chance
-		// to confirm the selection target, and (b) used a broken
-		// row→index mapping (`y - 1`) that ignored multi-row messages
-		// and viewport scroll.
-		viewportRow := y - layout.MessagesY0 - 1 - a.messages.HeaderLines()
+		viewportRow := relY - headerLines - pinnedBarRows
 		idx := a.messages.MessageAtViewportRow(viewportRow)
 		if idx >= 0 && idx < len(a.messages.messages) {
 			a.messages.cursor = idx
@@ -2464,6 +2506,7 @@ func (a *App) onContextSwitch() {
 	// LoadFromDB populates from store). A refresh here would push an
 	// empty slice into the viewport. Each caller refreshes itself
 	// after LoadFromDB via a.refreshMessageContent().
+	a.syncPinnedBarForContext()
 }
 
 // refreshMessageContent rebuilds the messages-pane scrollable content
@@ -2578,6 +2621,46 @@ func (a *App) syncMessagesLeftState() {
 	a.messages.SetRoomRetired(false)
 }
 
+// syncPinnedBarForContext applies the cached pin IDs for the active room to
+// the pinned bar. Non-room contexts (group / DM / empty) clear the pinned bar.
+func (a *App) syncPinnedBarForContext() {
+	a.ensureRoomPinsMap()
+	if a.messages.room == "" {
+		a.pinnedBar.SetPins("", nil, nil)
+		return
+	}
+	ids := a.roomPins[a.messages.room]
+	a.pinnedBar.SetPins(a.messages.room, ids, a.messages.messages)
+}
+
+func (a *App) ensureRoomPinsMap() {
+	if a.roomPins == nil {
+		a.roomPins = make(map[string][]string)
+	}
+}
+
+func appendUniquePinID(ids []string, id string) []string {
+	for _, existing := range ids {
+		if existing == id {
+			return ids
+		}
+	}
+	return append(ids, id)
+}
+
+func removePinID(ids []string, id string) []string {
+	out := ids[:0]
+	for _, existing := range ids {
+		if existing != id {
+			out = append(out, existing)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // updateTitle updates the terminal title with the total unread count.
 func (a *App) updateTitle() {
 	total := 0
@@ -2672,6 +2755,7 @@ func (a *App) switchToSidebarSelection() {
 	a.onContextSwitch()
 	a.syncMessagesLeftState()
 	a.messages.LoadFromDB(a.client)
+	a.syncPinnedBarForContext()
 	a.refreshMessageContent()
 	if a.memberPanel.IsVisible() {
 		a.memberPanel.Refresh(a.messages.room, a.messages.group, a.client, a.sidebar.online)
@@ -4591,44 +4675,58 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		}
 	case "pins":
 		var m protocol.Pins
-		json.Unmarshal(msg.Raw, &m)
-		if m.Room == a.messages.room {
-			// Decrypt bundled pinned messages and add to the display list for previews
-			var pinnedDisplayMsgs []DisplayMessage
-			pinnedDisplayMsgs = append(pinnedDisplayMsgs, a.messages.messages...)
-			for _, raw := range m.MessageData {
-				var pm protocol.Message
-				if err := json.Unmarshal(raw, &pm); err != nil {
-					continue
-				}
-				body := "(encrypted)"
-				if a.client != nil {
-					payload, err := a.client.DecryptRoomMessage(pm.Room, pm.Epoch, pm.Payload)
-					if err == nil {
-						body = payload.Body
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.ensureRoomPinsMap()
+			// Cache pins for every room we hear about so switching rooms can
+			// scope the pinned bar correctly without leaking prior room state.
+			a.roomPins[m.Room] = append([]string(nil), m.Messages...)
+			if m.Room == a.messages.room {
+				// Decrypt bundled pinned messages and add to the display list for previews
+				var pinnedDisplayMsgs []DisplayMessage
+				pinnedDisplayMsgs = append(pinnedDisplayMsgs, a.messages.messages...)
+				for _, raw := range m.MessageData {
+					var pm protocol.Message
+					if err := json.Unmarshal(raw, &pm); err != nil {
+						continue
 					}
+					body := "(encrypted)"
+					if a.client != nil {
+						payload, err := a.client.DecryptRoomMessage(pm.Room, pm.Epoch, pm.Payload)
+						if err == nil {
+							body = payload.Body
+						}
+					}
+					pinnedDisplayMsgs = append(pinnedDisplayMsgs, DisplayMessage{
+						ID:   pm.ID,
+						From: pm.From,
+						Body: body,
+						TS:   pm.TS,
+						Room: pm.Room,
+					})
 				}
-				pinnedDisplayMsgs = append(pinnedDisplayMsgs, DisplayMessage{
-					ID:   pm.ID,
-					From: pm.From,
-					Body: body,
-					TS:   pm.TS,
-					Room: pm.Room,
-				})
+				a.pinnedBar.SetPins(m.Room, m.Messages, pinnedDisplayMsgs)
 			}
-			a.pinnedBar.SetPins(m.Room, m.Messages, pinnedDisplayMsgs)
 		}
 	case "pinned":
 		var m protocol.Pinned
-		json.Unmarshal(msg.Raw, &m)
-		if m.Room == a.messages.room {
-			a.pinnedBar.AddPin(m.ID, a.messages.messages)
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.ensureRoomPinsMap()
+			a.roomPins[m.Room] = appendUniquePinID(a.roomPins[m.Room], m.ID)
+			if m.Room == a.messages.room {
+				a.pinnedBar.AddPin(m.ID, a.messages.messages)
+			}
 		}
 	case "unpinned":
 		var m protocol.Unpinned
-		json.Unmarshal(msg.Raw, &m)
-		if m.Room == a.messages.room {
-			a.pinnedBar.RemovePin(m.ID)
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.ensureRoomPinsMap()
+			a.roomPins[m.Room] = removePinID(a.roomPins[m.Room], m.ID)
+			if len(a.roomPins[m.Room]) == 0 {
+				delete(a.roomPins, m.Room)
+			}
+			if m.Room == a.messages.room {
+				a.pinnedBar.RemovePin(m.ID)
+			}
 		}
 	case "error":
 		var m protocol.Error
@@ -4812,6 +4910,13 @@ func (a App) View() string {
 		if a.showHelpHint {
 			msgHeight-- // make room for the hint
 		}
+		// Hand the pinned-bar render down to the messages model so it
+		// can splice it between the room header and the scrolling
+		// viewport. PinnedBarModel.View returns "" when there are no
+		// pins, which makes the splice a no-op. Width passed is the
+		// messages-pane content area (= panel width minus the 2 border
+		// cells lipgloss adds).
+		a.messages.SetPinnedBar(a.pinnedBar.View(mainWidth - 2))
 		messages := a.messages.View(mainWidth, msgHeight, a.focus == FocusMessages)
 		hint := ""
 		if a.showHelpHint {

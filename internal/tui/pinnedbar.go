@@ -9,9 +9,18 @@ import (
 
 // PinnedMessage holds a pin with preview info.
 type PinnedMessage struct {
-	ID     string
-	From   string
-	Body   string // truncated preview
+	ID   string
+	From string
+	Body string // truncated body for the preview line (≤ 60 chars)
+}
+
+// PinnedJumpMsg is emitted when the user presses Enter (or clicks) on
+// a pin in the expanded bar — it asks the App to scroll the messages
+// pane to that ID, select the message, and shift focus there. The
+// pinned bar itself collapses (set p.expanded = false in Update)
+// before the Cmd fires so the menu/cursor isn't hidden behind it.
+type PinnedJumpMsg struct {
+	MessageID string
 }
 
 // PinnedBarModel manages the collapsible pinned messages bar.
@@ -20,11 +29,6 @@ type PinnedBarModel struct {
 	pins     []PinnedMessage
 	room     string
 	cursor   int
-}
-
-// PinnedJumpMsg is sent when the user clicks a pinned message to jump to it.
-type PinnedJumpMsg struct {
-	MessageID string
 }
 
 func (p *PinnedBarModel) SetPins(room string, pinIDs []string, messages []DisplayMessage) {
@@ -104,6 +108,17 @@ func (p *PinnedBarModel) PinIDs() []string {
 	return ids
 }
 
+// Update handles key events for the expanded pinned bar. The bar acts
+// as a focused selector over its pins: up/down moves the cursor,
+// Enter jumps to the selected pin, u unpins it, and Ctrl+P or Esc
+// collapses the bar.
+//
+//	up, k       move cursor up one pin
+//	down, j     move cursor down one pin
+//	enter       jump → app scrolls + selects the message, focus moves
+//	            to messages, bar collapses
+//	u           unpin selected pin (UnpinRequestMsg)
+//	ctrl+p, esc collapse the bar
 func (p PinnedBarModel) Update(msg tea.KeyMsg) (PinnedBarModel, tea.Cmd) {
 	if !p.expanded {
 		return p, nil
@@ -117,22 +132,33 @@ func (p PinnedBarModel) Update(msg tea.KeyMsg) (PinnedBarModel, tea.Cmd) {
 		if p.cursor < len(p.pins)-1 {
 			p.cursor++
 		}
+
 	case "enter":
+		// Jump to the selected pin in the messages pane. Collapse
+		// the bar first so the message the user just jumped to isn't
+		// covered by the expanded bar; the App handler shifts focus
+		// to messages so the cursor highlight is visible.
 		if p.cursor < len(p.pins) {
 			id := p.pins[p.cursor].ID
+			p.expanded = false
 			return p, func() tea.Msg {
 				return PinnedJumpMsg{MessageID: id}
 			}
 		}
-	case "u", "d", "delete":
-		// Unpin the selected message
+
+	case "u":
+		// Unpin the selected pin. UnpinRequestMsg has an existing
+		// handler in app.go that emits the wire envelope.
 		if p.cursor < len(p.pins) {
 			id := p.pins[p.cursor].ID
 			return p, func() tea.Msg {
 				return UnpinRequestMsg{MessageID: id}
 			}
 		}
-	case "esc":
+
+	case "ctrl+p", "esc":
+		// Ctrl+P is the canonical collapse — same key that opened it.
+		// Esc kept as a secondary dismiss path matching other modals.
 		p.expanded = false
 	}
 	return p, nil
@@ -150,7 +176,7 @@ func (p PinnedBarModel) View(width int) string {
 	}
 
 	if !p.expanded {
-		return systemMsgStyle.Render(fmt.Sprintf(" ▶ %d pinned message(s)  (Ctrl+P to expand)", len(p.pins)))
+		return systemMsgStyle.Render(fmt.Sprintf(" ▶ %d pinned message(s)  (Ctrl+p to expand)", len(p.pins)))
 	}
 
 	var b strings.Builder
@@ -167,7 +193,7 @@ func (p PinnedBarModel) View(width int) string {
 		}
 		b.WriteString(line + "\n")
 	}
-	b.WriteString(systemMsgStyle.Render(" Enter=jump  u=unpin  Esc=collapse"))
+	b.WriteString(systemMsgStyle.Render(" Enter=jump  u=unpin  Ctrl+p=collapse"))
 
 	return b.String()
 }
