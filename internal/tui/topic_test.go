@@ -124,7 +124,7 @@ func TestMessagesHeader_GroupContext_UsesResolvedGroupName(t *testing.T) {
 func TestMessagesHeader_DMContext_NoTopicLine(t *testing.T) {
 	m := NewMessages()
 	m.SetContext("", "", "dm_abc")
-	m.resolveName = func(id string) string {
+	m.resolveDMName = func(id string) string {
 		if id == "dm_abc" {
 			return "Bob"
 		}
@@ -139,6 +139,28 @@ func TestMessagesHeader_DMContext_NoTopicLine(t *testing.T) {
 	// Just make sure no stray topic-label artifact is present.
 	if strings.Contains(out, "Topic:") {
 		t.Errorf("DM context must not include 'Topic:' label; got:\n%s", out)
+	}
+}
+
+// TestMessagesHeader_DMContext_UsesResolveDMName ensures DM headers resolve
+// via dm-id specific resolver instead of treating the dm ID as a user ID.
+func TestMessagesHeader_DMContext_UsesResolveDMName(t *testing.T) {
+	m := NewMessages()
+	m.SetContext("", "", "dm_abc")
+	m.resolveName = func(id string) string { return "WRONG:" + id }
+	m.resolveDMName = func(id string) string {
+		if id == "dm_abc" {
+			return "Alice"
+		}
+		return ""
+	}
+
+	out := stripANSI(m.View(80, 20, false))
+	if !strings.Contains(out, "Alice") {
+		t.Fatalf("DM context should render resolved DM peer name, got:\n%s", out)
+	}
+	if strings.Contains(out, "WRONG:dm_abc") {
+		t.Fatalf("DM context should not use resolveName on dm ID, got:\n%s", out)
 	}
 }
 

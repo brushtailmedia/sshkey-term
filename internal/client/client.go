@@ -1357,6 +1357,16 @@ func (c *Client) DisplayGroupName(groupID string) string {
 	return groupID
 }
 
+// DisplayDMName returns the other party's display name for a 1:1 DM ID.
+// Falls back to the raw DM ID when the conversation isn't cached yet.
+func (c *Client) DisplayDMName(dmID string) string {
+	other := strings.TrimSpace(c.DMOther(dmID))
+	if other == "" {
+		return dmID
+	}
+	return c.DisplayName(other)
+}
+
 // DisplayRoomTopic returns the topic for a room nanoid ID, or an empty
 // string if no topic is set (or the room isn't cached yet). Phase 18:
 // parallel to DisplayRoomName, wraps the store helper so TUI code can
