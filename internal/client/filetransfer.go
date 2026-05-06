@@ -184,6 +184,30 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 
 	select {
 	case fileID := <-pending.fileID:
+		// Cache plaintext locally so the sender doesn't re-download
+		// their own upload from the server when the message echo
+		// arrives — the auto-preview goroutine fired by storeRoomMessage
+		// would otherwise pull the same bytes back via Channel 2,
+		// hold downloadChanMu for the round-trip, and produce visible
+		// freeze "as if it were a re-upload."
+		//
+		// Best-effort write: if disk is full / permissions are wrong,
+		// the auto-preview goroutine will simply do its normal download.
+		// Same eager-thumbnail goroutine spawned post-write so the
+		// sender's first inline render of their own upload is fast.
+		if c.cfg.DataDir != "" {
+			localPath := filepath.Join(c.cfg.DataDir, "files", fileID)
+			if err := os.MkdirAll(filepath.Dir(localPath), 0700); err == nil {
+				if err := os.WriteFile(localPath, data, 0600); err == nil {
+					go func() {
+						if terr := GenerateThumbnail(localPath, ThumbnailPath(localPath)); terr != nil && c.logger != nil {
+							c.logger.Debug("thumbnail generation failed",
+								"file_id", fileID, "error", terr)
+						}
+					}()
+				}
+			}
+		}
 		return fileID, nil
 	case err := <-pending.err:
 		return "", err
@@ -363,6 +387,20 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 	if err := os.WriteFile(localPath, plaintext, 0600); err != nil {
 		return "", err
 	}
+
+	// Eager thumbnail generation: spawn a goroutine to decode +
+	// downscale + persist the inline-display thumbnail. By the time
+	// the user scrolls to the message, the thumbnail is usually
+	// ready, and RenderImageInline takes the fast (read-thumbnail)
+	// path. Falls back to its own lazy generation if we get there
+	// first. Non-blocking — fire-and-forget; failure is logged at
+	// Debug and otherwise silent (auto-preview is opportunistic).
+	go func() {
+		if err := GenerateThumbnail(localPath, ThumbnailPath(localPath)); err != nil && c.logger != nil {
+			c.logger.Debug("thumbnail generation failed",
+				"file_id", fileID, "error", err)
+		}
+	}()
 
 	return localPath, nil
 }

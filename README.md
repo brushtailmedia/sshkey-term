@@ -32,7 +32,8 @@ Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat)
 │  sshkey-term (terminal client)       │
 ├──────────────────────────────────────┤
 │  Bubble Tea         UI chrome        │
-│  rasterm            inline images    │
+│  block-cell         inline images    │
+│  x/image/draw       thumbnail resize │
 ├──────────────────────────────────────┤
 │  Go core                             │
 │  x/crypto/ssh       SSH connection   │
@@ -51,7 +52,8 @@ Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat)
 ```
 
 - **Bubble Tea** -- sidebar, room list, input bar, navigation
-- **rasterm** -- inline image rendering (kitty, iTerm2, sixel protocols)
+- **block-cell inline images** -- truecolor (or 256-color fallback) Unicode quadrant blocks rendered as ordinary text cells. Lives in bubbletea's text-cell layer, not a graphics-protocol overlay, so modal overlays clear cleanly and scrolling reflows correctly. For crisp inline images, set your terminal's line-height to 1.0 (see KEYBINDINGS.md).
+- **golang.org/x/image/draw** -- downscaling source images to thumbnail size for cell rendering
 - **Go core** -- SSH connection, protocol handling, E2E crypto, local encrypted DB (go-sqlcipher, requires cgo)
 
 ## Requirements

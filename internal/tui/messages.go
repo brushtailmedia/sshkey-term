@@ -1514,12 +1514,23 @@ func (m MessagesModel) renderHeader() (string, int) {
 // Used for line wrapping inside lipgloss styles (e.g. selectedMsgStyle
 // .Width(width-2)) and for image-render bounds.
 //
-// imgMaxRows is the per-image height cap. With viewport adoption the
-// image is rendered into the content stream, so its height counts
-// against the viewport's total content height — picking a generous
-// fixed cap (15 rows) means an image takes ~15 lines of scrollable
-// content rather than blowing out the visible region as it did
-// pre-refactor when imgMaxRows was visibleHeight*2/3.
+// imgMaxRows / imgMaxCols are the per-image inline-display caps.
+// 40 cols × 12 rows is a thumbnail-sized window — slightly larger
+// than the original 32×8 cap because the block-cell renderer
+// (imagerender.go) lives in the text-cell layer instead of the
+// graphics-protocol layer, so:
+//   - There's no layout-break risk at this size (cells respect the
+//     message pane bounds; modal overlays clear cleanly).
+//   - The encoded escape sequence is small (~10 KB regardless of
+//     source pixel count, since output is cell × color escapes
+//     not encoded image data).
+// 40×12 keeps images visibly thumbnail-sized vs message text without
+// dominating the pane on smaller terminals. Subject legibility at
+// this density comes from the NearestNeighbor thumbnail-sampling
+// kernel (see client/thumbnail.go), not from raw cell count — bumping
+// dims is available if needed but trades off layout discipline.
+// Users press `o` to open the original at full resolution in their
+// system viewer.
 // buildContent renders the full scrollable content + a row map.
 //
 // The returned rowMap has one entry per message: rowMap[i] is the
@@ -1532,7 +1543,8 @@ func (m MessagesModel) renderHeader() (string, int) {
 // component that adds rows (reply preview, reactions, attachments,
 // inline images) is automatically accounted for.
 func (m MessagesModel) buildContent(width int) (string, []int) {
-	const imgMaxRows = 15
+	const imgMaxRows = 12
+	const imgMaxCols = 40
 
 	var b strings.Builder
 	rowMap := make([]int, len(m.messages))
@@ -1683,8 +1695,20 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 					// the visible panel; now images live in scrollable
 					// content so an image is N rows of buffer instead of
 					// "consumes 2/3 of the on-screen pane."
-					imgStr := RenderImageInline(localPath, width-8, imgMaxRows)
+					maxC := width - 8
+					if maxC > imgMaxCols {
+						maxC = imgMaxCols
+					}
+					imgStr := RenderImageInline(localPath, maxC, imgMaxRows)
 					if imgStr != "" {
+						// Indent each row of the rendered image by the
+						// same one-cell left gutter used by message
+						// headers, body lines (bodyWithGutter), reply
+						// previews, reactions, and attachment captions
+						// — so an image visually aligns with its
+						// surrounding message text instead of starting
+						// at column 0.
+						imgStr = " " + strings.ReplaceAll(imgStr, "\n", "\n ")
 						line += "\n" + imgStr
 						line += "\n " + fmt.Sprintf("%s (%s)", att.Name, formatSize(att.Size))
 					} else {

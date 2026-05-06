@@ -71,10 +71,6 @@ func TestAttachmentLocalPath_CacheHit(t *testing.T) {
 // a user manually opens one.
 func TestRenderImageInline_MalformedBytesDoesNotPanic(t *testing.T) {
 	dir := t.TempDir()
-	// Random bytes that claim to be a PNG but aren't — image.Decode
-	// should return an error, which RenderImageInline treats as a
-	// render miss. If a future decoder bug panics instead, the
-	// deferred recover catches it and we still return "".
 	path := filepath.Join(dir, "malformed.png")
 	malformed := []byte{0x89, 'P', 'N', 'G', 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF}
 	if err := os.WriteFile(path, malformed, 0600); err != nil {
@@ -87,156 +83,92 @@ func TestRenderImageInline_MalformedBytesDoesNotPanic(t *testing.T) {
 		}
 	}()
 
-	got := RenderImageInline(path, 80, 40)
+	got := RenderImageInline(path, 40, 12)
 	if got != "" {
-		// A terminal without image capability also returns "" — either
-		// outcome is acceptable; the important invariant is no panic.
-		t.Logf("RenderImageInline returned non-empty on malformed bytes (len=%d) — acceptable if tests run under a capable terminal", len(got))
+		t.Logf("RenderImageInline returned non-empty on malformed bytes (len=%d) — acceptable provided no panic", len(got))
 	}
 }
 
-// withTermCapability temporarily overrides the package-level
-// termImageCapability cache for the duration of a test, restoring the
-// original via t.Cleanup. Tests MUST NOT run in parallel when using
-// this helper because the cache is package-scope global state — any
-// t.Parallel() call in the same package's tests could race with the
-// override. None of the existing imagerender tests use t.Parallel, and
-// the helper intentionally doesn't call it either.
-func withTermCapability(t *testing.T, cap string) {
-	t.Helper()
-	prev := termImageCapability
-	prevChecked := termImageCapabilityChecked
-	termImageCapability = cap
-	termImageCapabilityChecked = true
-	t.Cleanup(func() {
-		termImageCapability = prev
-		termImageCapabilityChecked = prevChecked
-	})
+// TestCanRenderImages_DiagnosticDisable pins the env-var override.
+// SSHKEY_NO_INLINE_IMAGES=1 must force the placeholder path so users
+// (and us in triage) can isolate inline-image-rendering behavior
+// without rebuilding.
+func TestCanRenderImages_DiagnosticDisable(t *testing.T) {
+	prev, set := os.LookupEnv("SSHKEY_NO_INLINE_IMAGES")
+	defer func() {
+		if set {
+			os.Setenv("SSHKEY_NO_INLINE_IMAGES", prev)
+		} else {
+			os.Unsetenv("SSHKEY_NO_INLINE_IMAGES")
+		}
+	}()
+
+	os.Setenv("SSHKEY_NO_INLINE_IMAGES", "1")
+	if CanRenderImages() {
+		t.Error("CanRenderImages with SSHKEY_NO_INLINE_IMAGES=1 returned true, want false")
+	}
+
+	os.Unsetenv("SSHKEY_NO_INLINE_IMAGES")
+	if !CanRenderImages() {
+		t.Error("CanRenderImages with env var unset returned false, want true (block-cell rendering uses universal ANSI escapes)")
+	}
 }
 
-// TestRenderImageInline_NoCapabilityReturnsEmpty pins the core "no
-// terminal image protocol = placeholder" invariant: if the terminal
-// can't render images, RenderImageInline must return "" regardless of
-// the file's state (missing, corrupt, valid, zero-byte). This is what
-// makes Terminal.app / Windows Terminal / vanilla xterm / piped output
-// all degrade cleanly to the 🖼 placeholder.
-//
-// The test forces "capability already checked and unavailable" so
-// RenderImageInline short-circuits immediately and returns the
-// placeholder path without probing terminal capabilities.
-func TestRenderImageInline_NoCapabilityReturnsEmpty(t *testing.T) {
-	withTermCapability(t, "")
-
-	dir := t.TempDir()
+// TestUseTrueColor_DetectsCOLORTERM pins the truecolor detection logic.
+// Modern terminals set $COLORTERM=truecolor or =24bit; we use truecolor
+// escapes for them and 256-color escapes for everything else.
+func TestUseTrueColor_DetectsCOLORTERM(t *testing.T) {
+	prev, set := os.LookupEnv("COLORTERM")
+	defer func() {
+		if set {
+			os.Setenv("COLORTERM", prev)
+		} else {
+			os.Unsetenv("COLORTERM")
+		}
+	}()
 
 	cases := []struct {
-		name  string
-		setup func() string
+		val  string
+		want bool
 	}{
-		{
-			name: "missing file",
-			setup: func() string {
-				return filepath.Join(dir, "does_not_exist.png")
-			},
-		},
-		{
-			name: "zero-byte file",
-			setup: func() string {
-				p := filepath.Join(dir, "empty.png")
-				if err := os.WriteFile(p, nil, 0600); err != nil {
-					t.Fatalf("seed empty: %v", err)
-				}
-				return p
-			},
-		},
-		{
-			name: "corrupt bytes",
-			setup: func() string {
-				p := filepath.Join(dir, "corrupt.png")
-				if err := os.WriteFile(p, []byte{0x00, 0x01, 0x02, 0x03}, 0600); err != nil {
-					t.Fatalf("seed corrupt: %v", err)
-				}
-				return p
-			},
-		},
+		{"truecolor", true},
+		{"24bit", true},
+		{"", false},
+		{"256color", false},
+		{"unknown", false},
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			path := tc.setup()
-			got := RenderImageInline(path, 80, 40)
-			if got != "" {
-				t.Errorf("RenderImageInline with no capability returned %d bytes, want \"\"", len(got))
+		t.Run(tc.val, func(t *testing.T) {
+			if tc.val == "" {
+				os.Unsetenv("COLORTERM")
+			} else {
+				os.Setenv("COLORTERM", tc.val)
+			}
+			got := useTrueColor()
+			if got != tc.want {
+				t.Errorf("useTrueColor with COLORTERM=%q = %v, want %v", tc.val, got, tc.want)
 			}
 		})
 	}
 }
 
-// TestCanRenderImages_NoCapabilityProbeIsCached verifies that a failed
-// sixel probe is cached and not re-run on subsequent calls. Repeated
-// probing can block UI render loops in terminals that don't support
-// image protocols.
-func TestCanRenderImages_NoCapabilityProbeIsCached(t *testing.T) {
-	prevCap := termImageCapability
-	prevChecked := termImageCapabilityChecked
-	prevProbe := detectSixelCapable
+// TestRenderImageInline_MissingFile pins the file-missing failure mode.
+// The os.Stat error in RenderImageInline must collapse to "" so the
+// caller renders the placeholder instead of spewing garbage or panicking.
+func TestRenderImageInline_MissingFile(t *testing.T) {
+	prev, set := os.LookupEnv("SSHKEY_NO_INLINE_IMAGES")
 	defer func() {
-		termImageCapability = prevCap
-		termImageCapabilityChecked = prevChecked
-		detectSixelCapable = prevProbe
+		if set {
+			os.Setenv("SSHKEY_NO_INLINE_IMAGES", prev)
+		} else {
+			os.Unsetenv("SSHKEY_NO_INLINE_IMAGES")
+		}
 	}()
+	os.Unsetenv("SSHKEY_NO_INLINE_IMAGES")
 
-	termImageCapability = ""
-	termImageCapabilityChecked = false
-	probeCalls := 0
-	detectSixelCapable = func() (bool, error) {
-		probeCalls++
-		return false, nil
-	}
-
-	if CanRenderImages() {
-		t.Fatal("first probe unexpectedly reported image capability")
-	}
-	if CanRenderImages() {
-		t.Fatal("second call unexpectedly reported image capability")
-	}
-	if probeCalls != 1 {
-		t.Fatalf("sixel probe calls = %d, want 1", probeCalls)
-	}
-}
-
-// TestRenderImageInline_MissingFileWithCapability verifies the file-
-// missing failure mode with a capability forced on. The Open error at
-// imagerender.go:63-66 must collapse to "" so the caller renders the
-// placeholder instead of spewing garbage or panicking. Without forcing
-// the capability we couldn't distinguish "no capability short-circuit"
-// from "capability present but file missing."
-//
-// We pick "kitty" as the forced capability because it's env-var-driven
-// in rasterm (no escape-code interaction) so overriding it is inert.
-func TestRenderImageInline_MissingFileWithCapability(t *testing.T) {
-	withTermCapability(t, "kitty")
-
-	got := RenderImageInline("/definitely/does/not/exist/photo.png", 80, 40)
+	got := RenderImageInline("/definitely/does/not/exist/photo.png", 40, 12)
 	if got != "" {
 		t.Errorf("RenderImageInline on missing file = %d bytes, want \"\"", len(got))
-	}
-}
-
-// TestCanRenderImages_CachedCapabilitySkipsProbe verifies the
-// short-circuit at imagerender.go:33-35: once termImageCapability is
-// set (by the init() detector or a previous lazy probe), subsequent
-// CanRenderImages calls must return true without re-probing. Probe
-// re-entry inside a Bubble Tea alt-screen frame is the exact scenario
-// where a stray terminal response could interleave with keyboard
-// input; the cache prevents it.
-func TestCanRenderImages_CachedCapabilitySkipsProbe(t *testing.T) {
-	for _, cap := range []string{"kitty", "iterm", "sixel"} {
-		t.Run(cap, func(t *testing.T) {
-			withTermCapability(t, cap)
-			if !CanRenderImages() {
-				t.Errorf("CanRenderImages with cached %q capability returned false", cap)
-			}
-		})
 	}
 }
