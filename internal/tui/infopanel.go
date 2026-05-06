@@ -127,10 +127,13 @@ func (i *InfoPanelModel) ShowGroup(groupID string, c *client.Client, online map[
 	i.cursor = 0
 	i.left = false
 	i.retired = false
+	i.topic = ""
+	i.name = ""
 	if c != nil {
 		if st := c.Store(); st != nil {
 			i.left = st.IsGroupLeft(groupID)
 		}
+		i.name = c.DisplayGroupName(groupID)
 	}
 
 	i.members = nil
@@ -422,11 +425,8 @@ func (i InfoPanelModel) View(width int) string {
 			dot = checkStyle.Render("●")
 		}
 		line := fmt.Sprintf("   %s %s", dot, m.DisplayName)
-		if m.User != m.DisplayName {
-			line += helpDescStyle.Render(fmt.Sprintf(" (%s)", m.User))
-		}
 		if m.Verified {
-			line += checkStyle.Render(" ✓")
+			line += checkStyle.Render(" ✓ verified")
 		}
 		if idx == i.cursor {
 			line = completionSelectedStyle.Render(line)

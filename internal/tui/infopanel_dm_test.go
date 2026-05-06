@@ -127,6 +127,29 @@ func TestInfoPanel_DMViewRendersBothParties(t *testing.T) {
 	}
 }
 
+func TestInfoPanel_MemberRowsHideUserIDAndShowVerifiedLabelOnlyWhenVerified(t *testing.T) {
+	i := InfoPanelModel{
+		visible: true,
+		group:   "group_x",
+		isGroup: true,
+		members: []memberInfo{
+			{User: "usr_alice", DisplayName: "Alice", Verified: true},
+			{User: "usr_bob", DisplayName: "Bob", Verified: false},
+		},
+	}
+
+	view := i.View(80)
+	if strings.Contains(view, "(usr_alice)") || strings.Contains(view, "(usr_bob)") {
+		t.Fatalf("info panel should not render member nanoid labels, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Alice") || !strings.Contains(view, "verified") {
+		t.Fatalf("verified member should show display name + verified label, got:\n%s", view)
+	}
+	if strings.Contains(view, "Bob verified") || strings.Contains(view, "Bob ✓") {
+		t.Fatalf("unverified member should not show verified marker, got:\n%s", view)
+	}
+}
+
 func TestInfoPanel_DMViewOmitsEnterMessageHint(t *testing.T) {
 	i := InfoPanelModel{
 		visible: true,
