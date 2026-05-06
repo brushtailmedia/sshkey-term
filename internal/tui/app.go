@@ -1051,7 +1051,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// the edit envelope for the tracked target instead of a
 			// normal send.
 			if msg.String() == "enter" && a.input.IsEditing() {
-				text := strings.TrimSpace(a.input.Value())
+				text := strings.TrimSpace(a.input.ValueForSend())
 				if text == "" {
 					// Empty body on edit is invalid — same as sending an
 					// empty message. Exit edit mode silently.
@@ -1922,7 +1922,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						a.statusBar.SetError("Download failed: " + err.Error())
 						return
 					}
-					client.OpenFile(path)
+					// Pass att.Name as the extension hint — the cached
+					// file lives at .../files/<fileID> with no extension,
+					// which makes macOS `open` and xdg-open fall back to
+					// text editors. OpenFile uses the hint's extension to
+					// create a sibling symlink (or copy) the OS can
+					// identify by file type.
+					client.OpenFile(path, att.Name)
 				}()
 			}
 		case "save_attachment":
@@ -4782,27 +4788,43 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			// For now, messages view needs an AddDMMessage — we'll use the same
 			// DisplayMessage path as groups since DMs use the same wrapped-key model.
 			if a.client != nil {
-				payload, err := a.client.DecryptDMMessage(m.WrappedKeys, m.Payload)
-				body := "(encrypted)"
-				replyTo := ""
-				var mentions []string
-				if err == nil {
-					body = payload.Body
-					replyTo = payload.ReplyTo
-					mentions = payload.Mentions
+				// Dedup by ID — sync_batch dispatches DM messages
+				// through this case, and they may already be present
+				// from LoadFromDB. Without this guard, fresh boot
+				// produces visibly duplicated DM messages until a
+				// context switch rebuilds from the store.
+				duplicate := false
+				if m.ID != "" {
+					for _, existing := range a.messages.messages {
+						if existing.ID == m.ID {
+							duplicate = true
+							break
+						}
+					}
 				}
-				from := a.client.DisplayName(m.From)
-				a.messages.messages = append(a.messages.messages, DisplayMessage{
-					ID:       m.ID,
-					FromID:   m.From,
-					From:     from,
-					Body:     body,
-					TS:       m.TS,
-					DM:       m.DM,
-					ReplyTo:  replyTo,
-					Mentions: mentions,
-				})
-				a.refreshMessageContent()
+				if !duplicate {
+					payload, err := a.client.DecryptDMMessage(m.WrappedKeys, m.Payload)
+					body := "(encrypted)"
+					replyTo := ""
+					var mentions []string
+					if err == nil {
+						body = payload.Body
+						replyTo = payload.ReplyTo
+						mentions = payload.Mentions
+					}
+					from := a.client.DisplayName(m.From)
+					a.messages.messages = append(a.messages.messages, DisplayMessage{
+						ID:       m.ID,
+						FromID:   m.From,
+						From:     from,
+						Body:     body,
+						TS:       m.TS,
+						DM:       m.DM,
+						ReplyTo:  replyTo,
+						Mentions: mentions,
+					})
+					a.refreshMessageContent()
+				}
 			}
 			a.sendReadReceipt()
 		} else {
@@ -5132,7 +5154,7 @@ func (a App) View() string {
 	}
 
 	if a.err != nil && !a.connected {
-		return fmt.Sprintf("\n  Connection error: %v\n\n  Press Ctrl+C to quit.\n", a.err)
+		return fmt.Sprintf("\n  Connection error: %v\n\n  Press Ctrl+c to quit.\n", a.err)
 	}
 
 	if !a.connected {

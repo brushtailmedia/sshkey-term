@@ -23,6 +23,11 @@ var (
 				Padding(0, 1)
 )
 
+// composeNewlineMarker is the visible draft marker inserted by
+// Alt+Enter (Option+Enter on macOS) in the single-line textinput widget. At dispatch time
+// ValueForSend maps this marker back to a real '\n'.
+const composeNewlineMarker = "↵"
+
 // InputModel manages the text input bar.
 type InputModel struct {
 	textInput      textinput.Model
@@ -247,8 +252,14 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 		pos := i.textInput.Position()
 		i.completion = CompleteWithContext(text, pos, i.members, i.nonMembers)
 		return i, nil
+	case "alt+enter":
+		// Insert a draft-only newline marker. We keep the input widget
+		// single-row and convert markers to '\n' only on send.
+		i.insertComposeNewline()
+		return i, nil
 	case "enter":
-		text := strings.TrimSpace(i.textInput.Value())
+		sendText := i.ValueForSend()
+		text := strings.TrimSpace(sendText)
 		if text == "" {
 			return i, nil
 		}
@@ -362,6 +373,12 @@ func (i InputModel) Value() string {
 	return i.textInput.Value()
 }
 
+// ValueForSend returns the input value with compose-only newline markers
+// converted into real LF bytes for transport.
+func (i InputModel) ValueForSend() string {
+	return strings.ReplaceAll(i.textInput.Value(), composeNewlineMarker, "\n")
+}
+
 // IsEmpty reports whether the input buffer contains any text. Used by
 // the app-layer Up-arrow handler to decide whether to enter edit mode
 // (only triggers on an empty buffer so normal cursor-up behavior in a
@@ -412,6 +429,30 @@ func (i *InputModel) clearReply() {
 	i.replyRoom = ""
 	i.replyGroup = ""
 	i.replyDM = ""
+}
+
+// InsertComposeNewline inserts a compose-only newline marker at the current
+// cursor position. The marker is converted to '\n' by ValueForSend().
+func (i *InputModel) InsertComposeNewline() {
+	i.insertComposeNewline()
+}
+
+func (i *InputModel) insertComposeNewline() {
+	cur := []rune(i.textInput.Value())
+	pos := i.textInput.Position()
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(cur) {
+		pos = len(cur)
+	}
+	marker := []rune(composeNewlineMarker)
+	next := make([]rune, 0, len(cur)+len(marker))
+	next = append(next, cur[:pos]...)
+	next = append(next, marker...)
+	next = append(next, cur[pos:]...)
+	i.textInput.SetValue(string(next))
+	i.textInput.SetCursor(pos + len(marker))
 }
 
 func (i InputModel) replyContextMatches(room, group, dm string) bool {

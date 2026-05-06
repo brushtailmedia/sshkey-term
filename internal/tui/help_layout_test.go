@@ -17,6 +17,9 @@ func TestHelpView_UsesReadableSections(t *testing.T) {
 	if !strings.Contains(view, "Member Panel") {
 		t.Fatalf("help view missing Member Panel section:\n%s", view)
 	}
+	if !strings.Contains(view, "Ctrl+q") {
+		t.Fatalf("help view missing Ctrl+q shortcut:\n%s", view)
+	}
 	if strings.Contains(view, "m member panel:") {
 		t.Fatalf("legacy cramped row label should not appear:\n%s", view)
 	}

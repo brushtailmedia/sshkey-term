@@ -157,6 +157,7 @@ func (h HelpModel) renderContent(width int) string {
 		{"Ctrl+f", "search"},
 		{"Ctrl+,", "settings"},
 		{"Ctrl+1-9", "switch server"},
+		{"Ctrl+q", "quit (confirm)"},
 		{"Alt/Option+↑/↓", "prev/next room"},
 		{"↑/↓ j/k", "navigate"},
 		{"pgup/pgdn", "scroll history"},
@@ -178,7 +179,7 @@ func (h HelpModel) renderContent(width int) string {
 	}
 	inputRows := []helpRow{
 		{"Enter", "send message"},
-		{"Shift+Enter", "newline"},
+		{"Alt/Option+Enter", "newline"},
 		{"Tab", "autocomplete"},
 		{"Esc", "cancel / back"},
 		{"/", "command mode"},

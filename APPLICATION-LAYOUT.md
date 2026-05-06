@@ -1098,7 +1098,7 @@ Validates file exists and is Ed25519. Tilde-expanded.
 | `! borderline — cracked in hours` | amber | `HintWarn` | Submit shows a confirmation prompt: "Press Enter again to use it anyway, or edit to try a stronger one." Re-submit with the same passphrase proceeds. |
 | `✓ strong` / `✓ very strong` | green | `HintPass` | Submit proceeds silently. |
 
-Context-aware: the chosen display name (from the wizard's name step) is passed to zxcvbn so a passphrase containing the user's own name is penalized. The add-server dialog's generate-key path (reached via `Ctrl+G` in Settings → Add Server) reuses the same live-hint layout and additionally passes the server hostname as context, so passphrases containing `chat.example.com` or its substrings are also penalized.
+Context-aware: the chosen display name (from the wizard's name step) is passed to zxcvbn so a passphrase containing the user's own name is penalized. The add-server dialog's generate-key path (reached via `Ctrl+g` in Settings → Add Server) reuses the same live-hint layout and additionally passes the server hostname as context, so passphrases containing `chat.example.com` or its substrings are also penalized.
 
 **Text-only on purpose.** No colored strength bar — color comes via a single styled word (`✗` red / `!` amber / `✓` green) rather than a 5-segment bar. Keeps the aesthetic consistent with the rest of the minimal Bubble Tea UI and degrades cleanly on monochrome terminals (the icons + labels stay legible without color). The `sshkey-ctl bootstrap-admin` CLI uses a 5-segment unicode bar instead (`▰▰▰▱▱`) because it runs in arbitrary terminals where color support is unpredictable and the line-based input can't update live — see the server repo's `bootstrap-admin` docs.
 
@@ -1232,7 +1232,7 @@ Arrow keys navigate, `Enter` on items with `[▶]` opens edit mode. "Manage devi
 
 ## Add Server Dialog (Settings → [Add server])
 
-The add-server dialog has two modes: the **form** (name / host / port / SSH key path) and the **generate-key sub-view** reached via `Ctrl+G`. The same dialog is used when adding a second (or Nth) server post-wizard.
+The add-server dialog has two modes: the **form** (name / host / port / SSH key path) and the **generate-key sub-view** reached via `Ctrl+g`. The same dialog is used when adding a second (or Nth) server post-wizard.
 
 ### Form mode
 
@@ -1251,14 +1251,14 @@ The add-server dialog has two modes: the **form** (name / host / port / SSH key 
 │  ~/.ssh/id_ed25519                 │
 │  ~/.ssh/work_ed25519               │
 │                                    │
-│  Tab=next field  Ctrl+G=generate   │
+│  Tab=next field  Ctrl+g=generate   │
 │  new key  Enter=add  Esc=cancel    │
 └────────────────────────────────────┘
 ```
 
-`Ctrl+G` switches to the generate sub-view. Clicking a scanned key in the list populates the `SSH key path` field directly.
+`Ctrl+g` switches to the generate sub-view. Clicking a scanned key in the list populates the `SSH key path` field directly.
 
-### Generate-key sub-view (Ctrl+G from the form)
+### Generate-key sub-view (Ctrl+g from the form)
 
 ```
 ┌─ Generate New Key ─────────────────┐

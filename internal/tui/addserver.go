@@ -466,7 +466,7 @@ func (a AddServerModel) viewForm(width int) string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(helpDescStyle.Render("  Tab=next field  Ctrl+G=generate new key  Enter=add  Esc=cancel"))
+	b.WriteString(helpDescStyle.Render("  Tab=next field  Ctrl+g=generate new key  Enter=add  Esc=cancel"))
 
 	return dialogStyle.Width(width - 4).Render(b.String())
 }

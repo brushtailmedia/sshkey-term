@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sync"
@@ -376,8 +377,64 @@ func SaveFileAs(srcPath, dstPath string) error {
 }
 
 // OpenFile opens a file in the system's default viewer.
-func OpenFile(path string) error {
-	return openInSystemViewer(path)
+//
+// hintName is the original sender-supplied filename (e.g. "screenshot.png").
+// It's used ONLY to derive a file extension for the OS launcher — the
+// cached file at `path` is named after the file_id (e.g.
+// "file_xK9mQ2pR7vT3nW8jL5mZ"), which has no extension, so macOS's
+// `open` and Linux's `xdg-open` fall back to opening it as text
+// (Launch Services / xdg-mime can't identify the format without the
+// extension OR a UTI hint we don't supply).
+//
+// Strategy: ensure a sibling file exists at `path + ext` that the OS
+// launcher will see as having the right extension, then pass that
+// path to the launcher. Tries hard link first (cheap; same inode,
+// no resolution surprise), falls back to copy if hard link fails
+// (cross-device or unsupported FS). Avoids symlinks because macOS
+// Launch Services resolves them BEFORE UTI lookup, so the launcher
+// sees the extensionless target path and falls back to TextEdit.
+//
+// hintName itself is never used for path construction beyond
+// extracting the extension via filepath.Ext, so a hostile sender
+// cannot direct writes outside the cache directory.
+func OpenFile(path, hintName string) error {
+	ext := filepath.Ext(hintName)
+	if ext == "" || ext == "." {
+		return openInSystemViewer(path)
+	}
+
+	linkPath := path + ext
+	// Lstat (not Stat) — we want directory-entry info, not target info,
+	// because we need to detect stale symlinks left over from earlier
+	// versions of this function (which used os.Symlink before we
+	// learned macOS Launch Services resolves symlinks before UTI
+	// lookup, defeating the extension hint).
+	if info, err := os.Lstat(linkPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			// Stale symlink from previous version — remove and recreate
+			// as hard link / copy below.
+			_ = os.Remove(linkPath)
+		} else {
+			// Hard link or regular file copy — already correct shape.
+			return openInSystemViewer(linkPath)
+		}
+	}
+
+	// Hard link first — same inode, but the link's path has the
+	// extension, and tools that resolve symlinks (macOS `open`)
+	// don't "resolve" hard links the same way: each name is equally
+	// first-class. Falls back to copy if hard link fails (cross-device,
+	// sandboxed FS, fileystem without hard-link support).
+	if err := os.Link(path, linkPath); err != nil {
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		if werr := os.WriteFile(linkPath, data, 0600); werr != nil {
+			return werr
+		}
+	}
+	return openInSystemViewer(linkPath)
 }
 
 func writeBinaryFrame(w io.Writer, id string, data []byte) error {
@@ -417,12 +474,24 @@ func readBinaryFrame(r io.Reader) (string, []byte, error) {
 	return string(idBuf), data, nil
 }
 
+// generateNanoID creates a nanoid that matches the server's
+// store.GenerateID spec (internal/store/nanoid.go:16):
+//   - 21-char body (NOT 16 — server's ValidateNanoID rejects shorter)
+//   - 64-char alphabet INCLUDING '_' and '-' (NOT just alphanumeric)
+//   - Unbiased rejection sampling via crypto/rand.Int (NOT modulo,
+//     which biased the previous implementation slightly)
+//
+// Pre-fix this function emitted 16+len(prefix)-byte IDs which the
+// server rejected as "invalid nanoid length: got 19 bytes, want 24"
+// for any "up_"-prefixed upload_id. Causing every upload to fail at
+// upload_start with a SignalInvalidNanoID rejection. Reproduced
+// 2026-05-07.
 func generateNanoID(prefix string) string {
-	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	b := make([]byte, 16)
-	crand.Read(b)
+	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-"
+	b := make([]byte, 21)
 	for i := range b {
-		b[i] = alphabet[int(b[i])%len(alphabet)]
+		n, _ := crand.Int(crand.Reader, big.NewInt(int64(len(alphabet))))
+		b[i] = alphabet[n.Int64()]
 	}
 	return prefix + string(b)
 }

@@ -574,6 +574,21 @@ func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
 		return // not the active room
 	}
 
+	// Dedup by ID. The TUI's sync_batch handler dispatches inner
+	// messages back through this same Add path, and those messages
+	// may already be present from a prior LoadFromDB call (sync_batch
+	// often overlaps the locally-persisted catchup window). Without
+	// this guard, every reconnect produces visibly duplicated messages
+	// (and their attachments) on first load until the user switches
+	// contexts and LoadFromDB rebuilds the slice from scratch.
+	if msg.ID != "" {
+		for _, existing := range m.messages {
+			if existing.ID == msg.ID {
+				return
+			}
+		}
+	}
+
 	body := "(encrypted)"
 	replyTo := ""
 	var mentions []string
@@ -626,6 +641,15 @@ func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
 func (m *MessagesModel) AddGroupMessage(msg protocol.GroupMessage, c *client.Client) {
 	if msg.Group != m.group {
 		return
+	}
+
+	// Dedup by ID — see AddRoomMessage's comment for the same guard.
+	if msg.ID != "" {
+		for _, existing := range m.messages {
+			if existing.ID == msg.ID {
+				return
+			}
+		}
 	}
 
 	body := "(encrypted)"

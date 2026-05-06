@@ -51,11 +51,8 @@ type MessageKeys struct {
 }
 
 type InputKeys struct {
-	Send      string `toml:"send"`
-	Newline   string `toml:"newline"`
-	Clear     string `toml:"clear"`
-	SelectAll string `toml:"select_all"`
-	Paste     string `toml:"paste"`
+	Send    string `toml:"send"`
+	Newline string `toml:"newline"`
 }
 
 // DefaultKeybindings returns the default keybinding set.
@@ -94,11 +91,8 @@ func DefaultKeybindings() Keybindings {
 			ContextMenu: "enter",
 		},
 		Input: InputKeys{
-			Send:      "enter",
-			Newline:   "shift+enter",
-			Clear:     "ctrl+u",
-			SelectAll: "ctrl+a",
-			Paste:     "ctrl+v",
+			Send:    "enter",
+			Newline: "alt+enter",
 		},
 	}
 }
@@ -157,7 +151,7 @@ func LoadKeybindings(configDir string) Keybindings {
 
 # [input]
 # send = "enter"
-# newline = "shift+enter"
+# newline = "alt+enter"
 `)
 			f.Close()
 		}
@@ -174,24 +168,64 @@ func LoadKeybindings(configDir string) Keybindings {
 
 // mergeKeybindings applies non-empty overrides on top of defaults.
 func mergeKeybindings(dst, src *Keybindings) {
-	if src.Global.Quit != "" { dst.Global.Quit = src.Global.Quit }
-	if src.Global.QuickSwitch != "" { dst.Global.QuickSwitch = src.Global.QuickSwitch }
-	if src.Global.NewGroup != "" { dst.Global.NewGroup = src.Global.NewGroup }
-	if src.Global.MemberPanel != "" { dst.Global.MemberPanel = src.Global.MemberPanel }
-	if src.Global.PinnedMessages != "" { dst.Global.PinnedMessages = src.Global.PinnedMessages }
-	if src.Global.InfoPanel != "" { dst.Global.InfoPanel = src.Global.InfoPanel }
-	if src.Global.Settings != "" { dst.Global.Settings = src.Global.Settings }
-	if src.Global.Search != "" { dst.Global.Search = src.Global.Search }
-	if src.Navigation.PrevRoom != "" { dst.Navigation.PrevRoom = src.Navigation.PrevRoom }
-	if src.Navigation.NextRoom != "" { dst.Navigation.NextRoom = src.Navigation.NextRoom }
-	if src.Navigation.Focus != "" { dst.Navigation.Focus = src.Navigation.Focus }
-	if src.Navigation.Up != "" { dst.Navigation.Up = src.Navigation.Up }
-	if src.Navigation.Down != "" { dst.Navigation.Down = src.Navigation.Down }
-	if src.Message.Reply != "" { dst.Message.Reply = src.Message.Reply }
-	if src.Message.React != "" { dst.Message.React = src.Message.React }
-	if src.Message.Pin != "" { dst.Message.Pin = src.Message.Pin }
-	if src.Message.Delete != "" { dst.Message.Delete = src.Message.Delete }
-	if src.Message.Copy != "" { dst.Message.Copy = src.Message.Copy }
-	if src.Input.Send != "" { dst.Input.Send = src.Input.Send }
-	if src.Input.Newline != "" { dst.Input.Newline = src.Input.Newline }
+	if src.Global.Quit != "" {
+		dst.Global.Quit = src.Global.Quit
+	}
+	if src.Global.QuickSwitch != "" {
+		dst.Global.QuickSwitch = src.Global.QuickSwitch
+	}
+	if src.Global.NewGroup != "" {
+		dst.Global.NewGroup = src.Global.NewGroup
+	}
+	if src.Global.MemberPanel != "" {
+		dst.Global.MemberPanel = src.Global.MemberPanel
+	}
+	if src.Global.PinnedMessages != "" {
+		dst.Global.PinnedMessages = src.Global.PinnedMessages
+	}
+	if src.Global.InfoPanel != "" {
+		dst.Global.InfoPanel = src.Global.InfoPanel
+	}
+	if src.Global.Settings != "" {
+		dst.Global.Settings = src.Global.Settings
+	}
+	if src.Global.Search != "" {
+		dst.Global.Search = src.Global.Search
+	}
+	if src.Navigation.PrevRoom != "" {
+		dst.Navigation.PrevRoom = src.Navigation.PrevRoom
+	}
+	if src.Navigation.NextRoom != "" {
+		dst.Navigation.NextRoom = src.Navigation.NextRoom
+	}
+	if src.Navigation.Focus != "" {
+		dst.Navigation.Focus = src.Navigation.Focus
+	}
+	if src.Navigation.Up != "" {
+		dst.Navigation.Up = src.Navigation.Up
+	}
+	if src.Navigation.Down != "" {
+		dst.Navigation.Down = src.Navigation.Down
+	}
+	if src.Message.Reply != "" {
+		dst.Message.Reply = src.Message.Reply
+	}
+	if src.Message.React != "" {
+		dst.Message.React = src.Message.React
+	}
+	if src.Message.Pin != "" {
+		dst.Message.Pin = src.Message.Pin
+	}
+	if src.Message.Delete != "" {
+		dst.Message.Delete = src.Message.Delete
+	}
+	if src.Message.Copy != "" {
+		dst.Message.Copy = src.Message.Copy
+	}
+	if src.Input.Send != "" {
+		dst.Input.Send = src.Input.Send
+	}
+	if src.Input.Newline != "" {
+		dst.Input.Newline = src.Input.Newline
+	}
 }
