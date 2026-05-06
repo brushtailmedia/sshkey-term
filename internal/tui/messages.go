@@ -1481,8 +1481,10 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 			prevSender = msg.From
 			prevTS = msg.TS
 
-			// Highlight @mentions in the body
-			body := " " + highlightLinks(highlightMentions(msg.Body, m.currentUser))
+			// Highlight @mentions in the body and apply a left gutter
+			// to every visual line (not just the first), so multiline
+			// messages align consistently.
+			body := bodyWithGutter(highlightLinks(highlightMentions(msg.Body, m.currentUser)))
 
 			// Check if this message mentions the current user (mentions are nanoids)
 			isMentioned := false
@@ -1824,6 +1826,12 @@ func formatSize(b int64) string {
 	default:
 		return fmt.Sprintf("%.1f MB", float64(b)/(1024*1024))
 	}
+}
+
+// bodyWithGutter prefixes a single-cell left gutter to each logical
+// line of message body content so multiline messages align uniformly.
+func bodyWithGutter(body string) string {
+	return " " + strings.ReplaceAll(body, "\n", "\n ")
 }
 
 // highlightMentions replaces @username with styled version.
