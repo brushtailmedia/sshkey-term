@@ -148,7 +148,6 @@ All five admin verbs are scoped to the current group. Each runs a local pre-chec
 | `/admins` | Group | Read-only overlay pre-filtered to just admins |
 | `/role @user` | Group | Shows whether the target is admin or regular member |
 | `/whoami` | Group | Shows your own role in the current group |
-| `/groupinfo` | Group | Opens the info panel (Ctrl+I equivalent) |
 | `/audit [N]` | Group | Read-only overlay showing recent admin actions (default 10). Reads from local `group_events` table — populated from live broadcasts and offline sync replay. |
 | `/undo` | Group (admin) | Revert your most recent kick within 30 seconds — re-adds via `add_to_group`. Exactly one kick tracked, no stack. |
 

@@ -1335,7 +1335,7 @@ Results show sender, timestamp, room/group context, and a snippet with the match
 │                                                                       │
 │  Group Admin (when you are admin of the current group):              │
 │  /add /kick /promote /demote /transfer /audit /undo                  │
-│  /members /admins /role /whoami /groupinfo                           │
+│  /members /admins /role /whoami /info                                │
 │                                                                       │
 │  Press Esc to close                                                   │
 └───────────────────────────────────────────────────────────────────────┘

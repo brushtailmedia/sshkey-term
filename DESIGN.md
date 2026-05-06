@@ -241,7 +241,6 @@ All five pre-check the local `is_admin` flag before opening the dialog. Non-admi
 | `/admins` | Group | Read-only overlay pre-filtered to admins only |
 | `/role @user` | Group | Status bar: "Bob is an admin" / "Bob is a regular member" |
 | `/whoami` | Group | Status bar: "You are an admin of Project Alpha" / "You are a regular member" |
-| `/groupinfo` | Group | Opens the info panel (Ctrl+I equivalent) |
 | `/audit [N]` | Group | Read-only overlay, reads recent rows from local `group_events` table |
 | `/undo` | Group (admin) | Reverts the local user's most recent kick within 30 seconds by sending `add_to_group` for the kicked target |
 

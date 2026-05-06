@@ -211,7 +211,7 @@ func (h HelpModel) renderContent(width int) string {
 	// Slash commands. Phase 14: admin-gated verbs are included only
 	// when showAdminCommands is true (local user is an admin of the
 	// currently-active group). Status commands that don't mutate
-	// state (/members, /admins, /role, /whoami, /info, /groupinfo, /audit)
+	// state (/members, /admins, /role, /whoami, /info, /audit)
 	// are always shown.
 	type cmdEntry struct {
 		cmd, desc string
@@ -237,7 +237,6 @@ func (h HelpModel) renderContent(width int) string {
 		{cmd: "/role <user>", desc: "show a user's role"},
 		{cmd: "/whoami", desc: "show your own role"},
 		{cmd: "/info", desc: "open info panel"},
-		{cmd: "/groupinfo", desc: "open group info panel"},
 		{cmd: "/audit [N]", desc: "recent admin actions"},
 		// Phase 14 admin verbs (group-context, admin-only)
 		{cmd: "/add <user>", desc: "add member to group", adminOnly: true},
