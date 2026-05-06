@@ -2061,6 +2061,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.search.SetFTS(st.HasFTS())
 		}
 		a.sidebar.resolveName = a.client.DisplayName
+		a.sidebar.resolveDMName = a.client.DisplayDMName
+		a.sidebar.resolveDMOther = a.client.DMOther
 		a.sidebar.resolveRoomName = a.client.DisplayRoomName
 		a.sidebar.resolveVerified = func(user string) bool {
 			if a.client == nil {

@@ -65,6 +65,8 @@ type SidebarModel struct {
 	selectedGroup   string
 	selectedDM      string
 	resolveName     func(string) string // user nanoid → display name (set by App)
+	resolveDMName   func(string) string // dm nanoid → other user's display name (set by App)
+	resolveDMOther  func(string) string // dm nanoid → other user's userID (set by App)
 	resolveRoomName func(string) string // room nanoid → display name (set by App)
 	resolveVerified func(string) bool   // user nanoid → safety-number verified flag (set by App)
 	// Phase 14: resolveIsLocalAdmin returns true if the local user is
@@ -93,6 +95,23 @@ func NewSidebar() SidebarModel {
 		leftRooms:    make(map[string]bool),
 		retiredRooms: make(map[string]bool),
 	}
+}
+
+// dmOtherUserID resolves the other party's userID for a 1:1 DM.
+// Prefers the app-provided resolver (client-backed) and falls back to the
+// DMInfo member pair in case the client cache hasn't populated yet.
+func (s SidebarModel) dmOtherUserID(dm protocol.DMInfo) string {
+	if s.resolveDMOther != nil {
+		if other := strings.TrimSpace(s.resolveDMOther(dm.ID)); other != "" {
+			return other
+		}
+	}
+	for _, m := range dm.Members {
+		if m != "" && m != s.selfUserID {
+			return m
+		}
+	}
+	return ""
 }
 
 // MarkGroupLeft flags a group DM as archived for the local user.
@@ -638,16 +657,16 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 
 		for i, dm := range s.dms {
 			// Resolve the other party's display name
-			other := ""
-			for _, m := range dm.Members {
-				if m != s.selfUserID {
-					other = m
-					break
-				}
+			other := s.dmOtherUserID(dm)
+			name := ""
+			if s.resolveDMName != nil {
+				name = strings.TrimSpace(s.resolveDMName(dm.ID))
 			}
-			name := other
-			if name != "" && s.resolveName != nil {
+			if name == "" && other != "" && s.resolveName != nil {
 				name = s.resolveName(other)
+			}
+			if name == "" {
+				name = other
 			}
 			if name == "" {
 				name = dm.ID // fallback
