@@ -4730,14 +4730,12 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	case "dm_list":
 		var m protocol.DMList
 		json.Unmarshal(msg.Raw, &m)
-		// Filter out DMs the caller has already left — those are tombstones
-		// from /delete on another device. The client layer has already
-		// purged any local messages and flipped the local left_at flag in
-		// the dm_list handler in client.go; here we just refuse to surface
-		// them in the sidebar.
+		// Filter out DMs hidden for this caller. Visibility is
+		// hidden_for_caller; left_at is history cutoff and does not control
+		// sidebar presence.
 		active := make([]protocol.DMInfo, 0, len(m.DMs))
 		for _, dm := range m.DMs {
-			if dm.LeftAtForCaller == 0 {
+			if !dm.HiddenForCaller {
 				active = append(active, dm)
 			}
 		}

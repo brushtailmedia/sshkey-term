@@ -953,16 +953,14 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			if c.store != nil {
 				for _, dm := range dl.DMs {
 					c.store.StoreDM(dm.ID, dm.Members[0], dm.Members[1])
-					// Catch-up: if the server reports we have already left
-					// this DM (from a /delete on another device, or as a
-					// side effect of retirement), apply the same local
-					// effects we would have applied if dm_left had reached
-					// us live. Idempotent — MarkDMLeft / PurgeDMMessages
-					// can be called repeatedly without harm.
-					if dm.LeftAtForCaller > 0 && c.store.GetDMLeftAt(dm.ID) == 0 {
-						if err := c.store.MarkDMLeft(dm.ID, dm.LeftAtForCaller); err != nil {
-							c.logger.Warn("MarkDMLeft on sync", "dm", dm.ID, "error", err)
-						}
+					// Mirror server authority for visibility + cutoff on
+					// every dm_list entry. Visibility is hidden_for_caller;
+					// left_at remains a history cutoff mirror.
+					if err := c.store.SetDMState(dm.ID, dm.LeftAtForCaller, dm.HiddenForCaller); err != nil {
+						c.logger.Warn("SetDMState on sync", "dm", dm.ID, "error", err)
+					}
+					// Hidden DMs should not keep local plaintext history.
+					if dm.HiddenForCaller {
 						if err := c.store.PurgeDMMessages(dm.ID); err != nil {
 							c.logger.Warn("PurgeDMMessages on sync", "dm", dm.ID, "error", err)
 						}
@@ -978,6 +976,9 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			c.mu.Unlock()
 			if c.store != nil {
 				c.store.StoreDM(dc.DM, dc.Members[0], dc.Members[1])
+				if err := c.store.SetDMState(dc.DM, c.store.GetDMLeftAt(dc.DM), false); err != nil {
+					c.logger.Warn("SetDMState on dm_created", "dm", dc.DM, "error", err)
+				}
 			}
 		}
 	case "dm":

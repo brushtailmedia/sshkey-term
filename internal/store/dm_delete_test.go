@@ -24,6 +24,9 @@ func TestMarkDMLeft_SetsLeftAt(t *testing.T) {
 	if got := s.GetDMLeftAt("dm_ab"); got != 1700000000 {
 		t.Errorf("after MarkDMLeft: left_at = %d, want 1700000000", got)
 	}
+	if !s.IsDMHidden("dm_ab") {
+		t.Error("after MarkDMLeft: hidden should be true")
+	}
 }
 
 // TestMarkDMRejoined_ClearsLeftAt verifies that MarkDMRejoined zeros the
@@ -46,6 +49,9 @@ func TestMarkDMRejoined_ClearsLeftAt(t *testing.T) {
 	if got := s.GetDMLeftAt("dm_ab"); got != 0 {
 		t.Errorf("after MarkDMRejoined: left_at = %d, want 0", got)
 	}
+	if s.IsDMHidden("dm_ab") {
+		t.Error("after MarkDMRejoined: hidden should be false")
+	}
 }
 
 // TestGetDMLeftAt_MissingRow verifies that asking about a DM that doesn't
@@ -55,6 +61,29 @@ func TestGetDMLeftAt_MissingRow(t *testing.T) {
 
 	if got := s.GetDMLeftAt("dm_does_not_exist"); got != 0 {
 		t.Errorf("missing row should return 0, got %d", got)
+	}
+}
+
+func TestSetDMState_MirrorsServerState(t *testing.T) {
+	s := openTestStore(t)
+	if err := s.StoreDM("dm_ab", "alice", "bob"); err != nil {
+		t.Fatalf("store DM: %v", err)
+	}
+	if err := s.SetDMState("dm_ab", 1700001234, true); err != nil {
+		t.Fatalf("SetDMState hidden: %v", err)
+	}
+	if got := s.GetDMLeftAt("dm_ab"); got != 1700001234 {
+		t.Fatalf("left_at = %d, want 1700001234", got)
+	}
+	if !s.IsDMHidden("dm_ab") {
+		t.Fatal("hidden should be true")
+	}
+
+	if err := s.SetDMState("dm_ab", 1700001234, false); err != nil {
+		t.Fatalf("SetDMState visible: %v", err)
+	}
+	if s.IsDMHidden("dm_ab") {
+		t.Fatal("hidden should be false")
 	}
 }
 

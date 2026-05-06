@@ -555,12 +555,13 @@ type StoredDM struct {
 	UserA  string
 	UserB  string
 	LeftAt int64
+	Hidden bool
 }
 
-// GetAllDMs loads all cached 1:1 DMs (active AND left). Callers that want
-// to filter by active status should check LeftAt themselves.
+// GetAllDMs loads all cached 1:1 DMs (visible and hidden tombstones).
+// Callers that want only visible conversations should filter on Hidden.
 func (s *Store) GetAllDMs() ([]StoredDM, error) {
-	rows, err := s.db.Query(`SELECT id, user_a, user_b, left_at FROM direct_messages`)
+	rows, err := s.db.Query(`SELECT id, user_a, user_b, left_at, hidden FROM direct_messages`)
 	if err != nil {
 		return nil, err
 	}
@@ -569,36 +570,45 @@ func (s *Store) GetAllDMs() ([]StoredDM, error) {
 	var dms []StoredDM
 	for rows.Next() {
 		var dm StoredDM
-		if err := rows.Scan(&dm.ID, &dm.UserA, &dm.UserB, &dm.LeftAt); err != nil {
+		var hidden int
+		if err := rows.Scan(&dm.ID, &dm.UserA, &dm.UserB, &dm.LeftAt, &hidden); err != nil {
 			return nil, err
 		}
+		dm.Hidden = hidden != 0
 		dms = append(dms, dm)
 	}
 	return dms, rows.Err()
 }
 
-// MarkDMLeft sets the local left_at flag on a 1:1 DM. Mirrors the
-// room/group helpers — called when the user runs /delete on this device,
-// when a dm_left echo arrives from another of the user's devices, or when
-// sync's dm_list reports a left_at_for_caller > 0 we didn't already know
-// about.
+// MarkDMLeft marks the DM as hidden locally and stores the caller's
+// left_at cutoff mirror.
 func (s *Store) MarkDMLeft(dmID string, leftAt int64) error {
 	_, err := s.db.Exec(
-		`UPDATE direct_messages SET left_at = ? WHERE id = ?`,
+		`UPDATE direct_messages SET left_at = ?, hidden = 1 WHERE id = ?`,
 		leftAt, dmID,
 	)
 	return err
 }
 
-// MarkDMRejoined clears the local left_at flag on a 1:1 DM. There is no
-// server-side path that retreats the cutoff (cutoffs are one-way), but
-// the client uses this when it locally re-creates a DM after the row was
-// purged (the "fresh on re-contact" path) and needs to drop the leave
-// flag if it was somehow still set.
+// MarkDMRejoined clears local DM tombstone state. Used for local recovery
+// flows where the client intentionally wants a fully-active row.
 func (s *Store) MarkDMRejoined(dmID string) error {
 	_, err := s.db.Exec(
-		`UPDATE direct_messages SET left_at = 0 WHERE id = ?`,
+		`UPDATE direct_messages SET left_at = 0, hidden = 0 WHERE id = ?`,
 		dmID,
+	)
+	return err
+}
+
+// SetDMState mirrors the server's DM state in one write.
+func (s *Store) SetDMState(dmID string, leftAt int64, hidden bool) error {
+	h := 0
+	if hidden {
+		h = 1
+	}
+	_, err := s.db.Exec(
+		`UPDATE direct_messages SET left_at = ?, hidden = ? WHERE id = ?`,
+		leftAt, h, dmID,
 	)
 	return err
 }
@@ -612,6 +622,16 @@ func (s *Store) GetDMLeftAt(dmID string) int64 {
 		dmID,
 	).Scan(&leftAt)
 	return leftAt
+}
+
+// IsDMHidden reports whether this DM is currently tombstoned from local view.
+func (s *Store) IsDMHidden(dmID string) bool {
+	var hidden int
+	s.db.QueryRow(
+		`SELECT hidden FROM direct_messages WHERE id = ?`,
+		dmID,
+	).Scan(&hidden)
+	return hidden != 0
 }
 
 // PurgeDMMessages deletes every locally-stored message row for a 1:1 DM

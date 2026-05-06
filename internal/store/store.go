@@ -277,16 +277,15 @@ func (s *Store) init() error {
 		CREATE INDEX IF NOT EXISTS idx_room_events_room_ts ON room_events(room_id, ts);
 
 		-- 1:1 DMs (local cache of DM partner info).
-		-- left_at = 0 means active; >0 means the user has /delete'd this
-		-- DM (server-side cutoff is set, local message rows for this dm_id
-		-- have been purged). The row itself stays so sync from another
-		-- device can find it and confirm the local state matches.
+		-- hidden = 0 means visible in sidebar; 1 means removed from local view.
+		-- left_at remains the server's per-user history cutoff mirror.
 		CREATE TABLE IF NOT EXISTS direct_messages (
 			id         TEXT PRIMARY KEY,
 			user_a     TEXT NOT NULL,
 			user_b     TEXT NOT NULL,
 			created_at INTEGER NOT NULL DEFAULT 0,
-			left_at    INTEGER NOT NULL DEFAULT 0
+			left_at    INTEGER NOT NULL DEFAULT 0,
+			hidden     INTEGER NOT NULL DEFAULT 0
 		);
 
 		-- Client state
@@ -296,6 +295,9 @@ func (s *Store) init() error {
 		);
 	`)
 	if err != nil {
+		return err
+	}
+	if err := s.ensureDirectMessageSchema(); err != nil {
 		return err
 	}
 
@@ -319,4 +321,35 @@ func (s *Store) init() error {
 	// If FTS5 isn't available, search falls back to LIKE queries
 
 	return nil
+}
+
+func (s *Store) ensureDirectMessageSchema() error {
+	if s.dmColumnExists("hidden") {
+		return nil
+	}
+	if _, err := s.db.Exec(`ALTER TABLE direct_messages ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("migrate direct_messages.hidden: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) dmColumnExists(name string) bool {
+	rows, err := s.db.Query(`PRAGMA table_info(direct_messages)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var colName, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &dflt, &pk); err != nil {
+			return false
+		}
+		if colName == name {
+			return true
+		}
+	}
+	return false
 }

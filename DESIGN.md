@@ -142,7 +142,8 @@ CREATE TABLE direct_messages (
     user_a     TEXT NOT NULL,
     user_b     TEXT NOT NULL,
     created_at INTEGER NOT NULL DEFAULT 0,
-    left_at    INTEGER NOT NULL DEFAULT 0  -- 0 = active; >0 = user has /delete'd
+    left_at    INTEGER NOT NULL DEFAULT 0,  -- per-user history cutoff mirror
+    hidden     INTEGER NOT NULL DEFAULT 0   -- 0 = visible; 1 = removed from sidebar/view
 );
 
 -- Client state (key-value store)
@@ -439,18 +440,18 @@ Three behaviors that are counterintuitive enough to document explicitly. Each is
 There is no `delete_dm` protocol verb. The flow is:
 
 1. Client sends `leave_dm`
-2. Server sets a per-user `left_at` cutoff on the DM row
+2. Server sets caller `hidden = true` and advances caller `left_at` cutoff on the DM row
 3. Server echoes `dm_left` to the caller's sessions
 4. Client purges all local messages for that DM on receipt of the echo
 5. Server-side cleanup (delete row, unlink `dm-<id>.db`) runs automatically inside `handleLeaveDM` when BOTH users' cutoffs are set
 
 The design preserves the silent-leave model: a probing client cannot distinguish "the other party deleted the DM" from "the other party is just quiet." Anyone looking for `handleDeleteDM` in the server code will not find it — `leave_dm` is the only DM-exit verb.
 
-### `SetDMLeftAt` is a one-way ratchet
+### `left_at` and `hidden` are intentionally separate
 
-The store function refuses to overwrite a non-zero `left_at` value — a second `SetDMLeftAt` call on an already-left DM is a silent no-op. This prevents a re-leave from re-revealing pre-delete history.
+`left_at` is a history cutoff timestamp; `hidden` is a visibility boolean. The client sidebar filters DMs by `hidden`, not `left_at`.
 
-Scenario: User A deletes the DM at T=100 (cutoff = 100). B sends a message at T=200 which reappears in A's sidebar as a fresh conversation. A deletes again. Without the ratchet, the second delete would advance the cutoff to T=200, which would move past messages B sent between T=100 and T=200 that A hadn't seen yet. The ratchet freezes the cutoff at its earliest value.
+On re-contact (`create_dm` reusing an existing pair), the server clears `hidden` for both parties but leaves `left_at` unchanged. This fixes the old restart drift where visibility was inferred from `left_at` and a DM could disappear again on reconnect.
 
 ### Multi-device `/leave` catchup uses client-side reconciliation
 
