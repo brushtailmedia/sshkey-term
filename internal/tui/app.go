@@ -4536,7 +4536,8 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	case "deleted_groups":
 		// Sync catchup. Each entry was /delete'd from another device
 		// while this one was offline. The client layer has already
-		// applied MarkGroupLeft + PurgeGroupMessages for each. Here we
+		// purged local messages and removed the cached groups row for
+		// each entry. Here we
 		// drop them from the sidebar and reset the active context if
 		// any of them was the currently-viewed group.
 		var m protocol.DeletedGroupsList
@@ -4613,7 +4614,8 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	case "deleted_rooms":
 		// Sync catchup. Each entry was /delete'd from another device
 		// while this one was offline. The client layer has already
-		// applied MarkRoomLeft + PurgeRoomMessages for each. Here we
+		// purged local messages and removed the cached room row for
+		// each entry. Here we
 		// drop them from the sidebar and reset the active context if
 		// any of them was the currently-viewed room.
 		var m protocol.DeletedRoomsList

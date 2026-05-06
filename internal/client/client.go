@@ -764,8 +764,8 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		if err := json.Unmarshal(raw, &gd); err == nil {
 			// Server confirmed a delete_group from this account, possibly
 			// from another device. Apply the local /delete effects on
-			// THIS device too: drop in-memory members, mark left, and
-			// purge every locally-stored message for the group.
+			// THIS device too: drop in-memory members, purge every locally-
+			// stored message for the group, and remove the cached group row.
 			//
 			// Idempotent — receiving group_deleted on a device that has
 			// already purged just runs the no-op DELETE statements again.
@@ -773,13 +773,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			delete(c.groupMembers, gd.Group)
 			c.mu.Unlock()
 			if c.store != nil {
-				// group_deleted is a distinct action tracked by the
-				// separate deleted_groups sidecar — not a leave reason.
-				if err := c.store.MarkGroupLeft(gd.Group, time.Now().Unix(), ""); err != nil {
-					c.logger.Warn("MarkGroupLeft on group_deleted", "group", gd.Group, "error", err)
-				}
 				if err := c.store.PurgeGroupMessages(gd.Group); err != nil {
 					c.logger.Warn("PurgeGroupMessages on group_deleted", "group", gd.Group, "error", err)
+				}
+				if err := c.store.DeleteGroupRecord(gd.Group); err != nil {
+					c.logger.Warn("DeleteGroupRecord on group_deleted", "group", gd.Group, "error", err)
 				}
 			}
 			c.logger.Info("group deleted", "group", gd.Group)
@@ -793,13 +791,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			// echo had arrived. Idempotent on already-purged entries.
 			if c.store != nil {
 				for _, groupID := range dgl.Groups {
-					// deleted_groups catchup — delete is a distinct action
-					// tracked by its own sidecar, so no leave reason.
-					if err := c.store.MarkGroupLeft(groupID, time.Now().Unix(), ""); err != nil {
-						c.logger.Warn("MarkGroupLeft on deleted_groups", "group", groupID, "error", err)
-					}
 					if err := c.store.PurgeGroupMessages(groupID); err != nil {
 						c.logger.Warn("PurgeGroupMessages on deleted_groups", "group", groupID, "error", err)
+					}
+					if err := c.store.DeleteGroupRecord(groupID); err != nil {
+						c.logger.Warn("DeleteGroupRecord on deleted_groups", "group", groupID, "error", err)
 					}
 				}
 				c.mu.Lock()
@@ -908,10 +904,9 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 	case "room_deleted":
 		// Phase 12: server confirmed a delete_room from this account,
 		// possibly from another device. Apply the local /delete
-		// effects on THIS device too: mark left, purge every locally
-		// stored message for the room, drop epoch keys. The row
-		// itself stays (the TUI app layer handles sidebar entry
-		// removal via sidebar.RemoveRoom). Parallel to the
+		// effects on THIS device too: purge every locally-stored
+		// message for the room, drop epoch keys, and remove the cached
+		// room row. Parallel to the
 		// group_deleted handler above.
 		//
 		// Idempotent — receiving room_deleted on a device that has
@@ -919,13 +914,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		var rd protocol.RoomDeleted
 		if err := json.Unmarshal(raw, &rd); err == nil {
 			if c.store != nil {
-				// room_deleted is a distinct action tracked by the
-				// separate deleted_rooms sidecar — not a leave reason.
-				if err := c.store.MarkRoomLeft(rd.Room, time.Now().Unix(), ""); err != nil {
-					c.logger.Warn("MarkRoomLeft on room_deleted", "room", rd.Room, "error", err)
-				}
 				if err := c.store.PurgeRoomMessages(rd.Room); err != nil {
 					c.logger.Warn("PurgeRoomMessages on room_deleted", "room", rd.Room, "error", err)
+				}
+				if err := c.store.DeleteRoomRecord(rd.Room); err != nil {
+					c.logger.Warn("DeleteRoomRecord on room_deleted", "room", rd.Room, "error", err)
 				}
 			}
 			c.logger.Info("room deleted", "room", rd.Room)
@@ -939,14 +932,12 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		var drl protocol.DeletedRoomsList
 		if err := json.Unmarshal(raw, &drl); err == nil {
 			if c.store != nil {
-				now := time.Now().Unix()
 				for _, roomID := range drl.Rooms {
-					// deleted_rooms catchup — distinct action, no leave reason.
-					if err := c.store.MarkRoomLeft(roomID, now, ""); err != nil {
-						c.logger.Warn("MarkRoomLeft on deleted_rooms", "room", roomID, "error", err)
-					}
 					if err := c.store.PurgeRoomMessages(roomID); err != nil {
 						c.logger.Warn("PurgeRoomMessages on deleted_rooms", "room", roomID, "error", err)
+					}
+					if err := c.store.DeleteRoomRecord(roomID); err != nil {
+						c.logger.Warn("DeleteRoomRecord on deleted_rooms", "room", roomID, "error", err)
 					}
 				}
 			}

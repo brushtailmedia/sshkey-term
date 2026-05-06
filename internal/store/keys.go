@@ -307,6 +307,14 @@ func (s *Store) MarkGroupRejoined(groupID string) error {
 	return err
 }
 
+// DeleteGroupRecord removes a group DM metadata row from the local cache.
+// Used by /delete flows (group_deleted + deleted_groups catchup) so deleted
+// groups do not reappear from archived-row merge logic on reconnect.
+func (s *Store) DeleteGroupRecord(groupID string) error {
+	_, err := s.db.Exec(`DELETE FROM groups WHERE id = ?`, groupID)
+	return err
+}
+
 // IsGroupLeft returns true if the user has left this group DM (archived state,
 // read-only in the TUI).
 func (s *Store) IsGroupLeft(groupID string) bool {
@@ -422,6 +430,14 @@ func (s *Store) MarkRoomRejoined(roomID string) error {
 		`UPDATE rooms SET left_at = 0, leave_reason = '' WHERE id = ?`,
 		roomID,
 	)
+	return err
+}
+
+// DeleteRoomRecord removes a room metadata row from the local cache.
+// Used by /delete flows (room_deleted + deleted_rooms catchup) so deleted
+// rooms do not reappear from archived-row merge logic on reconnect.
+func (s *Store) DeleteRoomRecord(roomID string) error {
+	_, err := s.db.Exec(`DELETE FROM rooms WHERE id = ?`, roomID)
 	return err
 }
 
