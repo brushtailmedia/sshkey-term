@@ -966,13 +966,22 @@ func (c *Client) DecryptDMReaction(wrappedKeys map[string]string, payloadBase64 
 	return &reaction, nil
 }
 
-// RequestHistory requests older messages.
-func (c *Client) RequestHistory(room, group, before string, limit int) error {
+// RequestHistory requests older messages. Exactly one of room / group /
+// dm must be non-empty — the protocol envelope is room-or-group-or-dm
+// scoped. Pre-2026-05-07 this function had no `dm` parameter and the
+// callers passed empty for DM history requests, so the server saw a
+// History envelope with all three context fields empty and could not
+// route the request. Symptom: scrolling back in a 1:1 DM showed
+// "loading history…" forever because the server never sent a
+// history_result reply (no context = nothing to query) and the TUI's
+// loadingHistory flag was only cleared inside the result handler.
+func (c *Client) RequestHistory(room, group, dm, before string, limit int) error {
 	corrID := protocol.GenerateCorrID()
 	envelope := protocol.History{
 		Type:   "history",
 		Room:   room,
 		Group:  group,
+		DM:     dm,
 		Before: before,
 		Limit:  limit,
 		CorrID: corrID,

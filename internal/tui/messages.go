@@ -696,6 +696,76 @@ func (m *MessagesModel) AddGroupMessage(msg protocol.GroupMessage, c *client.Cli
 	})
 }
 
+// AddDMMessage decrypts a 1:1 DM and appends it to the active conversation.
+//
+// Mirrors AddRoomMessage / AddGroupMessage. Before this method existed, the
+// `case "dm":` handler in app.go inlined the decrypt + display-name + append
+// logic, AND silently omitted the attachment loop — DM attachments only
+// appeared after a context switch (LoadFromDB pulled them from the store,
+// which had them via persist.go:storeDMMessage). This method adds the
+// attachment loop on parity with AddGroupMessage so live DM receipts
+// surface attachments without a context-switch round-trip.
+func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
+	if msg.DM != m.dm {
+		return // not the active DM
+	}
+
+	// Dedup by ID — see AddRoomMessage's comment for the same guard.
+	if msg.ID != "" {
+		for _, existing := range m.messages {
+			if existing.ID == msg.ID {
+				return
+			}
+		}
+	}
+
+	body := "(encrypted)"
+	replyTo := ""
+	var mentions []string
+	var attachments []DisplayAttachment
+
+	if c != nil {
+		payload, err := c.DecryptDMMessage(msg.WrappedKeys, msg.Payload)
+		if err == nil {
+			body = payload.Body
+			replyTo = payload.ReplyTo
+			mentions = payload.Mentions
+			for _, a := range payload.Attachments {
+				// 1:1 DMs use the same per-attachment FileKey shape as
+				// groups (Design A). Each attachment carries its own
+				// base64-encoded K_file.
+				decKey, _ := base64.StdEncoding.DecodeString(a.FileKey)
+				attachments = append(attachments, DisplayAttachment{
+					FileID:     a.FileID,
+					Name:       a.Name,
+					Size:       a.Size,
+					Mime:       a.Mime,
+					IsImage:    isImageMime(a.Mime),
+					DecryptKey: decKey,
+				})
+			}
+		}
+	}
+
+	from := msg.From
+	if c != nil {
+		from = c.DisplayName(msg.From)
+	}
+
+	m.messages = append(m.messages, DisplayMessage{
+		ID:          msg.ID,
+		FromID:      msg.From,
+		From:        from,
+		Body:        body,
+		TS:          msg.TS,
+		EditedAt:    msg.EditedAt,
+		DM:          msg.DM,
+		ReplyTo:     replyTo,
+		Mentions:    mentions,
+		Attachments: attachments,
+	})
+}
+
 // buildDisplayMsg creates a DisplayMessage from a room protocol message without appending it.
 // Used by history prepend where messages go to the front, not the back.
 func (m *MessagesModel) buildDisplayMsg(msg protocol.Message, c *client.Client) DisplayMessage {
@@ -784,6 +854,57 @@ func (m *MessagesModel) buildDisplayGroup(msg protocol.GroupMessage, c *client.C
 		Body:        body,
 		TS:          msg.TS,
 		Group:       msg.Group,
+		ReplyTo:     replyTo,
+		Mentions:    mentions,
+		Attachments: attachments,
+	}
+}
+
+// buildDisplayDM creates a DisplayMessage from a 1:1 DM protocol message
+// without appending it. Used by history_result prepend where messages
+// go to the front, not the back. Mirrors buildDisplayGroup; before this
+// helper existed, the `case "dm":` arm of history_result inlined the
+// decrypt logic AND silently omitted the attachment loop, so older DM
+// history pulled via the catchup window never surfaced attachments.
+func (m *MessagesModel) buildDisplayDM(msg protocol.DM, c *client.Client) DisplayMessage {
+	body := "(encrypted)"
+	replyTo := ""
+	var mentions []string
+	var attachments []DisplayAttachment
+
+	if c != nil {
+		payload, err := c.DecryptDMMessage(msg.WrappedKeys, msg.Payload)
+		if err == nil {
+			body = payload.Body
+			replyTo = payload.ReplyTo
+			mentions = payload.Mentions
+			for _, a := range payload.Attachments {
+				decKey, _ := base64.StdEncoding.DecodeString(a.FileKey)
+				attachments = append(attachments, DisplayAttachment{
+					FileID:     a.FileID,
+					Name:       a.Name,
+					Size:       a.Size,
+					Mime:       a.Mime,
+					IsImage:    isImageMime(a.Mime),
+					DecryptKey: decKey,
+				})
+			}
+		}
+	}
+
+	from := msg.From
+	if c != nil {
+		from = c.DisplayName(msg.From)
+	}
+
+	return DisplayMessage{
+		ID:          msg.ID,
+		FromID:      msg.From,
+		From:        from,
+		Body:        body,
+		TS:          msg.TS,
+		EditedAt:    msg.EditedAt,
+		DM:          msg.DM,
 		ReplyTo:     replyTo,
 		Mentions:    mentions,
 		Attachments: attachments,

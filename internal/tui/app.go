@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1798,9 +1799,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		// Try local DB first — avoids a server round-trip when messages
-		// are already cached from previous sync/history fetches
+		// are already cached from previous sync/history fetches.
+		//
+		// Pre-2026-05-07 this passed an empty string for the DM
+		// parameter, so 1:1 DM history scrollback always missed the
+		// local cache (every row had a real DM but we queried for ""),
+		// fell through to the server, and the server-side request
+		// also dropped DM (RequestHistory took no dm param), so the
+		// envelope arrived with all three context fields empty and
+		// the server never replied. The TUI's loadingHistory flag is
+		// only cleared inside the local-success branch or by a
+		// history_result event — neither fired — so the spinner
+		// stuck forever.
 		if st := a.client.Store(); st != nil {
-			localMsgs, err := st.GetMessagesBefore(msg.Room, msg.Group, "", msg.BeforeID, 100)
+			localMsgs, err := st.GetMessagesBefore(msg.Room, msg.Group, msg.DM, msg.BeforeID, 100)
 			if err == nil && len(localMsgs) > 0 {
 				// Load epoch keys for these messages so they can be decrypted
 				if msg.Room != "" {
@@ -1817,23 +1829,44 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.client.LoadEpochKeysFromDB(msg.Room, epochList)
 				}
 
-				// Convert to display messages and prepend
+				// Convert to display messages and prepend.
+				// DM context + attachments are propagated from the store
+				// so DM history scrollback shows attachments and the
+				// resulting DisplayMessages carry the right context tag
+				// (mattered when other view code paths filter by m.DM).
 				var display []DisplayMessage
 				for _, m := range localMsgs {
 					from := m.Sender
 					if a.client != nil {
 						from = a.client.DisplayName(m.Sender)
 					}
+					var attachments []DisplayAttachment
+					for _, a := range m.Attachments {
+						key, _ := base64.StdEncoding.DecodeString(a.DecryptKey)
+						attachments = append(attachments, DisplayAttachment{
+							FileID:     a.FileID,
+							Name:       a.Name,
+							Size:       a.Size,
+							Mime:       a.Mime,
+							IsImage:    isImageMime(a.Mime),
+							DecryptKey: key,
+						})
+					}
 					display = append(display, DisplayMessage{
-						ID:       m.ID,
-						FromID:   m.Sender,
-						From:     from,
-						Body:     m.Body,
-						TS:       m.TS,
-						Room:     m.Room,
-						Group:    m.Group,
-						ReplyTo:  m.ReplyTo,
-						Mentions: m.Mentions,
+						ID:          m.ID,
+						FromID:      m.Sender,
+						From:        from,
+						Body:        m.Body,
+						TS:          m.TS,
+						EditedAt:    m.EditedAt,
+						Room:        m.Room,
+						Group:       m.Group,
+						DM:          m.DM,
+						ReplyTo:     m.ReplyTo,
+						Mentions:    m.Mentions,
+						Deleted:     m.Deleted,
+						DeletedBy:   m.DeletedBy,
+						Attachments: attachments,
 					})
 				}
 				hasMore := len(localMsgs) >= 100
@@ -1858,13 +1891,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// If local DB had fewer than a full page, also hit server
 				// for any remaining that haven't been synced yet
 				if !hasMore {
-					a.client.RequestHistory(msg.Room, msg.Group, msg.BeforeID, 100)
+					a.client.RequestHistory(msg.Room, msg.Group, msg.DM, msg.BeforeID, 100)
 				}
 				return a, nil
 			}
 		}
 		// No local data — fall through to server
-		a.client.RequestHistory(msg.Room, msg.Group, msg.BeforeID, 100)
+		a.client.RequestHistory(msg.Room, msg.Group, msg.DM, msg.BeforeID, 100)
 		return a, nil
 
 	case MessageAction:
@@ -4782,50 +4815,12 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		if m.CorrID != "" && a.client != nil {
 			a.client.SendQueue().Ack(m.CorrID)
 		}
-		// Add to messages view if the active context is this DM
+		// Add to messages view if the active context is this DM.
+		// AddDMMessage handles dedup, decryption, attachment loop, and
+		// display-name resolution — see messages.go for the rationale.
 		if m.DM == a.messages.dm {
-			// DM messages are decrypted + displayed inline (same as group_message)
-			// For now, messages view needs an AddDMMessage — we'll use the same
-			// DisplayMessage path as groups since DMs use the same wrapped-key model.
-			if a.client != nil {
-				// Dedup by ID — sync_batch dispatches DM messages
-				// through this case, and they may already be present
-				// from LoadFromDB. Without this guard, fresh boot
-				// produces visibly duplicated DM messages until a
-				// context switch rebuilds from the store.
-				duplicate := false
-				if m.ID != "" {
-					for _, existing := range a.messages.messages {
-						if existing.ID == m.ID {
-							duplicate = true
-							break
-						}
-					}
-				}
-				if !duplicate {
-					payload, err := a.client.DecryptDMMessage(m.WrappedKeys, m.Payload)
-					body := "(encrypted)"
-					replyTo := ""
-					var mentions []string
-					if err == nil {
-						body = payload.Body
-						replyTo = payload.ReplyTo
-						mentions = payload.Mentions
-					}
-					from := a.client.DisplayName(m.From)
-					a.messages.messages = append(a.messages.messages, DisplayMessage{
-						ID:       m.ID,
-						FromID:   m.From,
-						From:     from,
-						Body:     body,
-						TS:       m.TS,
-						DM:       m.DM,
-						ReplyTo:  replyTo,
-						Mentions: mentions,
-					})
-					a.refreshMessageContent()
-				}
-			}
+			a.messages.AddDMMessage(m, a.client)
+			a.refreshMessageContent()
 			a.sendReadReceipt()
 		} else {
 			a.sidebar.IncrementUnread(m.DM)
@@ -4927,32 +4922,10 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			case "dm":
 				var dm protocol.DM
 				if json.Unmarshal(raw, &dm) == nil {
-					// Reuse buildDisplayGroup-style logic for DM history
-					body := "(encrypted)"
-					replyTo := ""
-					var mentions []string
-					if a.client != nil {
-						payload, err := a.client.DecryptDMMessage(dm.WrappedKeys, dm.Payload)
-						if err == nil {
-							body = payload.Body
-							replyTo = payload.ReplyTo
-							mentions = payload.Mentions
-						}
-					}
-					from := dm.From
-					if a.client != nil {
-						from = a.client.DisplayName(dm.From)
-					}
-					histMsgs = append(histMsgs, DisplayMessage{
-						ID:       dm.ID,
-						FromID:   dm.From,
-						From:     from,
-						Body:     body,
-						TS:       dm.TS,
-						DM:       dm.DM,
-						ReplyTo:  replyTo,
-						Mentions: mentions,
-					})
+					// buildDisplayDM mirrors buildDisplayGroup including
+					// the attachment loop the previous inline code
+					// silently omitted.
+					histMsgs = append(histMsgs, a.messages.buildDisplayDM(dm, a.client))
 				}
 			}
 		}
