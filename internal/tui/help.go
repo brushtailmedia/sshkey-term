@@ -218,7 +218,7 @@ func (h HelpModel) renderContent(width int) string {
 		adminOnly bool
 	}
 	commands := []cmdEntry{
-		{cmd: "/help", desc: "this screen"},
+		{cmd: "/help or /?", desc: "this screen"},
 		{cmd: "/search <query>", desc: "search messages"},
 		{cmd: "/upload <path>", desc: "upload a file"},
 		{cmd: "/verify <user>", desc: "verify safety number"},

@@ -3290,11 +3290,13 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			username = a.client.UserID()
 		}
 		a.settings.Show(a.appConfig, a.configDir, username, a.serverIdx)
-	case "/help":
+	case "/help", "/?":
 		// Phase 14: context-aware /help — show admin commands only
 		// when the local user is an admin of the currently-active
 		// group. In room/DM contexts the admin verbs are hidden
 		// regardless since they're group-only anyway.
+		// /? is an advertised alias (visible in the help panel as
+		// "/help or /?"), routes through the same showAdmin logic.
 		showAdmin := false
 		if sc.Group != "" {
 			showAdmin = a.isLocalAdminOfGroup(sc.Group)
