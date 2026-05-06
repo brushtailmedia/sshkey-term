@@ -6,11 +6,23 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/brushtailmedia/sshkey-term/internal/crypto"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
+
+// inflightAutoPreview tracks fileIDs that already have a goroutine
+// downloading them. Lookup is keyed by fileID. Used by
+// maybeAutoPreviewAttachments to skip spawning a duplicate download
+// when N store paths fire for the same fileID before any of them
+// have written to the cache (the os.Stat check before spawn is a
+// TOCTOU window — without this guard, N concurrent goroutines all
+// miss the cache, all queue behind c.downloadChanMu, and all
+// re-fetch the same bytes, each rewriting the on-disk file and
+// invalidating the image-render cache's mod-time check).
+var inflightAutoPreview sync.Map
 
 // pubKeyForUser resolves a user's Ed25519 public key for signature
 // verification on inbound broadcasts. Lookup order:
@@ -88,7 +100,7 @@ func (c *Client) storeRoomMessage(raw json.RawMessage, warnReplay bool) {
 		}
 	}
 
-	c.store.InsertMessage(store.StoredMessage{
+	inserted, _ := c.store.InsertMessage(store.StoredMessage{
 		ID:          msg.ID,
 		Sender:      msg.From,
 		Body:        body,
@@ -99,7 +111,15 @@ func (c *Client) storeRoomMessage(raw json.RawMessage, warnReplay bool) {
 		Mentions:    mentions,
 		Attachments: attachments,
 	})
-	c.maybeAutoPreviewAttachments(attachments)
+	// Only fire auto-preview when we actually inserted a new row.
+	// Same message arriving via live broadcast + sync_batch +
+	// history_result is the common case (every reconnect re-hits
+	// the same recent rows); without this gate, multiple goroutines
+	// fire for the same fileID, each rewriting the cached file and
+	// invalidating the image-render cache.
+	if inserted {
+		c.maybeAutoPreviewAttachments(attachments)
+	}
 }
 
 // storeGroupMessage decrypts and stores a group DM message in the local DB.
@@ -143,7 +163,7 @@ func (c *Client) storeGroupMessage(raw json.RawMessage, warnReplay bool) {
 		})
 	}
 
-	c.store.InsertMessage(store.StoredMessage{
+	inserted, _ := c.store.InsertMessage(store.StoredMessage{
 		ID:          msg.ID,
 		Sender:      msg.From,
 		Body:        payload.Body,
@@ -153,7 +173,9 @@ func (c *Client) storeGroupMessage(raw json.RawMessage, warnReplay bool) {
 		Mentions:    payload.Mentions,
 		Attachments: attachments,
 	})
-	c.maybeAutoPreviewAttachments(attachments)
+	if inserted {
+		c.maybeAutoPreviewAttachments(attachments)
+	}
 }
 
 // storeDMMessage decrypts and stores a 1:1 DM message in the local DB.
@@ -191,7 +213,7 @@ func (c *Client) storeDMMessage(raw json.RawMessage, warnReplay bool) {
 		}
 	}
 
-	c.store.InsertMessage(store.StoredMessage{
+	inserted, _ := c.store.InsertMessage(store.StoredMessage{
 		ID:          msg.ID,
 		Sender:      msg.From,
 		Body:        body,
@@ -201,7 +223,9 @@ func (c *Client) storeDMMessage(raw json.RawMessage, warnReplay bool) {
 		Mentions:    mentions,
 		Attachments: attachments,
 	})
-	c.maybeAutoPreviewAttachments(attachments)
+	if inserted {
+		c.maybeAutoPreviewAttachments(attachments)
+	}
 }
 
 // maybeAutoPreviewAttachments kicks off background downloads for image
@@ -254,6 +278,27 @@ func (c *Client) maybeAutoPreviewAttachments(attachments []store.StoredAttachmen
 		}
 		fileID := a.FileID // capture for closure
 		go func() {
+			// In-flight dedup: if another goroutine is already
+			// downloading this fileID, skip. LoadOrStore is atomic —
+			// exactly one goroutine sees `loaded=false` and proceeds.
+			// Re-checks the on-disk cache after acquiring the
+			// "lock" because the previous goroutine may have just
+			// finished writing.
+			if _, loaded := inflightAutoPreview.LoadOrStore(fileID, struct{}{}); loaded {
+				return
+			}
+			defer inflightAutoPreview.Delete(fileID)
+
+			if _, err := os.Stat(cachedPath); err == nil {
+				// Another goroutine finished while we were waiting on
+				// LoadOrStore. File is already on disk; just nudge a
+				// re-render (same as the cache-hit fast path above).
+				if cb != nil {
+					cb(fileID)
+				}
+				return
+			}
+
 			if _, err := c.DownloadFile(fileID, key); err != nil {
 				if c.logger != nil {
 					c.logger.Debug("auto-preview download failed",

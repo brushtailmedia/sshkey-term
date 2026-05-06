@@ -14,7 +14,7 @@ func TestHandleInternalDMList_HiddenPurgesMessagesAndCachesState(t *testing.T) {
 	if err := c.store.StoreDM("dm_ab", "alice", "bob"); err != nil {
 		t.Fatalf("StoreDM: %v", err)
 	}
-	if err := c.store.InsertMessage(store.StoredMessage{
+	if _, err := c.store.InsertMessage(store.StoredMessage{
 		ID: "msg_dm_1", Sender: "alice", Body: "hi", TS: 1, DM: "dm_ab",
 	}); err != nil {
 		t.Fatalf("InsertMessage: %v", err)

@@ -105,8 +105,13 @@ func TestRenderImageInline_MalformedBytesDoesNotPanic(t *testing.T) {
 func withTermCapability(t *testing.T, cap string) {
 	t.Helper()
 	prev := termImageCapability
+	prevChecked := termImageCapabilityChecked
 	termImageCapability = cap
-	t.Cleanup(func() { termImageCapability = prev })
+	termImageCapabilityChecked = true
+	t.Cleanup(func() {
+		termImageCapability = prev
+		termImageCapabilityChecked = prevChecked
+	})
 }
 
 // TestRenderImageInline_NoCapabilityReturnsEmpty pins the core "no
@@ -116,20 +121,17 @@ func withTermCapability(t *testing.T, cap string) {
 // makes Terminal.app / Windows Terminal / vanilla xterm / piped output
 // all degrade cleanly to the 🖼 placeholder.
 //
-// The test forces termImageCapability = "" to simulate no-capability,
-// which also forces CanRenderImages() to attempt its lazy sixel probe.
-// The probe internally guards on os.Stdout being a TTY, and `go test`
-// captures stdout to a buffer (not a TTY), so the probe returns false
-// quickly without sending escape bytes anywhere. No real terminal
-// interaction happens.
+// The test forces "capability already checked and unavailable" so
+// RenderImageInline short-circuits immediately and returns the
+// placeholder path without probing terminal capabilities.
 func TestRenderImageInline_NoCapabilityReturnsEmpty(t *testing.T) {
 	withTermCapability(t, "")
 
 	dir := t.TempDir()
 
 	cases := []struct {
-		name      string
-		setup     func() string
+		name  string
+		setup func() string
 	}{
 		{
 			name: "missing file",
@@ -167,6 +169,39 @@ func TestRenderImageInline_NoCapabilityReturnsEmpty(t *testing.T) {
 				t.Errorf("RenderImageInline with no capability returned %d bytes, want \"\"", len(got))
 			}
 		})
+	}
+}
+
+// TestCanRenderImages_NoCapabilityProbeIsCached verifies that a failed
+// sixel probe is cached and not re-run on subsequent calls. Repeated
+// probing can block UI render loops in terminals that don't support
+// image protocols.
+func TestCanRenderImages_NoCapabilityProbeIsCached(t *testing.T) {
+	prevCap := termImageCapability
+	prevChecked := termImageCapabilityChecked
+	prevProbe := detectSixelCapable
+	defer func() {
+		termImageCapability = prevCap
+		termImageCapabilityChecked = prevChecked
+		detectSixelCapable = prevProbe
+	}()
+
+	termImageCapability = ""
+	termImageCapabilityChecked = false
+	probeCalls := 0
+	detectSixelCapable = func() (bool, error) {
+		probeCalls++
+		return false, nil
+	}
+
+	if CanRenderImages() {
+		t.Fatal("first probe unexpectedly reported image capability")
+	}
+	if CanRenderImages() {
+		t.Fatal("second call unexpectedly reported image capability")
+	}
+	if probeCalls != 1 {
+		t.Fatalf("sixel probe calls = %d, want 1", probeCalls)
 	}
 }
 

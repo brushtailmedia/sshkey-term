@@ -36,7 +36,17 @@ type StoredMessage struct {
 }
 
 // InsertMessage stores a decrypted message.
-func (s *Store) InsertMessage(msg StoredMessage) error {
+//
+// Returns (inserted, err): inserted is true ONLY if a new row was
+// written. False indicates the message ID was already present
+// (INSERT OR IGNORE) — callers can use this to skip work that
+// should only happen once per message (e.g. firing off an
+// auto-preview download goroutine; without this check the same
+// message arriving via live broadcast + sync_batch + history_result
+// would queue three redundant download goroutines for the same
+// fileID, each rewriting the cached file and invalidating the
+// image-render cache's mod-time check).
+func (s *Store) InsertMessage(msg StoredMessage) (bool, error) {
 	mentions := strings.Join(msg.Mentions, ",")
 	attachJSON := ""
 	hasAttach := 0
@@ -46,12 +56,23 @@ func (s *Store) InsertMessage(msg StoredMessage) error {
 			hasAttach = 1
 		}
 	}
-	_, err := s.db.Exec(`
+	result, err := s.db.Exec(`
 		INSERT OR IGNORE INTO messages (id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, has_attachments, attachments)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.ID, msg.Sender, msg.Body, msg.TS, msg.Room, msg.Group, msg.DM, msg.Epoch, msg.ReplyTo, mentions, hasAttach, attachJSON,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		// Driver always supports RowsAffected; this branch shouldn't
+		// fire in practice. Treat as conservative "not new" so callers
+		// don't fire side effects on a row whose insert state we
+		// couldn't verify.
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 // GetRoomMessages returns messages for a room, ordered by timestamp ascending.

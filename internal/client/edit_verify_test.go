@@ -117,7 +117,7 @@ func (h *editVerifyHarness) seedRoomEpochKey(t *testing.T, room string, epoch in
 // UpdateMessageEdited.
 func (h *editVerifyHarness) seedOriginalRoomMessage(t *testing.T, msgID, room, body string) {
 	t.Helper()
-	err := h.alice.store.InsertMessage(store.StoredMessage{
+	_, err := h.alice.store.InsertMessage(store.StoredMessage{
 		ID:     msgID,
 		Sender: h.bobID,
 		Body:   body,
@@ -321,7 +321,7 @@ func wrapKeyForTwoParties(t *testing.T, key []byte, aliceID string, alicePub ed2
 
 func (h *editVerifyHarness) seedOriginalGroupMessage(t *testing.T, msgID, group, body string) {
 	t.Helper()
-	err := h.alice.store.InsertMessage(store.StoredMessage{
+	_, err := h.alice.store.InsertMessage(store.StoredMessage{
 		ID:     msgID,
 		Sender: h.bobID,
 		Body:   body,
@@ -441,7 +441,7 @@ func TestStoreEditedGroupMessage_RejectsUnknownSender(t *testing.T) {
 
 func (h *editVerifyHarness) seedOriginalDMMessage(t *testing.T, msgID, dmID, body string) {
 	t.Helper()
-	err := h.alice.store.InsertMessage(store.StoredMessage{
+	_, err := h.alice.store.InsertMessage(store.StoredMessage{
 		ID:     msgID,
 		Sender: h.bobID,
 		Body:   body,

@@ -165,6 +165,13 @@ type App struct {
 	pendingFocusCreatedGroupName string
 	pendingFocusCreatedGroupMems []string
 	pendingFocusCreatedSetAt     time.Time
+
+	// replayingSyncBatch is true while the sync_batch case is replaying
+	// catch-up payloads through handleServerMessage. Live-only side effects
+	// (unread increments, read receipts, notifications, bell) must be
+	// suppressed during replay so reconnect hydration does not look like
+	// fresh incoming traffic.
+	replayingSyncBatch bool
 }
 
 // pendingCreateDMState records a create_dm we have sent and are waiting
@@ -4068,12 +4075,14 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		}
 		a.messages.AddRoomMessage(m, a.client)
 		if m.Room == a.messages.room {
-			a.sendReadReceipt()
-		} else {
+			if !a.replayingSyncBatch {
+				a.sendReadReceipt()
+			}
+		} else if !a.replayingSyncBatch {
 			a.sidebar.IncrementUnread(m.Room)
 		}
 		// Notifications for messages not from self
-		if a.client != nil && m.From != a.client.UserID() {
+		if !a.replayingSyncBatch && a.client != nil && m.From != a.client.UserID() {
 			payload, err := a.client.DecryptRoomMessage(m.Room, m.Epoch, m.Payload)
 			body := "(encrypted)"
 			isMention := false
@@ -4104,11 +4113,13 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		}
 		a.messages.AddGroupMessage(m, a.client)
 		if m.Group == a.messages.group {
-			a.sendReadReceipt()
-		} else {
+			if !a.replayingSyncBatch {
+				a.sendReadReceipt()
+			}
+		} else if !a.replayingSyncBatch {
 			a.sidebar.IncrementUnread(m.Group)
 		}
-		if a.client != nil && m.From != a.client.UserID() {
+		if !a.replayingSyncBatch && a.client != nil && m.From != a.client.UserID() {
 			payload, err := a.client.DecryptGroupMessage(m.WrappedKeys, m.Payload)
 			body := "(encrypted)"
 			if err == nil {
@@ -4821,12 +4832,14 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		if m.DM == a.messages.dm {
 			a.messages.AddDMMessage(m, a.client)
 			a.refreshMessageContent()
-			a.sendReadReceipt()
-		} else {
+			if !a.replayingSyncBatch {
+				a.sendReadReceipt()
+			}
+		} else if !a.replayingSyncBatch {
 			a.sidebar.IncrementUnread(m.DM)
 		}
 		// Desktop notification
-		if a.client != nil && m.From != a.client.UserID() {
+		if !a.replayingSyncBatch && a.client != nil && m.From != a.client.UserID() {
 			payload, err := a.client.DecryptDMMessage(m.WrappedKeys, m.Payload)
 			body := "(encrypted)"
 			if err == nil {
@@ -4869,6 +4882,8 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	case "sync_batch":
 		var batch protocol.SyncBatch
 		json.Unmarshal(msg.Raw, &batch)
+		prevReplay := a.replayingSyncBatch
+		a.replayingSyncBatch = true
 		for _, raw := range batch.Messages {
 			batchType, _ := protocol.TypeOf(raw)
 			a.handleServerMessage(ServerMsg{Type: batchType, Raw: raw})
@@ -4898,6 +4913,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				a.handleServerMessage(ServerMsg{Type: "group_event", Raw: raw})
 			}
 		}
+		a.replayingSyncBatch = prevReplay
 	case "history_result":
 		var result protocol.HistoryResult
 		json.Unmarshal(msg.Raw, &result)

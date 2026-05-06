@@ -8,6 +8,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"os"
+	"sync"
 
 	"github.com/BourgeoisBear/rasterm"
 )
@@ -15,13 +16,51 @@ import (
 // termImageCapability caches the detected terminal image protocol.
 var termImageCapability string
 
+// termImageCapabilityChecked tracks whether we've already completed
+// capability detection (positive or negative). This prevents repeated
+// sixel probes on every render frame when the terminal cannot render
+// inline images.
+var termImageCapabilityChecked bool
+
+// decodeImageFile and renderImageFn are function vars so tests can stub
+// expensive decode/encode paths without depending on terminal capabilities.
+var (
+	decodeImageFile    = decodeImageFromFile
+	renderImageFn      = renderImage
+	detectSixelCapable = rasterm.IsSixelCapable
+)
+
+type imageRenderCacheKey struct {
+	path       string
+	maxCols    int
+	maxRows    int
+	capability string
+}
+
+type imageRenderCacheEntry struct {
+	modUnixNano int64
+	size        int64
+	rendered    string
+	lastUse     uint64
+}
+
+var (
+	imageRenderCacheMu sync.Mutex
+	imageRenderCache   = make(map[imageRenderCacheKey]imageRenderCacheEntry)
+	imageRenderTick    uint64
+)
+
+const maxImageRenderCacheEntries = 32
+
 func init() {
 	// Detect once at startup — these check env vars and terminal responses.
 	// Safe to call during init.
 	if rasterm.IsKittyCapable() {
 		termImageCapability = "kitty"
+		termImageCapabilityChecked = true
 	} else if rasterm.IsItermCapable() {
 		termImageCapability = "iterm"
+		termImageCapabilityChecked = true
 	} else {
 		// Sixel detection requires terminal interaction — skip in init,
 		// check lazily on first use.
@@ -29,12 +68,25 @@ func init() {
 }
 
 // CanRenderImages returns true if the terminal supports inline images.
+//
+// Diagnostic toggle: set SSHKEY_NO_INLINE_IMAGES=1 in the environment
+// to force the placeholder path regardless of terminal capability.
+// Useful for narrowing down whether a perceived freeze is in the
+// image-decode/encode path (RenderImageInline) or elsewhere. Just
+// `unset SSHKEY_NO_INLINE_IMAGES` to re-enable inline rendering.
 func CanRenderImages() bool {
+	if os.Getenv("SSHKEY_NO_INLINE_IMAGES") != "" {
+		return false
+	}
 	if termImageCapability != "" {
 		return true
 	}
+	if termImageCapabilityChecked {
+		return false
+	}
 	// Lazy sixel check
-	if ok, _ := rasterm.IsSixelCapable(); ok {
+	termImageCapabilityChecked = true
+	if ok, _ := detectSixelCapable(); ok {
 		termImageCapability = "sixel"
 		return true
 	}
@@ -59,19 +111,31 @@ func RenderImageInline(filePath string, maxCols, maxRows int) (result string) {
 	if !CanRenderImages() {
 		return ""
 	}
-
-	f, err := os.Open(filePath)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	img, _, err := image.Decode(f)
+	info, err := os.Stat(filePath)
 	if err != nil {
 		return ""
 	}
 
-	return renderImage(img, maxCols, maxRows)
+	key := imageRenderCacheKey{
+		path:       filePath,
+		maxCols:    maxCols,
+		maxRows:    maxRows,
+		capability: termImageCapability,
+	}
+	if cached, ok := getCachedInlineImage(key, info.ModTime().UnixNano(), info.Size()); ok {
+		return cached
+	}
+
+	img, err := decodeImageFile(filePath)
+	if err != nil {
+		return ""
+	}
+
+	rendered := renderImageFn(img, maxCols, maxRows)
+	if rendered != "" {
+		putCachedInlineImage(key, info.ModTime().UnixNano(), info.Size(), rendered)
+	}
+	return rendered
 }
 
 // RenderImageFromBytes renders an image from raw bytes.
@@ -85,7 +149,77 @@ func RenderImageFromBytes(data []byte, maxCols, maxRows int) string {
 		return ""
 	}
 
-	return renderImage(img, maxCols, maxRows)
+	return renderImageFn(img, maxCols, maxRows)
+}
+
+func decodeImageFromFile(filePath string) (image.Image, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return nil, err
+	}
+	return img, nil
+}
+
+func getCachedInlineImage(key imageRenderCacheKey, modUnixNano, size int64) (string, bool) {
+	imageRenderCacheMu.Lock()
+	defer imageRenderCacheMu.Unlock()
+	entry, ok := imageRenderCache[key]
+	if !ok {
+		return "", false
+	}
+	// Note on staleness: we deliberately ignore mod-time and size on
+	// cache hit. Cached files are content-addressed by file_id (a
+	// nanoid; same content → same name → same path). Even if a
+	// concurrent download path rewrites the file, the BYTES are
+	// identical, so the rendered escape sequence is identical too.
+	// The previous mod-time/size check defeated the cache whenever
+	// two paths raced to download the same file (both wrote to disk,
+	// each rewrite changed mod-time, every render saw a "stale"
+	// cache and re-decoded the multi-MB image — the hot loop that
+	// caused the user-reported "freeze every scroll-back" against
+	// an 8.5 MB PNG).
+	//
+	// modUnixNano and size are kept in the entry record only for
+	// possible future debugging / introspection; nothing reads them.
+	_ = modUnixNano
+	_ = size
+	imageRenderTick++
+	entry.lastUse = imageRenderTick
+	imageRenderCache[key] = entry
+	return entry.rendered, true
+}
+
+func putCachedInlineImage(key imageRenderCacheKey, modUnixNano, size int64, rendered string) {
+	imageRenderCacheMu.Lock()
+	defer imageRenderCacheMu.Unlock()
+	imageRenderTick++
+	imageRenderCache[key] = imageRenderCacheEntry{
+		modUnixNano: modUnixNano,
+		size:        size,
+		rendered:    rendered,
+		lastUse:     imageRenderTick,
+	}
+	if len(imageRenderCache) <= maxImageRenderCacheEntries {
+		return
+	}
+
+	// Evict one least-recently-used entry.
+	var oldestKey imageRenderCacheKey
+	var oldestUse uint64
+	first := true
+	for k, v := range imageRenderCache {
+		if first || v.lastUse < oldestUse {
+			oldestKey = k
+			oldestUse = v.lastUse
+			first = false
+		}
+	}
+	delete(imageRenderCache, oldestKey)
 }
 
 func renderImage(img image.Image, maxCols, maxRows int) string {

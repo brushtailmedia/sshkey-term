@@ -98,17 +98,17 @@ func TestPurgeDMMessages_RemovesMessagesAndReactions(t *testing.T) {
 	}
 
 	// Insert two messages in the DM, plus one in another DM as a control.
-	if err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{
 		ID: "msg_dm_1", Sender: "alice", Body: "hi", TS: 1, DM: "dm_ab",
 	}); err != nil {
 		t.Fatalf("insert msg 1: %v", err)
 	}
-	if err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{
 		ID: "msg_dm_2", Sender: "bob", Body: "hey", TS: 2, DM: "dm_ab",
 	}); err != nil {
 		t.Fatalf("insert msg 2: %v", err)
 	}
-	if err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{
 		ID: "msg_other", Sender: "alice", Body: "ping", TS: 3, DM: "dm_other",
 	}); err != nil {
 		t.Fatalf("insert msg other: %v", err)
@@ -193,17 +193,17 @@ func TestPurgeGroupMessages_RemovesMessagesAndReactions(t *testing.T) {
 	s := openTestStore(t)
 
 	// Three messages: two in group_a, one in group_b (control).
-	if err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{
 		ID: "g1", Sender: "alice", Body: "hi", TS: 1, Group: "group_a",
 	}); err != nil {
 		t.Fatalf("insert g1: %v", err)
 	}
-	if err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{
 		ID: "g2", Sender: "bob", Body: "hey", TS: 2, Group: "group_a",
 	}); err != nil {
 		t.Fatalf("insert g2: %v", err)
 	}
-	if err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{
 		ID: "g3", Sender: "alice", Body: "ping", TS: 3, Group: "group_b",
 	}); err != nil {
 		t.Fatalf("insert g3: %v", err)

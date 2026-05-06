@@ -134,9 +134,7 @@ func (c *Client) handleEpochConfirmed(raw json.RawMessage) {
 //
 // Fix: handleInternal each inner message AND each inner reaction. That
 // runs the storage side-effects (decrypt, signature verify, persist)
-// and primes the parent-in-DB check for subsequent reactions. The
-// existing OnMessage forward of inner messages is preserved so the
-// TUI's display-side handlers are unaffected.
+// and primes the parent-in-DB check for subsequent reactions.
 func (c *Client) handleSyncBatchKeys(raw json.RawMessage) {
 	var batch protocol.SyncBatch
 	if err := json.Unmarshal(raw, &batch); err != nil {
@@ -147,9 +145,14 @@ func (c *Client) handleSyncBatchKeys(raw json.RawMessage) {
 		c.storeEpochKey(ek.Room, ek.Epoch, ek.WrappedKey)
 	}
 
-	// Persist + forward each inner message. Persist FIRST so a
-	// reaction in the same batch (same iteration of the read loop)
-	// finds its parent when storeReaction's orphan check runs.
+	// Persist each inner message. Persist FIRST so a reaction in the
+	// same batch (same iteration of the read loop) finds its parent
+	// when storeReaction's orphan check runs.
+	//
+	// UI dispatch intentionally stays on the outer sync_batch frame.
+	// Forwarding each inner message here creates double-dispatch into
+	// the TUI (inner + outer replay), which over-applies live side
+	// effects like unread increments.
 	for _, msgRaw := range batch.Messages {
 		msgType, err := protocol.TypeOf(msgRaw)
 		if err != nil {
@@ -157,10 +160,6 @@ func (c *Client) handleSyncBatchKeys(raw json.RawMessage) {
 		}
 
 		c.handleCatchupMessage(msgType, msgRaw)
-
-		if c.cfg.OnMessage != nil {
-			c.cfg.OnMessage(msgType, msgRaw)
-		}
 	}
 
 	// Persist reactions. The TUI's sync_batch handler iterates

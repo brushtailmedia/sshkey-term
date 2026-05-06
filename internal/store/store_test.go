@@ -38,7 +38,7 @@ func TestOpen_EncryptedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
-	if err := s1.InsertMessage(StoredMessage{
+	if _, err := s1.InsertMessage(StoredMessage{
 		ID: "enc_m1", Sender: "alice", Body: "secret message", TS: 1, Room: "general",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -152,7 +152,7 @@ func TestOpen_IdempotentReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
-	if err := s1.InsertMessage(StoredMessage{ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "general"}); err != nil {
+	if _, err := s1.InsertMessage(StoredMessage{ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "general"}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	s1.Close()
@@ -193,7 +193,7 @@ func TestMessages_InsertAndRetrieve(t *testing.T) {
 		Epoch:   3,
 		ReplyTo: "msg_000",
 	}
-	if err := s.InsertMessage(msg); err != nil {
+	if _, err := s.InsertMessage(msg); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
@@ -213,6 +213,37 @@ func TestMessages_InsertAndRetrieve(t *testing.T) {
 	}
 	if got.ReplyTo != "msg_000" {
 		t.Errorf("reply_to = %q", got.ReplyTo)
+	}
+}
+
+// TestMessages_InsertReturnsBoolForNewVsExisting pins the
+// (inserted, err) return signature. The bool gates downstream
+// side effects in the client layer (auto-preview download spawn);
+// without this gate, the same message arriving via three persist
+// paths (live, sync_batch, history_result) fires three concurrent
+// downloads for the same fileID, each rewriting the cached file
+// — which used to invalidate the image-render cache and produce
+// a multi-second freeze on every scroll-back against large images.
+func TestMessages_InsertReturnsBoolForNewVsExisting(t *testing.T) {
+	s := openTestStore(t)
+
+	msg := StoredMessage{ID: "msg_dedup", Sender: "alice", Body: "hi", TS: 1, Room: "general"}
+
+	inserted, err := s.InsertMessage(msg)
+	if err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	if !inserted {
+		t.Errorf("first insert: inserted = false, want true")
+	}
+
+	// Second call with same ID — INSERT OR IGNORE no-ops, returns inserted=false.
+	inserted, err = s.InsertMessage(msg)
+	if err != nil {
+		t.Fatalf("second insert: %v", err)
+	}
+	if inserted {
+		t.Errorf("second insert: inserted = true, want false (row already exists)")
 	}
 }
 

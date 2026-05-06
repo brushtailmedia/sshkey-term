@@ -81,7 +81,7 @@ func TestStoreReaction_DropsOrphanOnDeletedParent(t *testing.T) {
 	c := newClientWithStore(t)
 
 	// Seed a parent message, then tombstone it.
-	err := c.store.InsertMessage(store.StoredMessage{
+	_, err := c.store.InsertMessage(store.StoredMessage{
 		ID:     "msg_deleted",
 		Sender: "usr_alice",
 		Body:   "hello",

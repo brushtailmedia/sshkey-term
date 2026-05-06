@@ -163,7 +163,7 @@ func TestApp_EditModeDispatchesCorrectVerbPerContext(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a, st := newEditAppHarness(t)
 			a.messages.SetContext(tc.room, tc.group, tc.dm)
-			if err := st.InsertMessage(tc.msg); err != nil {
+			if _, err := st.InsertMessage(tc.msg); err != nil {
 				t.Fatalf("InsertMessage: %v", err)
 			}
 			a.input.EnterEditMode(tc.msg.ID, "edited body")
