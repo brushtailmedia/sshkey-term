@@ -12,7 +12,7 @@ import (
 // members, and the view renders without panicking.
 func TestInfoPanel_ShowDMNilClient(t *testing.T) {
 	i := InfoPanelModel{}
-	i.ShowDM("dm_ab", nil, nil)
+	i.ShowDM("dm_ab", nil, nil, nil)
 
 	if !i.IsVisible() {
 		t.Error("panel should be visible after ShowDM")
@@ -188,8 +188,8 @@ func TestInfoPanel_DMEnterNoop(t *testing.T) {
 // ShowDM clears the dm and isDM flags so the panel renders as a room.
 func TestInfoPanel_ShowRoomClearsDM(t *testing.T) {
 	i := InfoPanelModel{}
-	i.ShowDM("dm_ab", nil, nil)
-	i.ShowRoom("room_general", nil, nil)
+	i.ShowDM("dm_ab", nil, nil, nil)
+	i.ShowRoom("room_general", nil, nil, nil)
 
 	if i.isDM {
 		t.Error("isDM should be false after ShowRoom")
@@ -206,8 +206,8 @@ func TestInfoPanel_ShowRoomClearsDM(t *testing.T) {
 // ShowDM clears the dm and isDM flags.
 func TestInfoPanel_ShowGroupClearsDM(t *testing.T) {
 	i := InfoPanelModel{}
-	i.ShowDM("dm_ab", nil, nil)
-	i.ShowGroup("group_1", nil, nil)
+	i.ShowDM("dm_ab", nil, nil, nil)
+	i.ShowGroup("group_1", nil, nil, nil)
 
 	if i.isDM {
 		t.Error("isDM should be false after ShowGroup")

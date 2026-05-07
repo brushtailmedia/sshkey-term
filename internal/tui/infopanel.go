@@ -38,6 +38,7 @@ type InfoPanelModel struct {
 	userID          string
 	userDisplay     string
 	userOnline      bool
+	userStatus      string // locked-set: StatusAvailable | StatusAway | StatusBusy | "" (default = available)
 	userLastSeen    string // human-friendly "2 hours ago", empty if online or unknown
 	userVerified    bool
 	userAdmin       bool   // server-level admin (from Profile.Admin)
@@ -62,6 +63,7 @@ type memberInfo struct {
 	User        string
 	DisplayName string
 	Online      bool
+	Status      string // locked-set: StatusAvailable | StatusAway | StatusBusy | "" (default)
 	Verified    bool
 	Admin       bool
 }
@@ -88,13 +90,19 @@ type RefreshRequestMsg struct {
 	Kind string
 }
 
-func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[string]bool) {
+func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[string]bool, status map[string]string) {
+	// status is unused here (members are populated later via
+	// SetRoomMembers when the server responds), but accepted in
+	// the signature for symmetry with the other Show* methods so
+	// callers don't need to special-case which params to pass.
+	_ = status
 	i.visible = true
 	i.room = room
 	i.group = ""
 	i.dm = ""
 	i.isGroup = false
 	i.isDM = false
+	i.isUser = false // clear the user-profile mode flag so a prior ShowUser doesn't leak through
 	i.cursor = 0
 	i.left = false
 	i.retired = false
@@ -119,7 +127,7 @@ func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[stri
 }
 
 // SetRoomMembers populates the member list from a server room_members_list response.
-func (i *InfoPanelModel) SetRoomMembers(room string, members []string, c *client.Client, online map[string]bool) {
+func (i *InfoPanelModel) SetRoomMembers(room string, members []string, c *client.Client, online map[string]bool, status map[string]string) {
 	if room != i.room || !i.visible {
 		return
 	}
@@ -140,6 +148,7 @@ func (i *InfoPanelModel) SetRoomMembers(room string, members []string, c *client
 			User:        user,
 			DisplayName: displayName,
 			Online:      online[user],
+			Status:      status[user],
 			Admin:       admin,
 			Verified:    verified,
 		})
@@ -147,13 +156,14 @@ func (i *InfoPanelModel) SetRoomMembers(room string, members []string, c *client
 	sortMembersAdminsFirst(i.members)
 }
 
-func (i *InfoPanelModel) ShowGroup(groupID string, c *client.Client, online map[string]bool) {
+func (i *InfoPanelModel) ShowGroup(groupID string, c *client.Client, online map[string]bool, status map[string]string) {
 	i.visible = true
 	i.room = ""
 	i.group = groupID
 	i.dm = ""
 	i.isGroup = true
 	i.isDM = false
+	i.isUser = false // clear the user-profile mode flag so a prior ShowUser doesn't leak through
 	i.cursor = 0
 	i.left = false
 	i.retired = false
@@ -189,6 +199,7 @@ func (i *InfoPanelModel) ShowGroup(groupID string, c *client.Client, online map[
 				User:        m,
 				DisplayName: displayName,
 				Online:      online[m],
+				Status:      status[m],
 				Admin:       admin,
 				Verified:    verified,
 			})
@@ -202,13 +213,14 @@ func (i *InfoPanelModel) ShowGroup(groupID string, c *client.Client, online map[
 // topic, no admin list, and no group name. The panel instead surfaces
 // the /delete hint from the refactor design doc and renders both parties
 // with their verification and retired status.
-func (i *InfoPanelModel) ShowDM(dmID string, c *client.Client, online map[string]bool) {
+func (i *InfoPanelModel) ShowDM(dmID string, c *client.Client, online map[string]bool, status map[string]string) {
 	i.visible = true
 	i.room = ""
 	i.group = ""
 	i.dm = dmID
 	i.isGroup = false
 	i.isDM = true
+	i.isUser = false // clear the user-profile mode flag so a prior ShowUser doesn't leak through
 	i.cursor = 0
 	// 1:1 DMs do not have a "left / read-only" intermediate state in the
 	// TUI — /delete is the only exit path and it removes the sidebar
@@ -251,6 +263,7 @@ func (i *InfoPanelModel) ShowDM(dmID string, c *client.Client, online map[string
 			User:        m,
 			DisplayName: displayName,
 			Online:      online[m],
+			Status:      status[m],
 			Admin:       admin,
 			Verified:    verified,
 		})
@@ -274,7 +287,7 @@ func (i *InfoPanelModel) ShowDM(dmID string, c *client.Client, online map[string
 // matching the /mykey + /whois ergonomics: SSH-format pubkey is
 // what users typically want to paste into other tools, and a
 // passive on-open copy is convenient.
-func (i *InfoPanelModel) ShowUser(userID string, c *client.Client, online map[string]bool, currentDM string) {
+func (i *InfoPanelModel) ShowUser(userID string, c *client.Client, online map[string]bool, status map[string]string, currentDM string) {
 	i.visible = true
 
 	// Reset other modes so a previous Show{Room,Group,DM} doesn't
@@ -297,6 +310,7 @@ func (i *InfoPanelModel) ShowUser(userID string, c *client.Client, online map[st
 	i.userID = userID
 	i.userDisplay = userID
 	i.userOnline = false
+	i.userStatus = ""
 	i.userLastSeen = ""
 	i.userVerified = false
 	i.userAdmin = false
@@ -359,6 +373,7 @@ func (i *InfoPanelModel) ShowUser(userID string, c *client.Client, online map[st
 	}
 
 	i.userOnline = online[userID]
+	i.userStatus = status[userID]
 
 	// Last-seen for offline users isn't tracked yet — Presence pushes
 	// carry it but we don't store it. Field stays empty; View
@@ -620,10 +635,7 @@ func (i InfoPanelModel) View(width int) string {
 	}
 
 	renderMember := func(idx int, m memberInfo) string {
-		dot := "○"
-		if m.Online {
-			dot = checkStyle.Render("●")
-		}
+		dot := PresenceDot(m.Online, m.Status)
 		line := fmt.Sprintf("   %s %s", dot, m.DisplayName)
 		if m.Verified {
 			line += checkStyle.Render(" ✓ verified")
@@ -697,14 +709,18 @@ func (i InfoPanelModel) viewUser(width int) string {
 	b.WriteString("\n\n")
 
 	// Status row — presence ●/○ + verified ✓ badge + retired marker.
+	// Presence dot color reflects locked-set status (Available/Away/
+	// Busy) when online; offline always renders the hollow ○. Status
+	// label appears next to the dot for clarity ("● away" rather
+	// than just a colored dot).
 	// Self-views append "(self)" instead of a verified badge since
 	// self-verification is meaningless. Unverified is the absence
 	// of the ✓ — never explicitly labeled.
 	var presence string
 	if i.userOnline {
-		presence = checkStyle.Render("●") + " online"
+		presence = PresenceDot(true, i.userStatus) + " " + presenceLabel(i.userStatus)
 	} else {
-		presence = "○ offline"
+		presence = offlineDot + " offline"
 		if i.userLastSeen != "" {
 			presence += " " + helpDescStyle.Render("(last seen "+i.userLastSeen+")")
 		}

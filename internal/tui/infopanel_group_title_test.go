@@ -12,7 +12,7 @@ func TestInfoPanel_ShowGroupUsesDisplayNameInHeader(t *testing.T) {
 	}
 
 	i := InfoPanelModel{}
-	i.ShowGroup("group_1", a.client, nil)
+	i.ShowGroup("group_1", a.client, nil, nil)
 
 	view := i.View(80)
 	if !strings.Contains(view, "Project Alpha — info") {

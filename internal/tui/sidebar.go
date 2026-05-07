@@ -34,8 +34,15 @@ var (
 			Foreground(lipgloss.Color("#7C3AED")).
 			Bold(true)
 
-	onlineDot  = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render("●")
-	offlineDot = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B")).Render("○")
+	// Presence dots — color encodes the user's locked-set status
+	// when online (Available / Away / Busy / Offline). The status
+	// is plumbed via the SetStatus / Presence protocol pair and
+	// stored on SidebarModel.status. presenceDot() picks the right
+	// glyph at render time.
+	onlineDot  = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render("●") // Available — green
+	awayDot    = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Render("●") // Away — amber
+	busyDot    = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("●") // Busy — red
+	offlineDot = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B")).Render("○") // Offline — slate hollow
 
 	// archivedStyle greys out sidebar entries for rooms/conversations the
 	// user has left. The entry stays visible so history can still be read,
@@ -62,14 +69,38 @@ var (
 	verifiedMarker = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).Render("✓")
 )
 
+// User-facing status values. Locked set — sent over the wire as the
+// StatusText field of SetStatus / Presence and used as keys in
+// SidebarModel.status. Empty string is treated as Available (the
+// default; no explicit "I am here" needed).
+const (
+	StatusAvailable = "available"
+	StatusAway      = "away"
+	StatusBusy      = "busy"
+)
+
+// IsValidStatus reports whether s is one of the locked-set statuses
+// (available / away / busy). Empty string is also valid — it
+// represents the unset default which renders as Available. Used by
+// the /setstatus slash command to validate user input before
+// sending to the server.
+func IsValidStatus(s string) bool {
+	switch s {
+	case "", StatusAvailable, StatusAway, StatusBusy:
+		return true
+	}
+	return false
+}
+
 // SidebarModel manages the sidebar panel.
 type SidebarModel struct {
 	rooms           []string
 	groups          []protocol.GroupInfo
 	dms             []protocol.DMInfo
-	unread          map[string]int  // room/group/dm -> count
-	online          map[string]bool // user -> online
-	retired         map[string]bool // user -> retired
+	unread          map[string]int    // room/group/dm -> count
+	online          map[string]bool   // user -> online
+	status          map[string]string // user -> StatusAvailable|StatusAway|StatusBusy ("" = available default)
+	retired         map[string]bool   // user -> retired
 	leftGroups      map[string]bool // group ID -> user has left (archived, read-only)
 	leftRooms       map[string]bool // room ID -> user has left (archived, read-only)
 	retiredRooms    map[string]bool // room ID -> room was retired by an admin (archived, read-only)
@@ -123,6 +154,7 @@ func NewSidebar() SidebarModel {
 	return SidebarModel{
 		unread:       make(map[string]int),
 		online:       make(map[string]bool),
+		status:       make(map[string]string),
 		retired:      make(map[string]bool),
 		leftGroups:   make(map[string]bool),
 		leftRooms:    make(map[string]bool),
@@ -353,6 +385,104 @@ func (s *SidebarModel) SetOnline(user string, online bool) {
 	s.online[user] = online
 }
 
+// SetStatus records a user's locked-set status (Available / Away /
+// Busy). Empty string clears any prior status (back to Available
+// default). Only meaningful for users currently online — offline
+// users always render the hollow ○ regardless. Called from the
+// `presence` server-message handler with Presence.StatusText, and
+// optimistically by the /setstatus slash command for self.
+func (s *SidebarModel) SetStatus(user, status string) {
+	if s.status == nil {
+		s.status = make(map[string]string)
+	}
+	if status == "" {
+		delete(s.status, user)
+	} else {
+		s.status[user] = status
+	}
+}
+
+// presenceDot returns the rendered presence glyph for a user, picking
+// the color by combining online state with locked-set status:
+//   - offline → hollow slate ○
+//   - online + Available (or empty) → green ●
+//   - online + Away → amber ●
+//   - online + Busy → red ●
+func (s SidebarModel) presenceDot(user string) string {
+	return PresenceDot(s.online[user], s.status[user])
+}
+
+// PresenceDot is the package-level version of presenceDot — renders
+// the right glyph from a (online, status) pair. Used by member panel
+// and info panel which snapshot these into their entry structs at
+// population time rather than holding a map reference. Callers that
+// have a SidebarModel can use the s.presenceDot method instead;
+// callers like memberpanel/infopanel that store snapshots use this.
+func PresenceDot(online bool, status string) string {
+	if !online {
+		return offlineDot
+	}
+	switch status {
+	case StatusAway:
+		return awayDot
+	case StatusBusy:
+		return busyDot
+	}
+	return onlineDot
+}
+
+// presenceLabel returns the human-readable label for a status string,
+// used alongside the colored dot in places that have room for both
+// (notably the user-profile panel's status row). Empty status maps
+// to "online" (the default Available state).
+func presenceLabel(status string) string {
+	switch status {
+	case StatusAway:
+		return "away"
+	case StatusBusy:
+		return "busy"
+	}
+	return "online"
+}
+
+// groupPresenceDot returns the aggregate presence glyph for a group
+// — the "most available" status among non-self online members.
+// Available > Away > Busy > Offline. Self is excluded so the dot
+// communicates "is someone ELSE here to chat with" rather than
+// trivially being always-green from our own presence. Mirrors the
+// DM-dot logic which already uses dmOtherUserID for the same
+// reason.
+func (s SidebarModel) groupPresenceDot(members []string) string {
+	bestRank := -1 // -1=offline-only, 0=busy, 1=away, 2=available
+	for _, m := range members {
+		if m == s.selfUserID || !s.online[m] {
+			continue
+		}
+		rank := 2 // available default for empty/unknown status
+		switch s.status[m] {
+		case StatusAway:
+			rank = 1
+		case StatusBusy:
+			rank = 0
+		}
+		if rank > bestRank {
+			bestRank = rank
+			if rank == 2 {
+				break // can't beat available
+			}
+		}
+	}
+	switch bestRank {
+	case 2:
+		return onlineDot
+	case 1:
+		return awayDot
+	case 0:
+		return busyDot
+	}
+	return offlineDot
+}
+
 // SetPreviewImagePath updates the path of the image to render in the
 // preview pane. App.View calls this each frame with the current
 // derived state (cursor-on-image AND focus-on-messages AND no modal),
@@ -496,22 +626,13 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 			name = strings.Join(names, ", ")
 		}
 
-		// Group presence dot: green if any OTHER member is online,
-		// hollow if all other members are offline. Self is excluded
-		// — the local user is always online (we just connected) so
-		// counting self would make the dot uselessly always green
-		// and defeat the purpose of the indicator (knowing whether
-		// someone you can chat with is around). Same logic as the
-		// DM dot, which already uses the "other party" via
-		// dmOtherUserID. Retired-flag gathering still iterates all
-		// members since retirement is a per-account property
-		// independent of online state.
-		dot := offlineDot
+		// Group presence dot: aggregate "most-available" status among
+		// non-self online members (see groupPresenceDot). Retired-
+		// flag gathering still iterates all members because retirement
+		// is a per-account property independent of online/status.
+		dot := s.groupPresenceDot(g.Members)
 		anyRetired := false
 		for _, m := range g.Members {
-			if m != s.selfUserID && s.online[m] {
-				dot = onlineDot
-			}
 			if s.retired[m] {
 				anyRetired = true
 			}
@@ -579,10 +700,10 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 				name = dm.ID
 			}
 
-			dot := offlineDot
-			if s.online[other] {
-				dot = onlineDot
-			}
+			// DM presence dot reflects the OTHER party's online +
+			// status (Available / Away / Busy / Offline). Same color
+			// rules as everywhere else — see presenceDot.
+			dot := s.presenceDot(other)
 
 			prefix := " " + dot + " "
 			suffix := ""

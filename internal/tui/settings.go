@@ -12,22 +12,39 @@ import (
 
 // SettingsModel manages the settings page.
 type SettingsModel struct {
-	visible   bool
-	cfg       *config.Config
-	configDir string
-	cursor    int
-	items     []settingsItem
-	confirm   *confirmDialog
-	editing   bool           // true when inline editing a field
-	editInput textinput.Model
-	editAction string        // which field is being edited
+	visible    bool
+	cfg        *config.Config
+	configDir  string
+	cursor     int
+	items      []settingsItem
+	confirm    *confirmDialog
+	editing    bool // true when inline editing a field
+	editInput  textinput.Model
+	editAction string // which field is being edited
+
+	// Cached state used by Refresh() to rebuild items in place after
+	// an action mutates state. Without this, action handlers would
+	// have to re-call Show() which resets the cursor and feels
+	// jarring. Stored here at Show time and updated by the App via
+	// SetDisplayName / Refresh.
+	displayName   string
+	currentServer int
+
+	// notice is a transient inline confirmation rendered in the
+	// footer area (just above navigation helpers) — used for copy actions, edit
+	// completions, and similar "what just happened" feedback.
+	// Settings overlays the entire screen so the status bar is
+	// hidden behind it; without this, those actions feel silent.
+	// Set via SetNotice; cleared by Hide and overwritten by the
+	// next SetNotice call.
+	notice string
 }
 
 type settingsItem struct {
-	label    string
-	value    string
-	action   string // "edit_name", "edit_status", "clear_history", "add_server", "remove_server_N", "quit"
-	isServer bool
+	label     string
+	value     string
+	action    string // "edit_name", "clear_history", "add_server", "remove_server_N", "copy_pubkey", "copy_fingerprint", "manage_devices", "retire_account", "switch_server_N"
+	isServer  bool
 	serverIdx int
 }
 
@@ -48,25 +65,60 @@ type ProfileUpdateMsg struct {
 	DisplayName string
 }
 
-// StatusUpdateMsg is sent when the user changes their status.
-type StatusUpdateMsg struct {
-	Text string
-}
-
 func NewSettings() SettingsModel {
 	return SettingsModel{}
 }
 
-func (s *SettingsModel) Show(cfg *config.Config, configDir string, username string, currentServer int) {
+// Show opens the settings page. displayName is the local user's
+// human-readable display name (NOT the nanoid user ID) — it's
+// rendered as the "Display name" row's value. The caller resolves
+// nanoid → display name via Client.DisplayName before passing in;
+// the settings model deals only with the rendered string.
+func (s *SettingsModel) Show(cfg *config.Config, configDir string, displayName string, currentServer int) {
 	s.visible = true
 	s.cfg = cfg
 	s.configDir = configDir
 	s.cursor = 0
 	s.confirm = nil
-	s.buildItems(username, currentServer)
+	s.notice = ""
+	s.displayName = displayName
+	s.currentServer = currentServer
+	s.buildItems(displayName, currentServer)
 }
 
-func (s *SettingsModel) buildItems(username string, currentServer int) {
+// Refresh rebuilds the items list with an updated display name,
+// preserving cursor position. Called by the App after a successful
+// display-name edit so the panel reflects the new value
+// immediately rather than waiting for the next Show. Cursor stays
+// on the same row index unless that row no longer exists, in
+// which case it clamps to the last item.
+func (s *SettingsModel) Refresh(displayName string) {
+	if !s.visible {
+		return
+	}
+	s.displayName = displayName
+	prevCursor := s.cursor
+	s.buildItems(displayName, s.currentServer)
+	if prevCursor >= len(s.items) {
+		prevCursor = len(s.items) - 1
+	}
+	if prevCursor < 0 {
+		prevCursor = 0
+	}
+	s.cursor = prevCursor
+}
+
+// SetNotice puts a transient confirmation message in the footer area
+// just above navigation helpers. Used for copy actions, edit confirmations, and similar
+// feedback that the status bar would normally carry — but settings
+// covers the status bar, so without this the actions look silent.
+// Persists until the next SetNotice or Hide call. Empty string
+// clears the current notice without setting a new one.
+func (s *SettingsModel) SetNotice(message string) {
+	s.notice = message
+}
+
+func (s *SettingsModel) buildItems(displayName string, currentServer int) {
 	s.items = nil
 
 	// Active server section (profile is per-server)
@@ -76,8 +128,11 @@ func (s *SettingsModel) buildItems(username string, currentServer int) {
 		s.items = append(s.items, settingsItem{label: "  Host", value: fmt.Sprintf("%s:%d", srv.Host, srv.Port), action: ""})
 		s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
 		s.items = append(s.items, settingsItem{label: "  Profile", value: "", action: ""})
-		s.items = append(s.items, settingsItem{label: "    Display name", value: username, action: "edit_name"})
-		s.items = append(s.items, settingsItem{label: "    Status", value: "(not set)", action: "edit_status"})
+		s.items = append(s.items, settingsItem{label: "    Display name", value: displayName, action: "edit_name"})
+		// Status is set via the /setstatus slash command (locked
+		// set: available / away / busy). Not a settings-panel row
+		// because there's no point duplicating the input surface
+		// once the slash command is canonical.
 		s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
 		s.items = append(s.items, settingsItem{label: "  Storage", value: "", action: ""})
 		size, _ := config.ServerDataSize(s.configDir, srv)
@@ -129,6 +184,7 @@ func (s *SettingsModel) buildItems(username string, currentServer int) {
 func (s *SettingsModel) Hide() {
 	s.visible = false
 	s.confirm = nil
+	s.notice = ""
 }
 
 func (s *SettingsModel) IsVisible() bool {
@@ -154,12 +210,6 @@ func (s SettingsModel) Update(msg tea.KeyMsg) (SettingsModel, tea.Cmd) {
 				s.editInput.Blur()
 				return s, func() tea.Msg {
 					return ProfileUpdateMsg{DisplayName: validated}
-				}
-			case "edit_status":
-				s.editing = false
-				s.editInput.Blur()
-				return s, func() tea.Msg {
-					return StatusUpdateMsg{Text: value}
 				}
 			}
 			s.editing = false
@@ -221,7 +271,7 @@ func (s SettingsModel) Update(msg tea.KeyMsg) (SettingsModel, tea.Cmd) {
 		if s.cursor < len(s.items) {
 			item := s.items[s.cursor]
 			switch {
-			case item.action == "edit_name" || item.action == "edit_status":
+			case item.action == "edit_name":
 				s.editing = true
 				s.editAction = item.action
 				s.editInput = textinput.New()
@@ -243,6 +293,14 @@ func (s SettingsModel) Update(msg tea.KeyMsg) (SettingsModel, tea.Cmd) {
 			case item.action == "add_server":
 				return s, func() tea.Msg {
 					return SettingsActionMsg{Action: "add_server"}
+				}
+			case item.action == "copy_pubkey":
+				return s, func() tea.Msg {
+					return SettingsActionMsg{Action: "copy_pubkey"}
+				}
+			case item.action == "copy_fingerprint":
+				return s, func() tea.Msg {
+					return SettingsActionMsg{Action: "copy_fingerprint"}
 				}
 			case item.action == "retire_account":
 				return s, func() tea.Msg {
@@ -275,8 +333,9 @@ func (s SettingsModel) Update(msg tea.KeyMsg) (SettingsModel, tea.Cmd) {
 // Enter to actually activate the selected item.
 //
 // Layout: border(1) + padding(1) + header(1) + blank(1) = content starts at
-// Y=4. Each items[i] takes exactly one line (including blank spacers which
-// render as "\n").
+// Y=4. The notice is rendered in the footer area, so it does not affect item
+// row mapping. Each items[i] takes exactly one line (including blank spacers
+// which render as "\n").
 func (s SettingsModel) HandleMouse(msg tea.MouseMsg) (SettingsModel, tea.Cmd) {
 	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionRelease {
 		return s, nil
@@ -286,7 +345,7 @@ func (s SettingsModel) HandleMouse(msg tea.MouseMsg) (SettingsModel, tea.Cmd) {
 		return s, nil
 	}
 
-	const firstItemY = 4
+	firstItemY := 4
 	idx := msg.Y - firstItemY
 	if idx < 0 || idx >= len(s.items) {
 		return s, nil
@@ -345,6 +404,9 @@ func (s SettingsModel) View(width, height int) string {
 	}
 
 	b.WriteString("\n\n")
+	if s.notice != "" {
+		b.WriteString("  " + checkStyle.Render(s.notice) + "\n")
+	}
 	b.WriteString(helpDescStyle.Render(" ↑/↓=navigate  Enter=select  d=remove server  Esc=close"))
 
 	return dialogStyle.Width(width - 4).Render(b.String())

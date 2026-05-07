@@ -228,6 +228,7 @@ func (h HelpModel) renderContent(width int) string {
 		{cmd: "/mute", desc: "toggle mute"},
 		{cmd: "/topic", desc: "show room topic (rooms only)"},
 		{cmd: "/settings", desc: "open settings"},
+		{cmd: "/setstatus <status>", desc: "set status: available / away / busy"},
 		{cmd: "/unverify <user>", desc: "remove verification"},
 		{cmd: "/whois <user>", desc: "show user's fingerprint + verified state"},
 		{cmd: "/pending", desc: "pending keys (admin)"},

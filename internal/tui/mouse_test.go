@@ -229,6 +229,23 @@ func TestSettingsMouse_NonActionableItemIgnored(t *testing.T) {
 	}
 }
 
+func TestSettingsMouse_NoticeDoesNotShiftItemRows(t *testing.T) {
+	s := NewSettings()
+	s.items = []settingsItem{
+		{label: "── Section ──", action: ""},
+		{label: "  Item A", action: "action_a"},
+		{label: "  Item B", action: "action_b"},
+	}
+	s.visible = true
+	s.notice = "Public key copied to clipboard"
+
+	// Notice now renders in the footer, so actionable row Y stays stable.
+	s, _ = s.HandleMouse(click(10, 5))
+	if s.cursor != 1 {
+		t.Errorf("click on items[1] should set cursor=1 even with notice, got %d", s.cursor)
+	}
+}
+
 func TestSettingsMouse_ConfirmStateIgnoresClicks(t *testing.T) {
 	s := NewSettings()
 	s.items = []settingsItem{{label: "  Item", action: "foo"}}

@@ -32,6 +32,7 @@ type memberPanelEntry struct {
 	User        string
 	DisplayName string
 	Online      bool
+	Status      string // locked-set: StatusAvailable | StatusAway | StatusBusy | "" (default = available)
 	Verified    bool
 	Retired     bool
 }
@@ -53,7 +54,10 @@ func (m *MemberPanelModel) SetFocused(focused bool) {
 }
 
 // Refresh updates the member list for the current room, group DM, or 1:1 DM.
-func (m *MemberPanelModel) Refresh(room, group, dm string, c *client.Client, online map[string]bool) {
+// status carries the locked-set per-user status (Available/Away/Busy)
+// alongside the online bool — without it the dot color can't reflect
+// /setstatus changes for individual members.
+func (m *MemberPanelModel) Refresh(room, group, dm string, c *client.Client, online map[string]bool, status map[string]string) {
 	m.members = nil
 	m.cursor = 0
 
@@ -75,6 +79,7 @@ func (m *MemberPanelModel) Refresh(room, group, dm string, c *client.Client, onl
 				User:        user,
 				DisplayName: displayName,
 				Online:      online[user],
+				Status:      status[user],
 				Retired:     retired,
 			})
 		}
@@ -100,6 +105,7 @@ func (m *MemberPanelModel) Refresh(room, group, dm string, c *client.Client, onl
 				User:        user,
 				DisplayName: displayName,
 				Online:      online[user],
+				Status:      status[user],
 				Retired:     retired,
 			})
 		}
@@ -117,7 +123,7 @@ func (m *MemberPanelModel) Refresh(room, group, dm string, c *client.Client, onl
 }
 
 // SetRoomMembers populates the member list from a server room_members_list response.
-func (m *MemberPanelModel) SetRoomMembers(members []string, c *client.Client, online map[string]bool) {
+func (m *MemberPanelModel) SetRoomMembers(members []string, c *client.Client, online map[string]bool, status map[string]string) {
 	m.members = nil
 	for _, user := range members {
 		p := c.Profile(user)
@@ -130,6 +136,7 @@ func (m *MemberPanelModel) SetRoomMembers(members []string, c *client.Client, on
 			User:        user,
 			DisplayName: displayName,
 			Online:      online[user],
+			Status:      status[user],
 			Retired:     retired,
 		})
 	}
@@ -217,10 +224,7 @@ func (m MemberPanelModel) View(width, height int) string {
 	b.WriteString("\n")
 
 	for i, mem := range m.members {
-		dot := offlineDot
-		if mem.Online {
-			dot = onlineDot
-		}
+		dot := PresenceDot(mem.Online, mem.Status)
 
 		name := mem.DisplayName
 		if mem.Verified {

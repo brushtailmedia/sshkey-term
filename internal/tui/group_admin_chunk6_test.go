@@ -422,6 +422,24 @@ func TestInputParser_AdminsOutsideGroupRoutesToApp(t *testing.T) {
 	}
 }
 
+func TestInputParser_SetStatusRoutesToApp(t *testing.T) {
+	i := &InputModel{}
+	i.handleCommand("/setstatus away", nil, "room_x", "", "")
+	sc := i.PendingCommand()
+	if sc == nil {
+		t.Fatal("/setstatus should route to app")
+	}
+	if sc.Command != "/setstatus" {
+		t.Fatalf("command = %q, want /setstatus", sc.Command)
+	}
+	if sc.Arg != "away" {
+		t.Fatalf("arg = %q, want away", sc.Arg)
+	}
+	if sc.Room != "room_x" {
+		t.Fatalf("room = %q, want room_x", sc.Room)
+	}
+}
+
 func TestInputParser_UndoRequiresGroupContext(t *testing.T) {
 	i := &InputModel{}
 	// In a group — routes

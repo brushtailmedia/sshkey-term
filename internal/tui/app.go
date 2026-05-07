@@ -848,7 +848,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+m":
 			a.memberPanel.Toggle()
 			if a.memberPanel.IsVisible() {
-				a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online)
+				a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
 				// Request actual room membership from server (lazy)
 				if a.messages.room != "" && a.client != nil {
 					a.client.RequestRoomMembers(a.messages.room)
@@ -879,11 +879,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, func() tea.Msg { return RefreshRequestMsg{Kind: "reconnect"} }
 
 		case "ctrl+,":
-			username := ""
+			displayName := ""
 			if a.client != nil {
-				username = a.client.UserID()
+				// Resolve nanoid → human display name. Settings shows
+				// this in the "Display name" row; rendering the raw
+				// nanoid was a bug (it's the internal user ID, not
+				// what the user typed as their display name).
+				displayName = a.client.DisplayName(a.client.UserID())
 			}
-			a.settings.Show(a.appConfig, a.configDir, username, a.serverIdx)
+			a.settings.Show(a.appConfig, a.configDir, displayName, a.serverIdx)
 			return a, nil
 
 		case "ctrl+i":
@@ -1013,7 +1017,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.syncPinnedBarForContext()
 				a.refreshMessageContent()
 				if a.memberPanel.IsVisible() {
-					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online)
+					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
 					if a.messages.room != "" && a.client != nil {
 						a.client.RequestRoomMembers(a.messages.room)
 					}
@@ -1283,7 +1287,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// public key to clipboard. Same panel as /whois opens —
 			// single source of truth for "show me this user."
 			if a.client != nil {
-				a.infoPanel.ShowUser(msg.User, a.client, a.sidebar.online, a.messages.dm)
+				a.infoPanel.ShowUser(msg.User, a.client, a.sidebar.online, a.sidebar.status, a.messages.dm)
 			}
 		}
 		return a, nil
@@ -1294,23 +1298,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Type:        "set_profile",
 				DisplayName: msg.DisplayName,
 			})
-			// Don't show success here — wait for the server's profile
-			// broadcast (success) or error response (username_taken).
-			// Errors display automatically via the "error" handler.
+			// Optimistically update the settings panel with the new
+			// name so the user sees their edit reflected immediately.
+			// The server's profile broadcast (success) or error
+			// response (username_taken) updates a.client's profile
+			// cache asynchronously; on error, the next time settings
+			// is opened it'll show the actual stored value. Settings
+			// covers the status bar so feedback has to live in the
+			// panel itself.
+			if a.settings.IsVisible() {
+				a.settings.Refresh(msg.DisplayName)
+				a.settings.SetNotice("Display name updated to " + msg.DisplayName)
+			}
 		}
 		return a, nil
 
-	case StatusUpdateMsg:
-		if a.client != nil {
-			a.client.Enc().Encode(protocol.SetStatus{
-				Type: "set_status",
-				Text: msg.Text,
-			})
-			a.statusBar.SetError("Status updated")
-		}
-		return a, nil
-
-	case SettingsActionMsg:
+case SettingsActionMsg:
 		switch msg.Action {
 		case "clear_history":
 			if a.client != nil && a.appConfig != nil && msg.ServerIdx < len(a.appConfig.Servers) {
@@ -1346,7 +1349,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				pubKey := a.client.PublicKeyAuthorized()
 				if pubKey != "" {
 					CopyToClipboard(pubKey)
-					a.statusBar.SetError("Public key copied to clipboard")
+					// Settings overlays the status bar so the
+					// confirmation has to live in the panel itself,
+					// not just in statusBar.SetError.
+					if a.settings.IsVisible() {
+						a.settings.SetNotice("Public key copied to clipboard")
+					} else {
+						a.statusBar.SetError("Public key copied to clipboard")
+					}
 				}
 			}
 		case "copy_fingerprint":
@@ -1354,7 +1364,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				fp := a.client.KeyFingerprint()
 				if fp != "" {
 					CopyToClipboard(fp)
-					a.statusBar.SetError(fp + " — copied to clipboard")
+					if a.settings.IsVisible() {
+						a.settings.SetNotice("Fingerprint copied to clipboard")
+					} else {
+						a.statusBar.SetError(fp + " — copied to clipboard")
+					}
 				}
 			}
 		}
@@ -2181,7 +2195,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.syncPinnedBarForContext()
 			a.refreshMessageContent()
 			// Set up member list for @completion
-			a.memberPanel.Refresh(a.client.Rooms()[0], "", "", a.client, a.sidebar.online)
+			a.memberPanel.Refresh(a.client.Rooms()[0], "", "", a.client, a.sidebar.online, a.sidebar.status)
 			a.input.SetMembers(a.activeMemberEntries())
 			a.input.SetNonMembers(a.activeNonMemberEntries())
 		}
@@ -2500,7 +2514,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				a.syncPinnedBarForContext()
 				a.refreshMessageContent()
 				if a.memberPanel.IsVisible() {
-					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online)
+					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
 					if a.messages.room != "" && a.client != nil {
 						a.client.RequestRoomMembers(a.messages.room)
 					}
@@ -2932,7 +2946,7 @@ func (a *App) switchToSidebarSelection() {
 	a.syncPinnedBarForContext()
 	a.refreshMessageContent()
 	if a.memberPanel.IsVisible() {
-		a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online)
+		a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
 		if a.messages.room != "" && a.client != nil {
 			a.client.RequestRoomMembers(a.messages.room)
 		}
@@ -3062,7 +3076,7 @@ func (a *App) showInfoPanelForContext(room, group, dm string) {
 		return
 	}
 	if room != "" {
-		a.infoPanel.ShowRoom(room, a.client, a.sidebar.online)
+		a.infoPanel.ShowRoom(room, a.client, a.sidebar.online, a.sidebar.status)
 		// Request actual room membership from server (lazy).
 		if a.client.Enc() != nil {
 			_ = a.client.RequestRoomMembers(room)
@@ -3070,11 +3084,11 @@ func (a *App) showInfoPanelForContext(room, group, dm string) {
 		return
 	}
 	if group != "" {
-		a.infoPanel.ShowGroup(group, a.client, a.sidebar.online)
+		a.infoPanel.ShowGroup(group, a.client, a.sidebar.online, a.sidebar.status)
 		return
 	}
 	if dm != "" {
-		a.infoPanel.ShowDM(dm, a.client, a.sidebar.online)
+		a.infoPanel.ShowDM(dm, a.client, a.sidebar.online, a.sidebar.status)
 		return
 	}
 	a.statusBar.SetError("No active room, group, or DM")
@@ -3100,7 +3114,7 @@ func (a *App) showMemberPanelForContext(room, group, dm string) {
 		return
 	}
 	a.memberPanel.Toggle()
-	a.memberPanel.Refresh(room, group, dm, a.client, a.sidebar.online)
+	a.memberPanel.Refresh(room, group, dm, a.client, a.sidebar.online, a.sidebar.status)
 	if room != "" {
 		if a.client.Enc() != nil {
 			_ = a.client.RequestRoomMembers(room)
@@ -3372,11 +3386,45 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 	case "/search":
 		a.search.Show()
 	case "/settings":
-		username := ""
+		displayName := ""
 		if a.client != nil {
-			username = a.client.UserID()
+			// Resolve nanoid → human display name. See ctrl+, handler
+			// for the full rationale (settings shows this in the
+			// "Display name" row, raw nanoid was wrong).
+			displayName = a.client.DisplayName(a.client.UserID())
 		}
-		a.settings.Show(a.appConfig, a.configDir, username, a.serverIdx)
+		a.settings.Show(a.appConfig, a.configDir, displayName, a.serverIdx)
+	case "/setstatus":
+		// Locked-set status — the only valid arguments are the
+		// constants in sidebar.go (available / away / busy). Empty
+		// arg is invalid; passing nothing means "show usage" rather
+		// than "clear status" since there's no obvious clear gesture
+		// (the user can /setstatus available to go back to default).
+		// Sends SetStatus to the server which echoes it back via
+		// the Presence broadcast that other clients (including ours)
+		// pick up; we also optimistically update local state so
+		// the dot color flips immediately rather than waiting for
+		// the server round-trip.
+		if a.client == nil {
+			return
+		}
+		arg := strings.ToLower(strings.TrimSpace(sc.Arg))
+		switch arg {
+		case StatusAvailable, StatusAway, StatusBusy:
+			// valid — fall through
+		case "":
+			a.statusBar.SetError("Usage: /setstatus available|away|busy")
+			return
+		default:
+			a.statusBar.SetError("Unknown status: " + arg + " (try: available, away, busy)")
+			return
+		}
+		a.client.Enc().Encode(protocol.SetStatus{
+			Type: "set_status",
+			Text: arg,
+		})
+		a.sidebar.SetStatus(a.client.UserID(), arg)
+		a.statusBar.SetError("Status set to " + arg)
 	case "/help", "/?":
 		// Phase 14: context-aware /help — show admin commands only
 		// when the local user is an admin of the currently-active
@@ -3899,7 +3947,7 @@ func (a *App) handleWhoisCommand(rawName string) {
 	// the public key to clipboard (matching /mykey ergonomics) and
 	// renders fingerprint, pubkey, presence, verified state,
 	// first-seen, role, retirement.
-	a.infoPanel.ShowUser(targetID, a.client, a.sidebar.online, a.messages.dm)
+	a.infoPanel.ShowUser(targetID, a.client, a.sidebar.online, a.sidebar.status, a.messages.dm)
 }
 
 // lookupGroupName returns the display name of a group, falling back
@@ -4284,6 +4332,11 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		var m protocol.Presence
 		json.Unmarshal(msg.Raw, &m)
 		a.sidebar.SetOnline(m.User, m.Status == "online")
+		// StatusText carries the locked-set status (available / away /
+		// busy) when the user has set one via /setstatus. Empty
+		// resets to the default (Available). Stored separately from
+		// online so the dot color can combine both signals.
+		a.sidebar.SetStatus(m.User, m.StatusText)
 	case "unread":
 		var m protocol.Unread
 		json.Unmarshal(msg.Raw, &m)
@@ -4395,9 +4448,9 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		a.statusBar.ClearRefreshing()
 		if a.client != nil {
 			room, members := a.client.RoomMembersList()
-			a.infoPanel.SetRoomMembers(room, members, a.client, a.sidebar.online)
+			a.infoPanel.SetRoomMembers(room, members, a.client, a.sidebar.online, a.sidebar.status)
 			if a.memberPanel.IsVisible() && a.messages.room == room {
-				a.memberPanel.SetRoomMembers(members, a.client, a.sidebar.online)
+				a.memberPanel.SetRoomMembers(members, a.client, a.sidebar.online, a.sidebar.status)
 				a.input.SetMembers(a.activeMemberEntries())
 				a.input.SetNonMembers(a.activeNonMemberEntries())
 			}

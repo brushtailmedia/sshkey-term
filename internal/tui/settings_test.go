@@ -94,23 +94,46 @@ func TestSettings_EditNameZeroWidth(t *testing.T) {
 	}
 }
 
-func TestSettings_EditStatusNoValidation(t *testing.T) {
+func TestSettings_CopyPublicKeyAction(t *testing.T) {
 	s := NewSettings()
 	s.visible = true
-	s.editing = true
-	s.editAction = "edit_status"
-	s.editInput.SetValue("A") // would fail name validation but status has no restriction
+	s.items = []settingsItem{
+		{label: "    [Copy public key]", action: "copy_pubkey"},
+	}
+	s.cursor = 0
 
 	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
-		t.Fatal("status should emit without validation")
+		t.Fatal("copy public key should emit SettingsActionMsg")
 	}
 	msg := cmd()
-	su, ok := msg.(StatusUpdateMsg)
+	act, ok := msg.(SettingsActionMsg)
 	if !ok {
-		t.Fatalf("expected StatusUpdateMsg, got %T", msg)
+		t.Fatalf("expected SettingsActionMsg, got %T", msg)
 	}
-	if su.Text != "A" {
-		t.Errorf("status = %q", su.Text)
+	if act.Action != "copy_pubkey" {
+		t.Fatalf("action = %q, want copy_pubkey", act.Action)
+	}
+}
+
+func TestSettings_CopyFingerprintAction(t *testing.T) {
+	s := NewSettings()
+	s.visible = true
+	s.items = []settingsItem{
+		{label: "    [Copy fingerprint]", action: "copy_fingerprint"},
+	}
+	s.cursor = 0
+
+	s, cmd := s.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("copy fingerprint should emit SettingsActionMsg")
+	}
+	msg := cmd()
+	act, ok := msg.(SettingsActionMsg)
+	if !ok {
+		t.Fatalf("expected SettingsActionMsg, got %T", msg)
+	}
+	if act.Action != "copy_fingerprint" {
+		t.Fatalf("action = %q, want copy_fingerprint", act.Action)
 	}
 }

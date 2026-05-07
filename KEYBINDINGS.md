@@ -166,6 +166,7 @@ All five admin verbs are scoped to the current group. Each runs a local pre-chec
 | `/topic` | Room only | Show the current room topic in the status bar (read-only). Groups and 1:1 DMs show "only available in rooms". Rooms with no topic set show "has no topic set". Changing a topic is deferred to a future phase. |
 | `/help` | Any | Show available commands. In a group context where you are admin, admin verbs are included; elsewhere they are hidden (context-aware filtering). |
 | `/settings` | Any | Open settings panel |
+| `/setstatus <status>` | Any | Set your presence status. Locked set: `available` (green dot), `away` (amber dot), `busy` (red dot). Reflected in the presence dot next to your name everywhere it appears (sidebar groups/DMs, member panel, profile). |
 | `/verify [user]` | Any | Show safety number for user verification |
 | `/unverify [user]` | Any | Clear verification status |
 | `/mykey` | Any | Show your own public key + fingerprint |
