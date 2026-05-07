@@ -136,15 +136,57 @@ func clampLinearIdx(v float64) int {
 	return i
 }
 
-// linearDistSq returns the squared Euclidean distance between two
-// linear-space pixels. Squared (not square-rooted) because the only
-// caller is comparison (max-of-pairs); avoiding the sqrt is a
-// per-cell hot-path optimization.
-func linearDistSq(p1, p2 linearPixel) float64 {
-	dr := p1.r - p2.r
-	dg := p1.g - p2.g
+// oklabPixel holds a pixel in Oklab perceptual color space (Ottosson
+// 2020, https://bottosson.github.io/posts/oklab/). Euclidean distance
+// in Oklab space tracks human-perceived color difference far better
+// than Euclidean distance in linear-RGB or sRGB space — small steps
+// at low luminance read as large to the eye but are tiny in linear
+// RGB; large hue changes at the same luminance read as obvious to
+// the eye but are small in linear RGB. Oklab normalizes both axes
+// so the "max-distance pair" anchor heuristic in quadrantSplit picks
+// pairs that are perceptually farthest apart, not light-intensity
+// farthest, which is what we actually want for clustering.
+//
+// Color averaging stays in linear-RGB (see linearPixel) — averaging
+// two colors in linear space produces the physically-correct mean
+// light intensity, which is the right model for "what color does the
+// terminal cell APPROXIMATE these N source pixels with." Oklab is
+// the comparison metric, linear is the averaging space, sRGB is the
+// emission format.
+type oklabPixel struct {
+	L, a, b float64
+}
+
+// linearToOklab converts linear-RGB → Oklab via the LMS intermediate.
+// Matrix coefficients from Ottosson's reference implementation. Per
+// pixel: 6 fused-multiply-adds + 3 cube-roots + 6 more FMAs. ~100ns
+// on modern hardware; called once per source pixel per cell render
+// (4× per quadrant cell), so ~2 μs per cell, ~1ms per 480-cell render.
+// Cached per (path, dims, truecolor) so the cost is one-time per
+// image.
+func linearToOklab(p linearPixel) oklabPixel {
+	l := 0.4122214708*p.r + 0.5363325363*p.g + 0.0514459929*p.b
+	m := 0.2119034982*p.r + 0.6806995451*p.g + 0.1073969566*p.b
+	s := 0.0883024619*p.r + 0.2817188376*p.g + 0.6299787005*p.b
+	l_ := math.Cbrt(l)
+	m_ := math.Cbrt(m)
+	s_ := math.Cbrt(s)
+	return oklabPixel{
+		L: 0.2104542553*l_ + 0.7936177850*m_ - 0.0040720468*s_,
+		a: 1.9779984951*l_ - 2.4285922050*m_ + 0.4505937099*s_,
+		b: 0.0259040371*l_ + 0.7827717662*m_ - 0.8086757660*s_,
+	}
+}
+
+// oklabDistSq returns the squared Euclidean distance between two
+// Oklab pixels. Squared to avoid an unnecessary sqrt — only ordering
+// matters for the max-of-pairs comparison and the nearer-anchor
+// assignment.
+func oklabDistSq(p1, p2 oklabPixel) float64 {
+	dL := p1.L - p2.L
+	da := p1.a - p2.a
 	db := p1.b - p2.b
-	return dr*dr + dg*dg + db*db
+	return dL*dL + da*da + db*db
 }
 
 // decodeImageFile and renderImageFn are function vars so tests can stub
@@ -463,25 +505,43 @@ func renderBlockImage(img image.Image, maxCols, maxRows int) string {
 // dominant color difference regardless of luminance — the result has
 // noticeably more chromatic vibrancy at thumbnail scale.
 //
-// Linear-space color math (vs sRGB): averaging in gamma-encoded sRGB
-// produces darker mid-tones than physically correct because the
-// nonlinear encoding skews the arithmetic mean. Linear-space averages
-// give accurate light blending. Combined with max-distance clustering,
-// the result is closer to what a photo-aware renderer would produce.
+// Three color spaces, three jobs:
+//   - Distance comparison (max-distance pair, anchor assignment) →
+//     Oklab. Euclidean distance in Oklab tracks perceived color
+//     difference; in linear-RGB it tracks light-intensity difference,
+//     which mis-weights low-luminance and same-luminance hue changes.
+//     Picking anchors by Oklab distance produces clusters that look
+//     "different" to the eye, not just to a photometer.
+//   - Averaging (fg = mean of lit, bg = mean of unlit) → linear RGB.
+//     Linear-space averages are the physically-correct mean light
+//     intensity. Averaging in Oklab biases toward perceptual mid-
+//     points which can shift hue away from the source colors.
+//   - Output → sRGB. The terminal renders the escape's RGB literally
+//     as sRGB, so the linear average is gamma-encoded back at emit.
 //
 // Returns (fg, bg, pattern) where pattern's 4 bits (TL=8 TR=4 BL=2 BR=1)
 // encode which positions are assigned to fg's anchor — that pattern
 // indexes quadrantBlocks for the matching glyph.
 func quadrantSplit(tl, tr, bl, br color.RGBA) (color.RGBA, color.RGBA, int) {
 	pixels := [4]linearPixel{toLinear(tl), toLinear(tr), toLinear(bl), toLinear(br)}
+	// Convert each pixel to Oklab once for distance comparisons. We
+	// keep the linear representation in `pixels` for the averaging
+	// step below — Oklab is the comparison metric, linear is the
+	// averaging space.
+	oklabs := [4]oklabPixel{
+		linearToOklab(pixels[0]),
+		linearToOklab(pixels[1]),
+		linearToOklab(pixels[2]),
+		linearToOklab(pixels[3]),
+	}
 
-	// Find the maximally-distant pair (6 pairs to check). These become
-	// the two cluster anchors.
+	// Find the maximally-distant pair in Oklab space (6 pairs to
+	// check). These become the two cluster anchors.
 	var anchorA, anchorB int
 	var maxDist float64
 	for i := 0; i < 4; i++ {
 		for j := i + 1; j < 4; j++ {
-			d := linearDistSq(pixels[i], pixels[j])
+			d := oklabDistSq(oklabs[i], oklabs[j])
 			if d > maxDist {
 				maxDist = d
 				anchorA = i
@@ -496,18 +556,19 @@ func quadrantSplit(tl, tr, bl, br color.RGBA) (color.RGBA, color.RGBA, int) {
 		return c, c, 15
 	}
 
-	// Assign each pixel to the nearer anchor; accumulate group sums
-	// for averaging in linear space. Bit positions: TL=8, TR=4, BL=2,
-	// BR=1 (matches quadrantBlocks index encoding).
+	// Assign each pixel to the perceptually-nearer anchor (Oklab
+	// distance); accumulate group sums in linear space for averaging.
+	// Bit positions: TL=8, TR=4, BL=2, BR=1 (matches quadrantBlocks
+	// index encoding).
 	bits := [4]int{8, 4, 2, 1}
 	var fgSum, bgSum linearPixel
 	var fgN, bgN int
 	var pattern int
-	a := pixels[anchorA]
-	b2 := pixels[anchorB]
+	aOk := oklabs[anchorA]
+	bOk := oklabs[anchorB]
 	for i := 0; i < 4; i++ {
-		dA := linearDistSq(pixels[i], a)
-		dB := linearDistSq(pixels[i], b2)
+		dA := oklabDistSq(oklabs[i], aOk)
+		dB := oklabDistSq(oklabs[i], bOk)
 		if dA <= dB {
 			pattern |= bits[i]
 			fgSum.r += pixels[i].r
