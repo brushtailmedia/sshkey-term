@@ -19,27 +19,49 @@ import (
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 )
 
-// Inline images are rendered as truecolor (or 256-color fallback)
-// quadrant block characters. Each terminal cell encodes a 2×2 pixel
-// region of the image: foreground = average color of "lit" pixels
-// (those above the cell's luminance midpoint), background = average
-// color of unlit pixels, character = one of 16 Unicode block glyphs
-// representing which quadrants are lit.
+// Inline images render via one of two encoders, picked at startup
+// per terminal capability:
 //
-// Why this approach (vs the kitty / iterm graphics protocols rasterm
-// previously provided): graphics escapes paint into a separate
-// terminal compositing layer that bubbletea has no concept of, which
-// caused images to persist behind modals, drift on scroll, and
-// linger after context switches. Block-character rendering lives in
-// the text-cell layer — bubbletea's diffing and lipgloss's layout
-// see them as ordinary cells, so modal overlays clear them, scrolls
-// reflow them, and context switches blank them.
+//   - rasterm (kitty / iTerm2 / WezTerm / Ghostty graphics protocols)
+//     — native-resolution placement in the terminal's graphics layer.
+//     High visual fidelity. Used when the terminal advertises support
+//     via env vars ($KITTY_WINDOW_ID, $TERM_PROGRAM=wezterm/ghostty,
+//     etc. — see rastermProtocolCache and rasterm.IsKittyCapable /
+//     IsItermCapable). The compositing-layer pitfalls that caused
+//     rasterm to be removed in an earlier iteration are addressed
+//     locally in the sidebar's preview-pane integration: the preview
+//     position is fixed (no scroll drift), modal-state-aware deselect
+//     emits a kitty-protocol delete escape on transition (so images
+//     don't persist behind modals), and image placements use a
+//     fixed image-id so re-placement atomically replaces prior
+//     content (no need to clean up before placing again).
 //
-// Output size: ~10 KB per cell-rendered image regardless of source
-// resolution (vs ~11 MB for an 8 MP image through kitty graphics
-// protocol). The thumbnail PNG persistence layer (client/thumbnail.go)
-// keeps the input pixel grid small so the downscale cost is one-time
-// per file, not per render.
+//   - Block characters (the fallback). Each terminal cell encodes a
+//     2×2 pixel region as one of 16 Unicode quadrant block glyphs;
+//     foreground = average colour of "lit" pixels (those above the
+//     cell's luminance midpoint), background = average colour of
+//     unlit pixels. Universal: works on any ANSI-256/truecolor
+//     terminal. Coexists cleanly with bubbletea's text-cell
+//     rendering (modals overwrite the cells, scrolls reflow them,
+//     context switches blank them) — no out-of-band graphics layer
+//     to manage. Sized for "recognise the subject" not "appreciate
+//     detail" — output runs ~10 KB per image regardless of source
+//     resolution, vs the megabytes a full-resolution rasterm
+//     placement would cost.
+//
+// Each encoder has its own thumbnail file (client/thumbnail.go's
+// ThumbnailPath / ThumbnailPathRasterm), sized appropriately for
+// its rendering model — 80×24 for block-char (matches the 40×12
+// cell preview at 2 src px per cell), 256×256 for rasterm (matches
+// the preview pane's screen-pixel area on common font densities).
+// Cross-terminal use of the same data dir is safe — each encoder
+// reads its own thumbnail and ignores the other's.
+//
+// SSHKEY_NO_INLINE_IMAGES=1 forces both encoders off (placeholder
+// path renders); SSHKEY_NO_RASTERM=1 forces just the rasterm
+// encoder off, falling through to the block-char path even on
+// capable terminals. Useful for diagnostics and for users who
+// prefer the block-char aesthetic.
 
 // quadrantBlocks indexes the 16 quadrant block glyphs by their
 // 4-bit pattern (TL=8, TR=4, BL=2, BR=1). Empty (0) and full (15)

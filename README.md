@@ -14,7 +14,7 @@ Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat)
 - Retired-room read-only state (admin-archived rooms show a distinct banner)
 - File sharing, reactions, typing indicators, read receipts, presence, pinned messages
 - Soft-delete: deleted messages show as tombstones in the stream, not disappearances
-- Inline images via sixel/kitty/iterm2 protocols
+- Inline image previews: native-resolution via rasterm (kitty / iTerm2 / WezTerm / Ghostty), with a universal block-cell fallback on every other terminal — never a "your terminal isn't supported" cliff
 - Local encrypted database (SQLCipher) with full-text search (FTS5)
 - Multi-server support (Ctrl+1-9 to switch)
 - Offline message history with lazy scroll-back (local-first, server fallback)
@@ -52,8 +52,9 @@ Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat)
 ```
 
 - **Bubble Tea** -- sidebar, room list, input bar, navigation
-- **block-cell inline images** -- truecolor (or 256-color fallback) Unicode quadrant blocks rendered as ordinary text cells. Lives in bubbletea's text-cell layer, not a graphics-protocol overlay, so modal overlays clear cleanly and scrolling reflows correctly. For crisp inline images, set your terminal's line-height to 1.0 (see KEYBINDINGS.md).
-- **golang.org/x/image/draw** -- downscaling source images to thumbnail size for cell rendering
+- **rasterm** -- when the terminal advertises kitty / iTerm2 / WezTerm / Ghostty graphics-protocol support, the sidebar preview pane renders images at native protocol resolution via [BourgeoisBear/rasterm](https://github.com/BourgeoisBear/rasterm). Detected at startup via env-var probes (no terminal-attribute query, which would conflict with bubbletea's stdin reader). Modal-state-aware deselect emits a kitty graphics-protocol delete escape so images don't persist behind overlays.
+- **block-cell inline images** (universal fallback) -- truecolor (or 256-color) Unicode quadrant blocks rendered as ordinary text cells. Lives in bubbletea's text-cell layer, no graphics-protocol overlay required, so it works on every terminal. For crisp output, set your terminal's line-height to 1.0 (see KEYBINDINGS.md).
+- **golang.org/x/image/draw** -- downscaling source images to thumbnail size for both encoders
 - **Go core** -- SSH connection, protocol handling, E2E crypto, local encrypted DB (go-sqlcipher, requires cgo)
 
 ## Requirements
@@ -63,23 +64,23 @@ Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat)
 
 ## Recommended Terminals
 
-Inline image rendering requires a terminal that supports an image protocol. Everything else (text, reactions, TUI layout, navigation) works in any terminal.
+Image previews work in **every** terminal via the universal block-cell fallback. The high-fidelity rasterm path (native-resolution kitty / iTerm2 graphics-protocol placement) lights up automatically when the terminal advertises support; everything else falls back to block-cell. Text, reactions, TUI layout, and navigation work everywhere regardless.
 
-| Terminal | Images | Protocol | Platform |
+| Terminal | Image path | Protocol | Platform |
 |---|---|---|---|
-| **kitty** | ✓ | kitty graphics | Linux, macOS |
-| **iTerm2** | ✓ | iTerm2 inline | macOS |
-| **WezTerm** | ✓ | sixel, kitty | Linux, macOS, Windows |
-| **foot** | ✓ | sixel | Linux (Wayland) |
-| **Ghostty** | ✓ | kitty graphics | Linux, macOS |
-| **Contour** | ✓ | sixel | Linux, macOS |
-| Terminal.app | text only | -- | macOS |
-| Windows Terminal | text only | -- | Windows |
-| basic xterm | text only | -- | Linux |
+| **kitty** | rasterm | kitty graphics | Linux, macOS |
+| **iTerm2** | rasterm | iTerm2 inline | macOS |
+| **WezTerm** | rasterm | kitty graphics | Linux, macOS, Windows |
+| **Ghostty** | rasterm | kitty graphics | Linux, macOS |
+| **foot** | block-cell | -- (sixel-only terminals; sixel probing is unsafe inside bubbletea, so foot uses the universal fallback) | Linux (Wayland) |
+| **Contour** | block-cell | -- (same reason as foot) | Linux, macOS |
+| Terminal.app | block-cell | -- | macOS |
+| Windows Terminal | block-cell | -- | Windows |
+| basic xterm | block-cell | -- | Linux |
 
-The client auto-detects your terminal and uses the best available image protocol. Unsupported terminals fall back to text placeholders (`📎 photo.jpg 230KB`).
+The client auto-detects rasterm-capable terminals via env vars at startup (`$KITTY_WINDOW_ID`, `$TERM_PROGRAM`) — no terminal probing, which would conflict with bubbletea's stdin reader. Set `SSHKEY_NO_RASTERM=1` to force the block-cell path even on capable terminals (useful for diagnostics or aesthetic preference).
 
-Works over SSH -- the image protocol passes through to your local terminal. Use one of the recommended terminals locally for the full experience.
+Works over SSH -- the graphics protocol passes through to your local terminal. Use one of the rasterm-capable terminals locally for the highest-fidelity preview experience; SSH'ing into a server from any of these terminals will use rasterm in the local terminal regardless of what's installed on the server side.
 
 ## Install
 
