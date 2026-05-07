@@ -208,6 +208,50 @@ func TestApp_UpdateWrapper_PersistsPreviewPathForRastermClear(t *testing.T) {
 	}
 }
 
+// TestApp_ComputePreviewPath_PreservedOnFocusShiftToInput is the
+// regression guard for "image preview survives clicking the input
+// bar." Common flow: user is reading a message with an image
+// attachment, clicks the input to compose a reply about it. The
+// image should stay visible during composition.
+//
+// Pre-fix, computePreviewPath gated the path on FocusMessages, so
+// any focus shift away from the messages pane (including to the
+// input bar) would return "" and clear the preview. Modal-overlay
+// is still a clearing trigger; focus alone is not.
+func TestApp_ComputePreviewPath_PreservedOnFocusShiftToInput(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.messages.SetContext("room_test", "", "")
+	a.messages.SetFilesDir(t.TempDir())
+
+	imgFile := a.messages.filesDir + "/file_compose"
+	if err := os.WriteFile(imgFile, []byte("fake-image-bytes"), 0600); err != nil {
+		t.Fatalf("seed image file: %v", err)
+	}
+	a.messages.messages = []DisplayMessage{{
+		ID: "msg_with_image",
+		Attachments: []DisplayAttachment{
+			{FileID: "file_compose", IsImage: true},
+		},
+	}}
+	a.messages.cursor = 0
+
+	for _, focus := range []Focus{FocusMessages, FocusInput, FocusSidebar, FocusMembers} {
+		a.focus = focus
+		got := a.computePreviewPath()
+		if got == "" {
+			t.Errorf("focus=%v: computePreviewPath should NOT clear when an image is under the cursor; got empty", focus)
+		}
+	}
+
+	// Sanity: modal visibility DOES clear, regardless of focus.
+	a.focus = FocusInput
+	a.help.Toggle() // open help (a modal)
+	if got := a.computePreviewPath(); got != "" {
+		t.Errorf("modal open: computePreviewPath should clear, got %q", got)
+	}
+	a.help.Toggle() // close
+}
+
 // TestSidebarView_PrependsRastermClearEscape verifies that View()
 // emits the kitty delete escape when pendingRastermClear is set, AND
 // resets the flag so subsequent renders don't repeat the escape.

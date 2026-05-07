@@ -645,12 +645,27 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // computePreviewPath returns the image path that should be rendered
-// in the sidebar's preview pane this frame, derived from focus,
-// cursor, and modal-visibility. Empty when no image should preview
-// (no message-pane focus, modal active, cursor not on a downloaded
-// image attachment).
+// in the sidebar's preview pane this frame.
+//
+// Two clearing triggers, both about avoiding visual conflict between
+// the rasterm graphics layer and other UI:
+//
+//   - Modal visible: a full-screen modal would render text cells
+//     where the rasterm placement sits. Clearing keeps the modal
+//     legible (kitty graphics don't get overwritten by text repaints
+//     on their own).
+//
+//   - Cursor not on an image attachment in the messages pane: the
+//     "selection" is gone, no image to preview.
+//
+// Notably absent: a focus check. Earlier iterations also cleared
+// when focus moved off `FocusMessages` to the input bar — but that
+// punished the common flow of "see an image attachment, click the
+// input to type a reply about it." The image stays visible until
+// the user explicitly moves the cursor away from it (in messages
+// pane) or opens a modal that would overlap the preview.
 func (a App) computePreviewPath() string {
-	if a.focus != FocusMessages || a.anyModalVisible() {
+	if a.anyModalVisible() {
 		return ""
 	}
 	return a.messages.SelectedImagePath()

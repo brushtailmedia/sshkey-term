@@ -326,7 +326,13 @@ const rastermImagePlacementID uint32 = 0x73686b79 // 'shky'
 // inline images are part of the text scrollback and get overwritten
 // by subsequent text cells. The escape is harmless there too.
 func rastermDeleteEscape() string {
-	return fmt.Sprintf("\x1b_Ga=d,d=I,i=%d;\x1b\\", rastermImagePlacementID)
+	// q=2 suppresses kitty's success-and-error response. Without it,
+	// kitty replies with `\x1b_Gi=<id>;OK\x1b\\` after processing
+	// the delete — that response comes back through stdin, which
+	// bubbletea is reading as keyboard input, and gets typed into
+	// the focused text field as literal characters. q=2 silences
+	// both success and error responses; we don't act on either.
+	return fmt.Sprintf("\x1b_Ga=d,d=I,i=%d,q=2;\x1b\\", rastermImagePlacementID)
 }
 
 // rasterFitCells computes an aspect-preserving terminal-cell rectangle
@@ -434,11 +440,24 @@ func tryRenderRasterm(filePath string, maxCols, maxRows int) (string, bool) {
 	if out == "" {
 		return "", false
 	}
-	// Prevent kitty from moving the text cursor after placement.
-	// Rasterm doesn't currently expose C=1 in KittyImgOpts, so patch
-	// only the initial placement header.
+	// Patch the initial placement header for two behaviors rasterm
+	// doesn't expose via KittyImgOpts:
+	//
+	//   - C=1 prevents kitty from moving the text cursor after
+	//     placement (otherwise the cursor jumps past the image and
+	//     subsequent text rendering lands in the wrong cells).
+	//
+	//   - q=2 suppresses kitty's `OK` / error response on the wire.
+	//     Without it, kitty replies to every placement with
+	//     `\x1b_Gi=<id>,p=<placement>;OK\x1b\\`, which comes back
+	//     through stdin. Bubbletea reads stdin as keyboard input and
+	//     types those response characters into whatever text field
+	//     is focused — visible as a literal `_Gi=...,p=...;OK\`
+	//     string getting typed into the input bar after clicking on
+	//     an image then the input. q=2 silences both success and
+	//     error responses; we don't process either anyway.
 	if rastermProtocolCache == rastermKitty {
-		out = strings.Replace(out, "\x1b_Ga=T,", "\x1b_Ga=T,C=1,", 1)
+		out = strings.Replace(out, "\x1b_Ga=T,", "\x1b_Ga=T,C=1,q=2,", 1)
 	}
 	// rasterm's encoders don't emit a trailing newline — the encoded
 	// escape sequence sits as a single "logical line" in the output.

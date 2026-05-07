@@ -221,6 +221,43 @@ func TestRastermDeleteEscape_ContainsImageID(t *testing.T) {
 	}
 }
 
+// TestRastermDeleteEscape_QuietSuppressesResponse verifies the
+// delete escape sets q=2 so kitty doesn't reply with an `OK` /
+// error response that bubbletea would read from stdin and type
+// into the focused input field as literal characters.
+//
+// User-reported failure mode: clicking an image then the input bar
+// produced `_Gi=...,p=...;OK\` getting typed into the input. That
+// was kitty's response to the placement; identical risk applies to
+// the delete response. Pin q=2 on the escape so the regression
+// can't sneak back via a refactor.
+func TestRastermDeleteEscape_QuietSuppressesResponse(t *testing.T) {
+	esc := rastermDeleteEscape()
+	if !strings.Contains(esc, "q=2") {
+		t.Errorf("delete escape should include q=2 to silence kitty's reply, got %q", esc)
+	}
+}
+
+// TestRenderImageInline_RastermPlacementIsQuiet pins that placement
+// escapes also include q=2. Same reasoning as the delete-escape
+// quiet test — kitty's success response to a placement gets read
+// from stdin by bubbletea and typed as input. The patch sits in
+// tryRenderRasterm's post-encode string.Replace; if that gets
+// dropped or the rasterm header changes, this test fails.
+func TestRenderImageInline_RastermPlacementIsQuiet(t *testing.T) {
+	resetInlineImageRenderCache()
+	withRastermProtocol(t, rastermKitty)
+	withCleanInlineImageEnv(t)
+
+	srcPath := writeImageWithThumbs(t, t.TempDir())
+
+	out := RenderImageInline(srcPath, 20, 12)
+	if !strings.Contains(out, "q=2") {
+		t.Errorf("rasterm-rendered placement should include q=2, got prefix %q",
+			truncateForLog(out, 80))
+	}
+}
+
 // writeImageWithThumbs creates a source PNG plus pre-existing
 // thumbnail files for both the block-char and rasterm paths. The
 // pre-existing thumbnails short-circuit the lazy thumbnail-generation
