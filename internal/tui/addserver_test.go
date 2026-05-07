@@ -464,3 +464,291 @@ func TestAddServer_HandleMouse_IgnoresInGenerateMode(t *testing.T) {
 		t.Error("mouse click should not change mode in generate sub-view")
 	}
 }
+
+// --- Pass A: state-leak fixes (#1, #2, #6, #7) ---
+
+func TestAddServer_HideClearsPassphraseFields(t *testing.T) {
+	a := NewAddServer()
+	a.Show()
+	a.inputs[1].SetValue("chat.example.com")
+	a, _ = a.Update(keyMsg("ctrl+g"))
+	a.genInputs[1].SetValue("secretpass")
+	a.genInputs[2].SetValue("secretpass")
+
+	a.Hide()
+
+	if a.genInputs[1].Value() != "" {
+		t.Errorf("passphrase field should be cleared on Hide(), got %q", a.genInputs[1].Value())
+	}
+	if a.genInputs[2].Value() != "" {
+		t.Errorf("confirm field should be cleared on Hide(), got %q", a.genInputs[2].Value())
+	}
+}
+
+func TestAddServer_ShowClearsPassphraseFields(t *testing.T) {
+	a := NewAddServer()
+	// Pre-populate genInputs to simulate residue from before Show()
+	a.genInputs[1].SetValue("leftover")
+	a.genInputs[2].SetValue("leftover")
+
+	a.Show()
+
+	if a.genInputs[1].Value() != "" {
+		t.Errorf("passphrase field should be cleared on Show(), got %q", a.genInputs[1].Value())
+	}
+	if a.genInputs[2].Value() != "" {
+		t.Errorf("confirm field should be cleared on Show(), got %q", a.genInputs[2].Value())
+	}
+}
+
+func TestAddServer_CtrlGClearsPassphraseFields(t *testing.T) {
+	a := NewAddServer()
+	a.Show()
+	a.inputs[1].SetValue("chat.example.com")
+
+	// Open generate, type a passphrase, Esc back to form
+	a, _ = a.Update(keyMsg("ctrl+g"))
+	a.genInputs[1].SetValue("typed-then-bailed")
+	a.genInputs[2].SetValue("typed-then-bailed")
+	a, _ = a.Update(keyMsg("esc"))
+	if a.mode != addServerForm {
+		t.Fatal("precondition: Esc should return to form")
+	}
+
+	// Re-enter generate — passphrase fields should be fresh
+	a, _ = a.Update(keyMsg("ctrl+g"))
+	if a.genInputs[1].Value() != "" {
+		t.Errorf("re-entering generate should clear passphrase, got %q", a.genInputs[1].Value())
+	}
+	if a.genInputs[2].Value() != "" {
+		t.Errorf("re-entering generate should clear confirm, got %q", a.genInputs[2].Value())
+	}
+}
+
+func TestAddServer_HideClearsWeakPassConfirmed(t *testing.T) {
+	a := NewAddServer()
+	a.Show()
+	a.weakPassConfirmed = "previously-warned"
+
+	a.Hide()
+
+	if a.weakPassConfirmed != "" {
+		t.Errorf("weakPassConfirmed should be cleared on Hide(), got %q", a.weakPassConfirmed)
+	}
+}
+
+func TestAddServer_ShowClearsWeakPassConfirmed(t *testing.T) {
+	a := NewAddServer()
+	a.weakPassConfirmed = "stale"
+
+	a.Show()
+
+	if a.weakPassConfirmed != "" {
+		t.Errorf("weakPassConfirmed should be cleared on Show(), got %q", a.weakPassConfirmed)
+	}
+}
+
+// --- Pass B: keyboard nav for scanned-keys list (#3) ---
+
+// setupAddServerWithScannedKeys returns a visible AddServerModel with two
+// fake scanned keys plus focus advanced to the key-path field, ready for
+// nav-key tests.
+func setupAddServerWithScannedKeys(t *testing.T) AddServerModel {
+	t.Helper()
+	a := NewAddServer()
+	a.Show()
+	a.scannedKeys = []keyEntry{
+		{Path: "/home/me/.ssh/id_ed25519", Type: "ed25519"},
+		{Path: "/home/me/.sshkey-term/keys/id_ed25519_alt", Type: "ed25519"},
+	}
+	// Position focus on field 3 (the key-path input) — the natural
+	// jumping-off point for entering the list.
+	a.focused = 3
+	return a
+}
+
+func TestAddServer_DownFromKeyPathEntersKeyList(t *testing.T) {
+	a := setupAddServerWithScannedKeys(t)
+	a, _ = a.Update(keyMsg("down"))
+
+	if a.focused != len(a.inputs) {
+		t.Errorf("Down from field 3 should enter list (focused=%d), got %d", len(a.inputs), a.focused)
+	}
+	if a.keyCursor != 0 {
+		t.Errorf("entering list should set keyCursor=0, got %d", a.keyCursor)
+	}
+}
+
+func TestAddServer_DownFromKeyPathNoListWrapsToFirstField(t *testing.T) {
+	a := NewAddServer()
+	a.Show()
+	a.scannedKeys = nil // explicit: no keys to enter
+	a.focused = 3
+
+	a, _ = a.Update(keyMsg("down"))
+
+	if a.focused != 0 {
+		t.Errorf("Down from field 3 with empty list should wrap to field 0, got %d", a.focused)
+	}
+}
+
+func TestAddServer_DownInKeyListAdvancesCursor(t *testing.T) {
+	a := setupAddServerWithScannedKeys(t)
+	a, _ = a.Update(keyMsg("down")) // enter list
+	a, _ = a.Update(keyMsg("down")) // advance
+
+	if a.focused != len(a.inputs) {
+		t.Errorf("should still be in list, focused=%d", a.focused)
+	}
+	if a.keyCursor != 1 {
+		t.Errorf("Down in list should advance cursor to 1, got %d", a.keyCursor)
+	}
+}
+
+func TestAddServer_DownAtBottomOfKeyListStays(t *testing.T) {
+	a := setupAddServerWithScannedKeys(t)
+	a, _ = a.Update(keyMsg("down")) // enter list (cursor=0)
+	a, _ = a.Update(keyMsg("down")) // cursor=1 (last)
+	a, _ = a.Update(keyMsg("down")) // should stay at 1
+
+	if a.keyCursor != 1 {
+		t.Errorf("Down at bottom of list should stay at last index, got %d", a.keyCursor)
+	}
+	if a.focused != len(a.inputs) {
+		t.Errorf("Down at bottom should not exit list, focused=%d", a.focused)
+	}
+}
+
+func TestAddServer_UpInKeyListDecrementsCursor(t *testing.T) {
+	a := setupAddServerWithScannedKeys(t)
+	a, _ = a.Update(keyMsg("down")) // enter list
+	a, _ = a.Update(keyMsg("down")) // cursor=1
+	a, _ = a.Update(keyMsg("up"))   // back to 0
+
+	if a.keyCursor != 0 {
+		t.Errorf("Up in list should decrement cursor to 0, got %d", a.keyCursor)
+	}
+	if a.focused != len(a.inputs) {
+		t.Errorf("Up from cursor=1 should stay in list, focused=%d", a.focused)
+	}
+}
+
+func TestAddServer_UpAtTopOfKeyListReturnsToKeyPath(t *testing.T) {
+	a := setupAddServerWithScannedKeys(t)
+	a, _ = a.Update(keyMsg("down")) // enter list at cursor=0
+	a, _ = a.Update(keyMsg("up"))   // exit back to field 3
+
+	if a.focused != 3 {
+		t.Errorf("Up at top of list should return to field 3, got %d", a.focused)
+	}
+}
+
+func TestAddServer_EnterInKeyListSelectsKey(t *testing.T) {
+	a := setupAddServerWithScannedKeys(t)
+	a, _ = a.Update(keyMsg("down")) // enter list (cursor=0)
+	a, _ = a.Update(keyMsg("down")) // cursor=1
+
+	a, _ = a.Update(keyMsg("enter"))
+
+	if a.focused != 3 {
+		t.Errorf("Enter in list should return focus to field 3, got %d", a.focused)
+	}
+	want := "/home/me/.sshkey-term/keys/id_ed25519_alt"
+	if a.inputs[3].Value() != want {
+		t.Errorf("Enter on cursor=1 should fill inputs[3] with %q, got %q", want, a.inputs[3].Value())
+	}
+}
+
+func TestAddServer_TabFromKeyListReturnsToFirstField(t *testing.T) {
+	a := setupAddServerWithScannedKeys(t)
+	a, _ = a.Update(keyMsg("down")) // enter list
+	a, _ = a.Update(keyMsg("tab"))
+
+	if a.focused != 0 {
+		t.Errorf("Tab from list should jump to field 0, got %d", a.focused)
+	}
+}
+
+func TestAddServer_ShiftTabFromKeyListReturnsToKeyPath(t *testing.T) {
+	a := setupAddServerWithScannedKeys(t)
+	a, _ = a.Update(keyMsg("down"))      // enter list
+	a, _ = a.Update(keyMsg("shift+tab")) // exit upward
+
+	if a.focused != 3 {
+		t.Errorf("Shift+Tab from list should return to field 3, got %d", a.focused)
+	}
+}
+
+func TestAddServer_TabCyclesFieldsSkipsKeyList(t *testing.T) {
+	// Tab cycles 0..3 even when the list has entries — the list is
+	// only reachable via Down.
+	a := setupAddServerWithScannedKeys(t)
+	a.focused = 0
+	a.inputs[0].Focus()
+	for want := 1; want <= 3; want++ {
+		a, _ = a.Update(keyMsg("tab"))
+		if a.focused != want {
+			t.Errorf("Tab cycle: focused=%d, want %d", a.focused, want)
+		}
+	}
+	// One more Tab from field 3: should wrap to field 0, not enter list.
+	a, _ = a.Update(keyMsg("tab"))
+	if a.focused != 0 {
+		t.Errorf("Tab from field 3 should wrap to 0 (not enter list), got %d", a.focused)
+	}
+}
+
+func TestAddServer_FormKeystrokeIgnoredInKeyList(t *testing.T) {
+	// Typing a regular character while the cursor is in the list
+	// should not insert into any input — the list zone has no
+	// editable target and the fall-through guard skips Update().
+	a := setupAddServerWithScannedKeys(t)
+	a, _ = a.Update(keyMsg("down")) // enter list
+	before := a.inputs[3].Value()
+
+	a, _ = a.Update(keyMsg("x"))
+
+	if a.inputs[3].Value() != before {
+		t.Errorf("typing in list should not modify inputs[3]: before=%q after=%q", before, a.inputs[3].Value())
+	}
+	if a.focused != len(a.inputs) {
+		t.Errorf("typing in list should not change focus, got %d", a.focused)
+	}
+}
+
+func TestAddServer_CtrlGFromKeyListClampsFocus(t *testing.T) {
+	// Ctrl+G while in the list must clamp focused back into the form
+	// range — Esc-back from generate calls inputs[focused].Focus()
+	// which would index out of bounds otherwise.
+	a := setupAddServerWithScannedKeys(t)
+	a.inputs[1].SetValue("chat.example.com")
+	a, _ = a.Update(keyMsg("down")) // enter list
+	if a.focused != len(a.inputs) {
+		t.Fatal("precondition: should be in list")
+	}
+
+	a, _ = a.Update(keyMsg("ctrl+g"))
+	if a.mode != addServerGenerate {
+		t.Fatalf("Ctrl+G should enter generate mode, got mode=%d", a.mode)
+	}
+
+	// Esc back — must not panic, must focus a real field.
+	a, _ = a.Update(keyMsg("esc"))
+	if a.mode != addServerForm {
+		t.Errorf("Esc should return to form mode, got %d", a.mode)
+	}
+	if a.focused >= len(a.inputs) {
+		t.Errorf("focused must be a real form field after Esc, got %d", a.focused)
+	}
+}
+
+func TestAddServer_ShowResetsKeyCursor(t *testing.T) {
+	a := NewAddServer()
+	a.keyCursor = 7 // stale leftover
+
+	a.Show()
+
+	if a.keyCursor != 0 {
+		t.Errorf("Show() should reset keyCursor to 0, got %d", a.keyCursor)
+	}
+}

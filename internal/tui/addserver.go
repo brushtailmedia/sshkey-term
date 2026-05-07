@@ -26,11 +26,25 @@ type AddServerModel struct {
 	visible bool
 	mode    addServerMode
 	inputs  []textinput.Model
-	focused int // 0=name, 1=host, 2=port, 3=key
+	// focused tracks input focus across two zones:
+	//   0..3                    — the four form fields (name/host/port/key)
+	//   len(inputs) (i.e. 4)    — sentinel meaning "selection is in the
+	//                             scanned-keys list below the form"; the
+	//                             active list row lives in keyCursor.
+	// Tab/Shift+Tab cycle within 0..3 only. Down from field 3 enters
+	// the list (focused=4, keyCursor=0); Up at the top of the list
+	// returns to field 3. Mouse click on a list row jumps directly to
+	// focused=3 with the path filled — same end-state as keyboard
+	// Enter on a row, just without the intermediate "in list" focus.
+	focused int
 	labels  []string
 
 	// Scanned keys from ~/.ssh (Ed25519 only, for quick selection)
 	scannedKeys []keyEntry
+	// keyCursor is the highlighted row index within scannedKeys when
+	// focused == len(inputs). Undefined otherwise (we don't read it
+	// unless focused is in the list-zone). Reset to 0 on Show.
+	keyCursor int
 
 	// Generate sub-view
 	genInputs  []textinput.Model // 0=path, 1=passphrase, 2=confirm
@@ -243,9 +257,12 @@ func (a *AddServerModel) Show() {
 	a.visible = true
 	a.mode = addServerForm
 	a.focused = 0
+	a.keyCursor = 0
 	a.genErr = ""
 	a.genNotice = ""
 	a.formErr = ""
+	a.weakPassConfirmed = ""
+	a.strengthHint = keygen.LiveHint{}
 	for i := range a.inputs {
 		if i == 2 {
 			a.inputs[i].SetValue("2222")
@@ -253,16 +270,17 @@ func (a *AddServerModel) Show() {
 			a.inputs[i].SetValue("")
 		}
 	}
+	// Clear any stale passphrase from a prior dialog session — the
+	// textinput model retains values across Hide/Show, and we don't
+	// want a passphrase typed previously to be lurking in the field
+	// or in process memory longer than necessary. Path is reset on
+	// Ctrl+G entry from the host-derived default; clearing here is
+	// belt-and-suspenders.
+	a.genInputs[1].SetValue("")
+	a.genInputs[2].SetValue("")
 	a.inputs[0].Focus()
 
-	// Scan ~/.ssh for existing Ed25519 keys (filters non-ed25519 out)
-	all := scanSSHKeys()
-	a.scannedKeys = a.scannedKeys[:0]
-	for _, k := range all {
-		if k.Type == "ed25519" {
-			a.scannedKeys = append(a.scannedKeys, k)
-		}
-	}
+	a.rescanEd25519Keys()
 }
 
 func (a *AddServerModel) Hide() {
@@ -271,6 +289,18 @@ func (a *AddServerModel) Hide() {
 	a.genErr = ""
 	a.genNotice = ""
 	a.formErr = ""
+	// Clear sensitive / per-session state. weakPassConfirmed is the
+	// "you've been warned about this borderline passphrase" mark — if
+	// it survived Hide(), the user could close+reopen and silently
+	// get the warned passphrase accepted on first Enter. strengthHint
+	// is the live zxcvbn indicator; keeping a stale one would briefly
+	// flash a wrong reading on the next open before the first keystroke
+	// recomputes it. Passphrase fields zeroed for the same reason as
+	// in Show() — minimize cleartext-in-memory window.
+	a.weakPassConfirmed = ""
+	a.strengthHint = keygen.LiveHint{}
+	a.genInputs[1].SetValue("")
+	a.genInputs[2].SetValue("")
 	for i := range a.inputs {
 		a.inputs[i].Blur()
 	}
@@ -281,6 +311,24 @@ func (a *AddServerModel) Hide() {
 
 func (a *AddServerModel) IsVisible() bool {
 	return a.visible
+}
+
+// rescanEd25519Keys refreshes a.scannedKeys with only the Ed25519
+// entries from disk. Called on Show (dialog open) and after a
+// successful key generation (so a freshly-written key shows up in
+// the list if it landed in a scanned directory). The protocol only
+// accepts Ed25519, so unsupported types are filtered out here even
+// though scanSSHKeys returns them — keyselector.go shows them to
+// explain "why isn't my RSA key listed", but add-server only offers
+// usable picks.
+func (a *AddServerModel) rescanEd25519Keys() {
+	all := scanSSHKeys()
+	a.scannedKeys = a.scannedKeys[:0]
+	for _, k := range all {
+		if k.Type == "ed25519" {
+			a.scannedKeys = append(a.scannedKeys, k)
+		}
+	}
 }
 
 func (a AddServerModel) Update(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
@@ -311,6 +359,12 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		// move focus to the host field so the next keystroke lands
 		// where the user needs to type. One-step fix from the user's
 		// side and the filesystem never sees a misnamed key.
+		// If user was navigating the scanned-keys list, clamp focused
+		// back into the form range — Esc-back from generate calls
+		// inputs[focused].Focus() and would panic on out-of-bounds.
+		if a.focused >= len(a.inputs) {
+			a.focused = 3
+		}
 		host := sanitizeForFilename(strings.TrimSpace(a.inputs[1].Value()))
 		if host == "" {
 			a.formErr = "Type a hostname first — used to name the new key file."
@@ -326,18 +380,90 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		}
 		home, _ := os.UserHomeDir()
 		a.genInputs[0].SetValue(filepath.Join(home, ".sshkey-term", "keys", "id_ed25519_"+host))
+		// Always enter generate with empty passphrase fields and no
+		// stale strength hint — even if the user previously typed a
+		// passphrase in this dialog session and Esc'd back to the
+		// form, the textinput retains the value. Re-show should be a
+		// fresh slate so a passphrase isn't sitting visible (echo is
+		// masked but the value is in memory) and the live hint isn't
+		// reading old data until the first keystroke recomputes it.
+		a.genInputs[1].SetValue("")
+		a.genInputs[2].SetValue("")
+		a.strengthHint = keygen.LiveHint{}
 		a.genFocused = 0
 		a.genInputs[0].Focus()
 		a.genErr = ""
 		return a, nil
 
-	case "tab", "down":
+	case "tab":
+		// Tab cycles through the four form fields only — the scanned-
+		// keys list isn't part of the tab order (its size varies and
+		// users may want to skip past it quickly to submit). If the
+		// user is currently in the list, Tab pops back out to field 0
+		// rather than advancing through list rows.
+		if a.focused >= len(a.inputs) {
+			a.focused = 0
+			a.inputs[0].Focus()
+			return a, nil
+		}
 		a.inputs[a.focused].Blur()
 		a.focused = (a.focused + 1) % len(a.inputs)
 		a.inputs[a.focused].Focus()
 		return a, nil
 
-	case "shift+tab", "up":
+	case "shift+tab":
+		if a.focused >= len(a.inputs) {
+			// From the list, Shift+Tab returns to field 3 — the
+			// natural "above the list" target.
+			a.focused = 3
+			a.inputs[3].Focus()
+			return a, nil
+		}
+		a.inputs[a.focused].Blur()
+		a.focused--
+		if a.focused < 0 {
+			a.focused = len(a.inputs) - 1
+		}
+		a.inputs[a.focused].Focus()
+		return a, nil
+
+	case "down":
+		// Down acts like Tab within the form, but with one extra step:
+		// from field 3 it descends into the scanned-keys list (if any),
+		// matching the visual layout where the list sits below the
+		// form. Within the list, Down moves the cursor; we deliberately
+		// don't wrap back to field 0 at the bottom — keeps the user
+		// oriented when scrolling through a long key list.
+		if a.focused >= len(a.inputs) {
+			if a.keyCursor < len(a.scannedKeys)-1 {
+				a.keyCursor++
+			}
+			return a, nil
+		}
+		if a.focused == 3 && len(a.scannedKeys) > 0 {
+			a.inputs[3].Blur()
+			a.focused = len(a.inputs)
+			a.keyCursor = 0
+			return a, nil
+		}
+		a.inputs[a.focused].Blur()
+		a.focused = (a.focused + 1) % len(a.inputs)
+		a.inputs[a.focused].Focus()
+		return a, nil
+
+	case "up":
+		// Up navigates within the list when the user is in it,
+		// returning to field 3 from the top row. Outside the list,
+		// behaves like Shift+Tab (cycle backward through fields).
+		if a.focused >= len(a.inputs) {
+			if a.keyCursor > 0 {
+				a.keyCursor--
+				return a, nil
+			}
+			a.focused = 3
+			a.inputs[3].Focus()
+			return a, nil
+		}
 		a.inputs[a.focused].Blur()
 		a.focused--
 		if a.focused < 0 {
@@ -347,6 +473,19 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		return a, nil
 
 	case "enter", "ctrl+enter":
+		// Enter on a list row means "select this key" (parallel to
+		// mouse click on the same row), not "submit the form". Fill
+		// inputs[3] with the highlighted path and return focus to
+		// field 3 so the user can review or adjust before pressing
+		// Enter again to submit.
+		if a.focused >= len(a.inputs) {
+			if a.keyCursor >= 0 && a.keyCursor < len(a.scannedKeys) {
+				a.inputs[3].SetValue(a.scannedKeys[a.keyCursor].Path)
+			}
+			a.focused = 3
+			a.inputs[3].Focus()
+			return a, nil
+		}
 		// Validate and submit
 		a.formErr = "" // clear any prior submit error
 		name := strings.TrimSpace(a.inputs[0].Value())
@@ -395,18 +534,31 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		}
 	}
 
+	// Fall-through to the active textinput. When focused is in the
+	// list zone (>= len(inputs)) there's no textinput to forward to —
+	// keystrokes that aren't list-navigation are ignored, which is
+	// the right thing: typing letters while highlighting a key
+	// shouldn't insert into a hidden input.
 	var cmd tea.Cmd
-	a.inputs[a.focused], cmd = a.inputs[a.focused].Update(msg)
+	if a.focused < len(a.inputs) {
+		a.inputs[a.focused], cmd = a.inputs[a.focused].Update(msg)
+	}
 	return a, cmd
 }
 
 func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		// Return to form mode without generating
+		// Return to form mode without generating. Defensive clamp:
+		// Ctrl+G already pulls focused back into the form range, but
+		// if anything ever leaves it as the list-sentinel value here
+		// we'd index inputs out of bounds.
 		a.mode = addServerForm
 		for i := range a.genInputs {
 			a.genInputs[i].Blur()
+		}
+		if a.focused >= len(a.inputs) {
+			a.focused = 3
 		}
 		a.inputs[a.focused].Focus()
 		a.genErr = ""
@@ -506,13 +658,7 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 		// Rescan keys so the newly-generated one can appear in the list
 		// (it was written to ~/.sshkey-term/keys/... by default, not ~/.ssh/,
 		// so it typically won't — but rescan covers custom paths under ~/.ssh)
-		all := scanSSHKeys()
-		a.scannedKeys = a.scannedKeys[:0]
-		for _, k := range all {
-			if k.Type == "ed25519" {
-				a.scannedKeys = append(a.scannedKeys, k)
-			}
-		}
+		a.rescanEd25519Keys()
 		return a, nil
 	}
 
@@ -554,7 +700,12 @@ func (a AddServerModel) HandleMouse(msg tea.MouseMsg) (AddServerModel, tea.Cmd) 
 	for i := range a.inputs {
 		fieldY := fieldStartY + i*2
 		if msg.Y == fieldY {
-			a.inputs[a.focused].Blur()
+			// Guard against blurring an out-of-range index when the
+			// user was navigating the scanned-keys list with the
+			// keyboard (focused == len(inputs)).
+			if a.focused < len(a.inputs) {
+				a.inputs[a.focused].Blur()
+			}
 			a.focused = i
 			a.inputs[i].Focus()
 			return a, nil
@@ -567,8 +718,11 @@ func (a AddServerModel) HandleMouse(msg tea.MouseMsg) (AddServerModel, tea.Cmd) 
 		if msg.Y == keyStartY+i {
 			// Select this key — fill the key path input
 			a.inputs[3].SetValue(entry.Path)
-			a.inputs[a.focused].Blur()
+			if a.focused < len(a.inputs) {
+				a.inputs[a.focused].Blur()
+			}
 			a.focused = 3
+			a.keyCursor = i
 			a.inputs[3].Focus()
 			return a, nil
 		}
@@ -626,19 +780,26 @@ func (a AddServerModel) viewForm(width int) string {
 	}
 
 	if len(a.scannedKeys) > 0 {
-		b.WriteString("  " + helpDescStyle.Render("Existing Ed25519 keys (click to use):") + "\n\n")
-		for _, entry := range a.scannedKeys {
+		b.WriteString("  " + helpDescStyle.Render("Existing Ed25519 keys (↓ to navigate, Enter or click to use):") + "\n\n")
+		for i, entry := range a.scannedKeys {
 			// Shorten path by replacing $HOME with ~
 			display := entry.Path
 			if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(display, home) {
 				display = "~" + display[len(home):]
 			}
-			b.WriteString("  " + display + "\n")
+			line := "  " + display
+			// Highlight the row only when keyboard focus is in the
+			// list. A leftover keyCursor from a prior visit shouldn't
+			// look "selected" while the user is typing in a form field.
+			if a.focused == len(a.inputs) && i == a.keyCursor {
+				line = completionSelectedStyle.Render(line)
+			}
+			b.WriteString(line + "\n")
 		}
 		b.WriteString("\n")
 	}
 
-	b.WriteString(helpDescStyle.Render("  Tab=next field  Ctrl+g=generate new key  Enter=add  Esc=cancel"))
+	b.WriteString(helpDescStyle.Render("  Tab=field  ↑/↓=keys  Enter=add/select  Ctrl+g=generate  Esc=cancel"))
 
 	return dialogStyle.Width(width - 4).Render(b.String())
 }
