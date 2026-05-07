@@ -36,7 +36,12 @@ func (q *QuitConfirmModel) IsVisible() bool {
 
 func (q QuitConfirmModel) Update(msg tea.KeyMsg) (QuitConfirmModel, tea.Cmd) {
 	switch msg.String() {
-	case "y", "enter":
+	case "y":
+		// Only `y` confirms — Enter intentionally does nothing so an
+		// accidentally-pressed Enter while the dialog is open
+		// doesn't quit the app. Users typing into the input field
+		// who fat-finger Ctrl+Q are protected: they have to make
+		// the deliberate choice to press y.
 		q.Hide()
 		return q, tea.Quit
 	case "n", "esc":

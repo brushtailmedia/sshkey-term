@@ -68,9 +68,14 @@ type memberInfo struct {
 	Admin       bool
 }
 
-// MuteToggleMsg is sent when the user toggles mute on a room or group DM.
+// MuteToggleMsg is sent when the user toggles mute on a room, group
+// DM, or 1:1 DM. Target is the raw ID (room/group/DM nanoid). Kind
+// disambiguates which resolver the App should use to fetch the
+// human display name for the status-bar confirmation —
+// DisplayRoomName / DisplayGroupName / DisplayDMName.
 type MuteToggleMsg struct {
-	Target string // room ID or group DM ID
+	Target string // room ID, group DM ID, or 1:1 DM ID (raw nanoid)
+	Kind   string // "room" | "group" | "dm" — selects the resolver in the App handler
 	Muted  bool
 }
 
@@ -473,13 +478,25 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 		}
 	case "m":
 		i.ToggleMute()
-		target := i.room
-		if target == "" {
+		// Pick the active context: room, group, or DM. Previous code
+		// only checked room/group, leaving DM-mode mute presses with
+		// an empty target (status bar showed "Muted: " with nothing
+		// after). Kind lets the App resolve the right display name.
+		var target, kind string
+		switch {
+		case i.room != "":
+			target = i.room
+			kind = "room"
+		case i.group != "":
 			target = i.group
+			kind = "group"
+		case i.dm != "":
+			target = i.dm
+			kind = "dm"
 		}
 		muted := i.muted
 		return i, func() tea.Msg {
-			return MuteToggleMsg{Target: target, Muted: muted}
+			return MuteToggleMsg{Target: target, Kind: kind, Muted: muted}
 		}
 	case "r":
 		// Phase 17c Step 6: refresh room member list. Only meaningful

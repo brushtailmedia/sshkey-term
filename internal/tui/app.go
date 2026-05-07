@@ -1197,10 +1197,31 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.appConfig != nil {
 			config.SaveMutedMap(a.configDir, a.appConfig, a.muted)
 		}
+		// Resolve the raw nanoid target to a human-readable name for
+		// the status-bar confirmation. Kind selects which resolver
+		// to use; fall back to the raw ID if the client isn't
+		// available or the resolver returns empty.
+		label := msg.Target
+		if a.client != nil {
+			switch msg.Kind {
+			case "room":
+				if name := strings.TrimSpace(a.client.DisplayRoomName(msg.Target)); name != "" {
+					label = name
+				}
+			case "group":
+				if name := strings.TrimSpace(a.client.DisplayGroupName(msg.Target)); name != "" {
+					label = name
+				}
+			case "dm":
+				if name := strings.TrimSpace(a.client.DisplayDMName(msg.Target)); name != "" {
+					label = name
+				}
+			}
+		}
 		if msg.Muted {
-			a.statusBar.SetError("Muted: " + msg.Target)
+			a.statusBar.SetError("Muted: " + label)
 		} else {
-			a.statusBar.SetError("Unmuted: " + msg.Target)
+			a.statusBar.SetError("Unmuted: " + label)
 		}
 		return a, nil
 
