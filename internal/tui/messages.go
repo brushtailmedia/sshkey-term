@@ -2151,17 +2151,42 @@ func (m *MessagesModel) View(width, height int, focused bool) string {
 		pinnedSection = m.pinnedBar + "\n"
 	}
 
-	m.viewport.Width = contentWidth
-	m.viewport.Height = height - 2 - headerLines - pinnedRows // borders + header + pinned bar
-	if m.viewport.Height < 1 {
-		m.viewport.Height = 1
-	}
+	m.syncViewportLayout(width, height, headerLines, pinnedRows)
 
 	style := messagesPanelStyle
 	if focused {
 		style = messagesFocusedStyle
 	}
 	return style.Width(width).Height(height).Render(headerStr + pinnedSection + m.viewport.View())
+}
+
+// syncViewportLayout applies the viewport width/height derived from the
+// messages panel dimensions.
+//
+// Why this exists: message scrolling happens in Update(), not View().
+// App.View is a value receiver, so any viewport-size assignment done only
+// while rendering lands on a throwaway copy. Keeping this geometry helper
+// reusable lets App.Update keep the persistent model in sync before key/
+// wheel scroll logic runs.
+func (m *MessagesModel) syncViewportLayout(panelWidth, panelHeight, headerLines, pinnedRows int) {
+	contentWidth := panelWidth - 2
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	m.viewport.Width = contentWidth
+	m.viewport.Height = panelHeight - 2 - headerLines - pinnedRows // borders + header + pinned bar
+	if m.viewport.Height < 1 {
+		m.viewport.Height = 1
+	}
+}
+
+// SyncViewportLayoutForPanel updates persistent viewport geometry using the
+// same layout math as View(), so Update-time scroll handling (ensureCursorVisible,
+// pgup/pgdown) uses accurate dimensions after resizes and banner changes.
+func (m *MessagesModel) SyncViewportLayoutForPanel(panelWidth, panelHeight int) {
+	_, headerLines := m.renderHeader(panelWidth)
+	pinnedRows := m.PinnedBarRows()
+	m.syncViewportLayout(panelWidth, panelHeight, headerLines, pinnedRows)
 }
 
 func formatSize(b int64) string {

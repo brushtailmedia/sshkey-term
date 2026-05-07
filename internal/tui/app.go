@@ -636,8 +636,14 @@ func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChange
 // this wrapper; non-App returns (rare; if a future refactor swaps in
 // a different model type) pass through untouched.
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Keep persistent message-viewport geometry in sync for Update-time
+	// scroll logic. View is value-receiver, so render-time size writes do
+	// not persist between events.
+	a.syncMessageViewportState()
+
 	model, cmd := a.updateInner(msg)
 	if app, ok := model.(App); ok {
+		app.syncMessageViewportState()
 		app.sidebar.SetPreviewImagePath(app.computePreviewPath())
 		return app, cmd
 	}
@@ -669,6 +675,38 @@ func (a App) computePreviewPath() string {
 		return ""
 	}
 	return a.messages.SelectedImagePath()
+}
+
+// syncMessageViewportState mirrors the messages-panel geometry math used in
+// View() and applies it to the persistent model so keyboard/mouse scrolling
+// in Update() uses accurate viewport dimensions.
+func (a *App) syncMessageViewportState() {
+	if a.width == 0 || a.height == 0 {
+		return
+	}
+
+	layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+	mainWidth := layout.MessagesWidth
+	mainHeight := layout.MessagesY1 - 2
+	if mainWidth < 20 {
+		mainWidth = 20
+	}
+	if mainHeight < 5 {
+		mainHeight = 5
+	}
+
+	bannerRows := a.input.BannerRows()
+	msgHeight := mainHeight - bannerRows
+	if a.showHelpHint {
+		msgHeight--
+	}
+	if msgHeight < 1 {
+		msgHeight = 1
+	}
+
+	// Keep pinned-bar rows current for hit-testing and viewport-height math.
+	a.messages.SetPinnedBar(a.pinnedBar.View(mainWidth - 2))
+	a.messages.SyncViewportLayoutForPanel(mainWidth, msgHeight)
 }
 
 func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
