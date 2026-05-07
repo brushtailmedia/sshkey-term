@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
@@ -1544,14 +1545,22 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 	return m, nil
 }
 
-// renderHeader returns the always-pinned title + topic + blank
-// separator block that sits above the scrollable message stream.
+// renderHeader returns the always-pinned title + blank separator
+// block that sits above the scrollable message stream. For rooms
+// with a topic set, the topic is rendered INLINE on the same row
+// as the room name ("#general — Project chat") rather than on a
+// separate line — saves a row of vertical real estate while still
+// surfacing the topic prominently.
+//
+// width is used to truncate the topic if "#name — topic" would
+// overflow the panel; the room name is preserved intact and only
+// the topic gets ellipsized.
+//
 // Header lives outside the viewport per the post-2026-04-25 layout
 // decision so the room title is always visible regardless of scroll
-// position. Returns the rendered string and the line count (so the
-// caller can subtract it from the panel height when sizing the
-// viewport).
-func (m MessagesModel) renderHeader() (string, int) {
+// position. Returns the rendered string and the line count (always
+// 2 now: title line + blank separator).
+func (m MessagesModel) renderHeader(width int) (string, int) {
 	var b strings.Builder
 
 	title := m.room
@@ -1587,17 +1596,30 @@ func (m MessagesModel) renderHeader() (string, int) {
 		title = "no room selected"
 	}
 
-	b.WriteString(searchHeaderStyle.Render(" " + title))
-	b.WriteString("\n")
-	headerLines := 2 // title line + blank separator
-	if m.room != "" && m.roomTopic != "" {
-		b.WriteString(helpDescStyle.Render(" " + m.roomTopic))
-		b.WriteString("\n")
-		headerLines = 3
-	}
-	b.WriteString("\n") // blank separator before the viewport
+	titleRendered := searchHeaderStyle.Render(" " + title)
+	b.WriteString(titleRendered)
 
-	return b.String(), headerLines
+	// Inline topic for rooms only — groups and DMs don't have
+	// topics. Truncate if "#name — topic" would overflow the
+	// available content width; the room name is preserved intact.
+	if m.room != "" && m.roomTopic != "" {
+		const sep = " — "
+		// 2 cells reserved for left+right border padding inside
+		// the panel chrome; matches the contentWidth math used
+		// elsewhere in the messages-pane render.
+		available := width - 2 - ansi.StringWidth(titleRendered) - len(sep)
+		if available > 4 {
+			topic := m.roomTopic
+			if ansi.StringWidth(topic) > available {
+				topic = ansi.Truncate(topic, available, "…")
+			}
+			b.WriteString(sep)
+			b.WriteString(helpDescStyle.Render(topic))
+		}
+	}
+	b.WriteString("\n\n") // title row + blank separator before the viewport
+
+	return b.String(), 2
 }
 
 // buildContent renders the full scrollable content of the messages
@@ -1944,9 +1966,12 @@ func (m MessagesModel) MessageAtViewportRow(viewportRow int) int {
 // viewport in View output. Mouse handlers in app.go subtract this
 // (plus 1 for the top border) from a click's terminal-y to get the
 // viewport row, which they then pass to MessageAtViewportRow.
+//
+// Header is always 2 rows now (title-with-inline-topic + blank
+// separator). Constant return — no need to render the header just
+// to count lines. Width-independent.
 func (m MessagesModel) HeaderLines() int {
-	_, lines := m.renderHeader()
-	return lines
+	return 2
 }
 
 // SetPinnedBar installs the pre-rendered pinned-messages bar string
@@ -2016,7 +2041,7 @@ func (m MessagesModel) AtTop() bool {
 // calls in app.go keep the persistent App state current for queries
 // that happen between renders (e.g. mouse-wheel AtTop checks).
 func (m *MessagesModel) View(width, height int, focused bool) string {
-	headerStr, headerLines := m.renderHeader()
+	headerStr, headerLines := m.renderHeader(width)
 
 	contentWidth := width - 2 // panel width minus left+right borders
 	if contentWidth < 1 {

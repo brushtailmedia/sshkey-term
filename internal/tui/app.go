@@ -3619,12 +3619,22 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 	}
 }
 
-// handleTopicCommand (Phase 18) surfaces the current room topic in the
-// status bar. Read-only — changing a topic is deferred to Phase 16 with
-// the CLI audit + room_updated broadcast work. In a room context with a
-// topic set, shows "#name — topic text". In a room with no topic, shows
-// "#name has no topic set". In a group or 1:1 DM context, shows
-// "/topic is only available in rooms" — groups have no topics by design.
+// handleTopicCommand handles the /topic slash command. Two modes:
+//
+//   - `/topic` (no arg) — read-only, shows the current room topic in
+//     the status bar. "#name — topic text" if a topic is set, or
+//     "#name has no topic set" otherwise.
+//
+//   - `/topic <text>` (with arg) — admin-only, sets a new topic for
+//     the current room. Sends a RoomUpdate request to the server.
+//     Server-side handler not yet implemented (see topic.md in
+//     sshkey-chat); until that lands, the request is enqueued but
+//     no broadcast comes back, and the local UI stays on the old
+//     topic. This is intentional scaffolding.
+//
+// In a group or 1:1 DM context, both modes show
+// "/topic is only available in rooms" — groups have no topics by
+// design.
 func (a *App) handleTopicCommand(sc *SlashCommandMsg) {
 	if sc.Room == "" {
 		a.statusBar.SetError("/topic is only available in rooms")
@@ -3634,13 +3644,36 @@ func (a *App) handleTopicCommand(sc *SlashCommandMsg) {
 		a.statusBar.SetError("/topic unavailable — not connected")
 		return
 	}
-	name := a.client.DisplayRoomName(sc.Room)
-	topic := a.client.DisplayRoomTopic(sc.Room)
-	if topic == "" {
-		a.statusBar.SetError("#" + name + " has no topic set")
+
+	newTopic := strings.TrimSpace(sc.Arg)
+	if newTopic == "" {
+		// Read mode — display current topic
+		name := a.client.DisplayRoomName(sc.Room)
+		topic := a.client.DisplayRoomTopic(sc.Room)
+		if topic == "" {
+			a.statusBar.SetError("#" + name + " has no topic set")
+			return
+		}
+		a.statusBar.SetError("#" + name + " — " + topic)
 		return
 	}
-	a.statusBar.SetError("#" + name + " — " + topic)
+
+	// Write mode — admin only. The server enforces this too, but
+	// catching it client-side gives a faster + clearer error than
+	// "request silently dropped."
+	if !a.client.IsAdmin() {
+		a.statusBar.SetError("/topic <text> is admin-only")
+		return
+	}
+	if err := a.client.SendRoomUpdate(sc.Room, newTopic); err != nil {
+		a.statusBar.SetError("Failed to set topic: " + err.Error())
+		return
+	}
+	// Optimistic confirmation. The actual topic update lands when the
+	// server's RoomUpdated broadcast arrives — at that point the
+	// in-memory cache + the messages-pane header refresh
+	// automatically. Until then, the user knows the request was sent.
+	a.statusBar.SetError("Topic update sent — pending server confirmation")
 }
 
 // Phase 14 Chunk 6 command handlers ------------------------------------
@@ -4128,14 +4161,35 @@ func (a *App) handleGroupAdminCommand(sc *SlashCommandMsg) {
 
 // handleWhoamiCommand surfaces the local user's display name + role
 // in the current context via the status bar.
+//
+// Roles surfaced (most-privileged label wins):
+//   - "server admin" — client.IsAdmin() is true (server-wide admin
+//     flag from the user's profile). Shown regardless of context;
+//     a server admin is a server admin everywhere.
+//   - "group admin" — in a group DM context AND the user is in
+//     that group's admin set (via isLocalAdminOfGroup). Server
+//     admins in a group context where they're ALSO group admin
+//     get "server admin + group admin".
+//   - "member" — fallback, no admin role applies.
+//
+// Previous version only checked the group-admin path, leaving
+// server admins showing "member" outside group contexts (e.g.
+// in a room or DM, where group-admin doesn't apply).
 func (a *App) handleWhoamiCommand(sc *SlashCommandMsg) {
 	if a.client == nil {
 		return
 	}
 	name := a.client.DisplayName(a.client.UserID())
-	role := "member"
+	var roles []string
+	if a.client.IsAdmin() {
+		roles = append(roles, "server admin")
+	}
 	if sc.Group != "" && a.isLocalAdminOfGroup(sc.Group) {
-		role = "admin"
+		roles = append(roles, "group admin")
+	}
+	role := "member"
+	if len(roles) > 0 {
+		role = strings.Join(roles, " + ")
 	}
 	a.statusBar.SetError(name + " — " + role)
 }

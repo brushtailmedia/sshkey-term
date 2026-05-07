@@ -444,6 +444,32 @@ type RoomUpdated struct {
 	Topic       string `json:"topic"`        // post-change topic
 }
 
+// RoomUpdate is the client-initiated request to mutate a room's
+// display name or topic. Server validates that the sender is an
+// admin (server-wide or room-level, depending on the server's
+// authorization model), persists the change, and broadcasts a
+// RoomUpdated event to every member of the room.
+//
+// SERVER STATUS (2026-05): not yet wired on the server side. Today
+// the server only emits RoomUpdated from runRoomUpdatesProcessor
+// in response to `sshkey-ctl update-topic` / `sshkey-ctl rename-
+// room`. Adding the matching client-initiated path is tracked in
+// `topic.md` in the sshkey-chat repo. Until the server lands the
+// handler, sending RoomUpdate from the client is a no-op (server
+// silently ignores or replies with an error).
+//
+// Empty Topic is allowed and clears the topic (sets it back to
+// "no topic set" state). Empty DisplayName is reserved for the
+// rename path; clients sending only a Topic should leave
+// DisplayName as the existing value or empty (server treats empty
+// as "no change to that field").
+type RoomUpdate struct {
+	Type        string `json:"type"`                   // "room_update"
+	Room        string `json:"room"`                   // room nanoid
+	DisplayName string `json:"display_name,omitempty"` // omit to leave name unchanged
+	Topic       string `json:"topic"`                  // new topic; empty string clears
+}
+
 // DeleteRoom is the client-initiated request to remove a room from
 // the user's view. Parallel to DeleteGroup. The server runs the leave
 // flow, records a deleted_rooms sidecar row for multi-device catchup,

@@ -623,6 +623,24 @@ func (c *Client) SendRead(room, group, dm, lastRead string) error {
 	})
 }
 
+// SendRoomUpdate sends a request to mutate a room's topic.
+// Admin-only on the server side — non-admin senders will receive an
+// error response (or be silently ignored, depending on server
+// implementation). Empty topic clears the existing topic.
+//
+// Server-side handler is not yet implemented as of 2026-05; see
+// the sshkey-chat repo's topic.md for the implementation outline.
+// Until that lands, this method enqueues the request but the
+// server doesn't act on it.
+func (c *Client) SendRoomUpdate(room, topic string) error {
+	envelope := protocol.RoomUpdate{
+		Type:  "room_update",
+		Room:  room,
+		Topic: topic,
+	}
+	return c.enc.Encode(envelope)
+}
+
 // SendDelete sends a message deletion request.
 func (c *Client) SendDelete(id string) error {
 	corrID := protocol.GenerateCorrID()

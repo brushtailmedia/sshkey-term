@@ -78,7 +78,7 @@ func (h *HelpModel) Update(msg tea.Msg, width, height int) tea.Cmd {
 	switch m := msg.(type) {
 	case tea.KeyMsg:
 		switch m.String() {
-		case "esc", "?":
+		case "esc", "?", "q":
 			h.Hide()
 			return nil
 		case "up", "k":
@@ -226,11 +226,11 @@ func (h HelpModel) renderContent(width int) string {
 		{cmd: "/leave", desc: "leave room or group DM"},
 		{cmd: "/delete", desc: "delete conversation from your view"},
 		{cmd: "/mute", desc: "toggle mute"},
-		{cmd: "/topic", desc: "show room topic (rooms only)"},
+		{cmd: "/topic [text]", desc: "show or set room topic — set is admin only (rooms only)"},
 		{cmd: "/settings", desc: "open settings"},
-		{cmd: "/setstatus <status>", desc: "set status: available / away / busy"},
+		{cmd: "/setstatus [status]", desc: "set status — bare opens picker, or pass: available / away / busy"},
 		{cmd: "/unverify <user>", desc: "remove verification"},
-		{cmd: "/whois <user>", desc: "show user's fingerprint + verified state"},
+		{cmd: "/whois <user>", desc: "open user profile (display name, ID, fingerprint, key, verified, role)"},
 		{cmd: "/pending", desc: "pending keys (admin)"},
 		{cmd: "/mykey", desc: "copy public key"},
 		// Phase 14 status commands (group-context, any member)
@@ -277,7 +277,7 @@ func (h HelpModel) renderContent(width int) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpDescStyle.Render("  Press Esc or ? to close"))
+	b.WriteString(helpDescStyle.Render("  Press Esc, q, or ? to close"))
 	return b.String()
 }
 
