@@ -27,13 +27,16 @@ var (
 
 // SearchModel manages the search page.
 type SearchModel struct {
-	visible     bool
-	input       textinput.Model
-	results     []store.StoredMessage
-	cursor      int
-	lastQuery   string
-	resolveName func(string) string // nanoid → display name
-	hasFTS      bool                // true if FTS5 is available
+	visible          bool
+	input            textinput.Model
+	results          []store.StoredMessage
+	cursor           int
+	lastQuery        string
+	resolveName      func(string) string // user nanoid → display name
+	resolveRoomName  func(string) string // room nanoid → display name
+	resolveGroupName func(string) string // group nanoid → display name
+	resolveDMName    func(string) string // dm nanoid → other-user display name
+	hasFTS           bool                // true if FTS5 is available
 }
 
 func NewSearch() SearchModel {
@@ -156,12 +159,35 @@ func (s SearchModel) View(width, height int) string {
 		for i := start; i < len(s.results) && i < start+visibleResults; i++ {
 			r := s.results[i]
 
-			location := r.Room
-			if location == "" {
+			// Resolve the conversation ID to a human display name where
+			// the App has wired a resolver. Falls back to the raw nanoid
+			// (room_… / group_… / dm_…) only if no resolver is set OR
+			// the resolver returned empty for an unknown ID — both rare
+			// in practice but worth preserving so a search result never
+			// appears with an empty location field.
+			var location string
+			switch {
+			case r.Room != "":
+				location = r.Room
+				if s.resolveRoomName != nil {
+					if name := s.resolveRoomName(r.Room); name != "" {
+						location = name
+					}
+				}
+			case r.Group != "":
 				location = r.Group
-			}
-			if location == "" {
+				if s.resolveGroupName != nil {
+					if name := s.resolveGroupName(r.Group); name != "" {
+						location = name
+					}
+				}
+			case r.DM != "":
 				location = r.DM
+				if s.resolveDMName != nil {
+					if name := s.resolveDMName(r.DM); name != "" {
+						location = name
+					}
+				}
 			}
 			ts := time.Unix(r.TS, 0).Format("Jan 2")
 

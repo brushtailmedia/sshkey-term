@@ -2318,6 +2318,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.messages.resolveGroupName = a.client.DisplayGroupName
 		a.messages.resolveDMName = a.client.DisplayDMName
 		a.search.resolveName = a.client.DisplayName
+		a.search.resolveRoomName = a.client.DisplayRoomName
+		a.search.resolveGroupName = a.client.DisplayGroupName
+		a.search.resolveDMName = a.client.DisplayDMName
 		if st := a.client.Store(); st != nil {
 			a.search.SetFTS(st.HasFTS())
 		}
