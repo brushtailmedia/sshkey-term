@@ -104,16 +104,73 @@ func (k KeySelectorModel) View(width int) string {
 	return dialogStyle.Width(width - 4).Render(b.String())
 }
 
-// scanSSHKeys looks for SSH keys in ~/.ssh/
+// scanSSHKeys returns SSH keys discovered in two locations,
+// concatenated in this order:
+//
+//  1. ~/.sshkey-term/keys/  — app-managed (listed first; these are
+//     keys generated via the wizard or add-server flow, most likely
+//     candidates for reuse with another sshkey-chat server)
+//  2. ~/.ssh/               — system SSH directory (listed second)
+//
+// Within each source ed25519 keys come before other types (the
+// protocol only accepts ed25519, but we surface unsupported types
+// too so users see why a key they expected isn't usable).
+//
+// Missing directories are silently skipped — most users won't have
+// `~/.sshkey-term/keys/` until they've gone through the wizard, and
+// some users won't have `~/.ssh/` at all. Per-file read errors are
+// also silently skipped (the file is omitted from results); a
+// permission error on one key shouldn't hide all the others.
+//
+// Paths are deduplicated by absolute string match: if the same path
+// appears in both directories (e.g. via symlink), the managed-folder
+// occurrence wins.
 func scanSSHKeys() []keyEntry {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
 
+	seen := make(map[string]bool)
+	var all []keyEntry
+
+	// Managed folder first — app-generated keys.
+	managedDir := filepath.Join(home, ".sshkey-term", "keys")
+	for _, k := range scanKeyDir(managedDir) {
+		if seen[k.Path] {
+			continue
+		}
+		seen[k.Path] = true
+		all = append(all, k)
+	}
+
+	// System ~/.ssh second.
 	sshDir := filepath.Join(home, ".ssh")
-	entries, err := os.ReadDir(sshDir)
+	for _, k := range scanKeyDir(sshDir) {
+		if seen[k.Path] {
+			continue
+		}
+		seen[k.Path] = true
+		all = append(all, k)
+	}
+
+	return all
+}
+
+// scanKeyDir scans a single directory for SSH private key files,
+// returning entries with ed25519 keys ordered before other types.
+// Returns nil for missing directories — callers (and scanSSHKeys)
+// silently skip; not having a directory is the expected case for
+// fresh users, not an error condition.
+//
+// Filters out: subdirectories, .pub files (paired with their
+// private counterparts), known_hosts, config, authorized_keys —
+// the standard non-key files commonly found in ~/.ssh.
+func scanKeyDir(dir string) []keyEntry {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
+		// Includes the "directory doesn't exist" case (os.PathError
+		// from ReadDir on a missing path). Silent skip.
 		return nil
 	}
 
@@ -123,9 +180,11 @@ func scanSSHKeys() []keyEntry {
 			continue
 		}
 
-		path := filepath.Join(sshDir, e.Name())
+		path := filepath.Join(dir, e.Name())
 
-		// Quick check: read first line to determine key type
+		// Quick check: read the file to verify it's a private key.
+		// Read errors (permission denied, vanished file) skip the
+		// entry rather than failing the whole scan.
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -134,7 +193,9 @@ func scanSSHKeys() []keyEntry {
 		content := string(data)
 		keyType := "unknown"
 		if strings.Contains(content, "OPENSSH PRIVATE KEY") {
-			// Need to check the .pub file for the type
+			// Determine the algorithm from the paired .pub file.
+			// If .pub is missing/unreadable we still list the key
+			// as "openssh" so the user sees it.
 			pubData, err := os.ReadFile(path + ".pub")
 			if err == nil {
 				pub := string(pubData)
@@ -146,15 +207,15 @@ func scanSSHKeys() []keyEntry {
 					keyType = "ecdsa"
 				}
 			} else {
-				keyType = "openssh" // can't determine without .pub
+				keyType = "openssh"
 			}
 		}
 
-		// Only show ed25519 keys (others are listed but marked unsupported)
 		keys = append(keys, keyEntry{Path: path, Type: keyType})
 	}
 
-	// Sort ed25519 keys first
+	// Sort ed25519 first within this directory; preserves caller's
+	// expectations from the previous single-directory implementation.
 	sorted := make([]keyEntry, 0, len(keys))
 	for _, k := range keys {
 		if k.Type == "ed25519" {
@@ -166,6 +227,5 @@ func scanSSHKeys() []keyEntry {
 			sorted = append(sorted, k)
 		}
 	}
-
 	return sorted
 }

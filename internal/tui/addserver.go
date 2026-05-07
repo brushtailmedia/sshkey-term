@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -37,6 +38,10 @@ type AddServerModel struct {
 	genErr     string
 	genNotice  string // shown in form view after successful generation
 
+	// Form-level error (e.g. failed key copy on submit). Rendered in
+	// viewForm under the existing notice; cleared on each new submit.
+	formErr string
+
 	// Phase 16 Gap 4: zxcvbn warn-and-confirm state. When the user
 	// submits a borderline passphrase (warn tier), we display the
 	// warning and stash the passphrase here. If they re-submit with
@@ -57,6 +62,126 @@ type AddServerMsg struct {
 	Host string
 	Port int
 	Key  string
+}
+
+// keyCopyFn is the function the submit handler uses to copy keys
+// into the managed folder. Production points it at copyKeyForServer;
+// tests can swap it for a passthrough so they don't need real key
+// files on disk. Package-level variable so the swap is local-effect
+// without exposing a fake interface to callers.
+var keyCopyFn = copyKeyForServer
+
+// copyKeyForServer copies an SSH key (private + .pub) into the
+// app-managed folder under a host-derived filename, returning the
+// final destination path. Pattern parallels the wizard's
+// copyKeyToManagedStoreAndRewriteName, but doesn't rewrite the
+// .pub comment — the user's display name on this server isn't
+// known at add-server time (the server assigns / user picks it
+// during the first connect, separate from the .pub comment which
+// is purely cosmetic at the protocol level).
+//
+// The point of always copying — even when the source is already
+// in the managed folder — is per-server file separation: each
+// server config entry gets its own physical key file under
+// `id_ed25519_<host>`. This way:
+//   - Deleting a server can clean up its key file without affecting
+//     other servers cryptographically reusing the same identity
+//   - The keys folder lists keys by server, not by fingerprint, so
+//     it's grep-able by host
+//   - Future per-server edits (e.g. re-encrypting with a new
+//     passphrase for one server but not another) don't disturb
+//     siblings
+//
+// Same physical bytes in two files = same cryptographic identity.
+// Whether you WANT one identity across servers vs separate keys
+// per server is a security choice the user makes by selecting
+// (reuse) vs generating (Ctrl+G).
+//
+// Source-equals-destination is idempotent (no-op, returns the
+// path). Destination-already-exists is an error rather than a
+// silent overwrite.
+func copyKeyForServer(srcKeyPath, host string) (string, error) {
+	src := srcKeyPath
+	if strings.HasPrefix(src, "~/") {
+		home, _ := os.UserHomeDir()
+		src = filepath.Join(home, src[2:])
+	}
+
+	privData, err := os.ReadFile(src)
+	if err != nil {
+		return "", fmt.Errorf("read private key (%s): %w", src, err)
+	}
+	pubData, err := os.ReadFile(src + ".pub")
+	if err != nil {
+		return "", fmt.Errorf("read public key (%s.pub): %w", src, err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	keysDir := filepath.Join(home, ".sshkey-term", "keys")
+	if err := os.MkdirAll(keysDir, 0700); err != nil {
+		return "", fmt.Errorf("create keys dir (%s): %w", keysDir, err)
+	}
+
+	name := "id_ed25519"
+	if h := sanitizeForFilename(host); h != "" {
+		name = "id_ed25519_" + h
+	}
+	dst := filepath.Join(keysDir, name)
+
+	// Idempotent: if user typed the exact target path, no-op.
+	if filepath.Clean(src) == filepath.Clean(dst) {
+		return dst, nil
+	}
+
+	// Don't silently overwrite an existing managed file. Same
+	// safety stance as the generate-key path.
+	if _, err := os.Stat(dst); err == nil {
+		return "", fmt.Errorf("key file already exists: %s — pick a different host or delete the existing file", dst)
+	}
+
+	if err := os.WriteFile(dst, privData, 0600); err != nil {
+		return "", fmt.Errorf("write private key (%s): %w", dst, err)
+	}
+	if err := os.WriteFile(dst+".pub", pubData, 0644); err != nil {
+		// Roll back the partial private-key write so we don't
+		// leave a private-only orphan on disk.
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("write public key (%s.pub): %w", dst, err)
+	}
+
+	return dst, nil
+}
+
+// sanitizeForFilename strips characters that would be ambiguous or
+// problematic in a key-file name, replacing each with `_`. Allowed:
+// ASCII letters, digits, `-`, `_`, `.`. Used to derive a per-server
+// default key filename from the user-typed hostname so add-server
+// generate doesn't collide with the first server's key on disk.
+//
+// Example: "chat.example.com" → "chat.example.com" (unchanged);
+// "ssh+v6@host" → "ssh_v6_host". Hostnames in practice are already
+// filename-safe, but the sanitization is defensive against pasted
+// values with whitespace, slashes, etc.
+func sanitizeForFilename(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 // addServerZxcvbnContext collects form-field values to pass to zxcvbn
@@ -120,6 +245,7 @@ func (a *AddServerModel) Show() {
 	a.focused = 0
 	a.genErr = ""
 	a.genNotice = ""
+	a.formErr = ""
 	for i := range a.inputs {
 		if i == 2 {
 			a.inputs[i].SetValue("2222")
@@ -144,6 +270,7 @@ func (a *AddServerModel) Hide() {
 	a.mode = addServerForm
 	a.genErr = ""
 	a.genNotice = ""
+	a.formErr = ""
 	for i := range a.inputs {
 		a.inputs[i].Blur()
 	}
@@ -175,6 +302,25 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		for i := range a.inputs {
 			a.inputs[i].Blur()
 		}
+		// Pre-fill the "Save to" path with a host-derived filename
+		// so adding a 2nd / 3rd server doesn't collide with the
+		// first server's key. Without this, all add-server generate
+		// flows defaulted to `~/.sshkey-term/keys/id_ed25519` —
+		// trying to generate a 2nd key with the unmodified default
+		// would fail the file-exists check (or worse, in earlier
+		// versions, silently overwrite the first key).
+		//
+		// Each server typically has a unique host, so embedding the
+		// sanitized host in the filename keeps keys distinct without
+		// any user effort. Falls back to the bare `id_ed25519` if
+		// host is empty (user opened generate before typing host —
+		// they can edit the path manually).
+		home, _ := os.UserHomeDir()
+		keyName := "id_ed25519"
+		if host := sanitizeForFilename(strings.TrimSpace(a.inputs[1].Value())); host != "" {
+			keyName = "id_ed25519_" + host
+		}
+		a.genInputs[0].SetValue(filepath.Join(home, ".sshkey-term", "keys", keyName))
 		a.genFocused = 0
 		a.genInputs[0].Focus()
 		a.genErr = ""
@@ -197,6 +343,7 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 
 	case "enter", "ctrl+enter":
 		// Validate and submit
+		a.formErr = "" // clear any prior submit error
 		name := strings.TrimSpace(a.inputs[0].Value())
 		host := strings.TrimSpace(a.inputs[1].Value())
 		portStr := strings.TrimSpace(a.inputs[2].Value())
@@ -217,6 +364,20 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		if key == "" {
 			key = "~/.ssh/id_ed25519"
 		}
+
+		// Always copy the source key into the managed folder under
+		// a host-suffixed name. Gives every server its own physical
+		// key file even when multiple servers reuse the same
+		// underlying identity (same fingerprint, separate files).
+		// Source-equals-destination is idempotent (no-op). See
+		// copyKeyForServer for the rationale. Indirection via
+		// keyCopyFn is so tests can swap in a passthrough.
+		copied, err := keyCopyFn(key, host)
+		if err != nil {
+			a.formErr = err.Error()
+			return a, nil
+		}
+		key = copied
 
 		a.Hide()
 		return a, func() tea.Msg {
@@ -420,6 +581,9 @@ func (a AddServerModel) keyListStartY() int {
 	if a.genNotice != "" {
 		y += 2 // notice line + blank
 	}
+	if a.formErr != "" {
+		y += 2 // error line + blank
+	}
 	if len(a.scannedKeys) > 0 {
 		y += 2 // "Existing Ed25519 keys:" header + blank
 	}
@@ -451,6 +615,9 @@ func (a AddServerModel) viewForm(width int) string {
 
 	if a.genNotice != "" {
 		b.WriteString("  " + helpDescStyle.Render(a.genNotice) + "\n\n")
+	}
+	if a.formErr != "" {
+		b.WriteString("  " + errorStyle.Render(a.formErr) + "\n\n")
 	}
 
 	if len(a.scannedKeys) > 0 {

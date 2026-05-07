@@ -9,6 +9,17 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// withPassthroughKeyCopy swaps keyCopyFn for a no-op passthrough
+// (returns the source path unchanged) for the duration of a test.
+// Used by submit-flow tests so they don't need real key files on
+// disk to exercise the form-validation + AddServerMsg-emission path.
+func withPassthroughKeyCopy(t *testing.T) {
+	t.Helper()
+	prev := keyCopyFn
+	keyCopyFn = func(src, host string) (string, error) { return src, nil }
+	t.Cleanup(func() { keyCopyFn = prev })
+}
+
 func keyMsg(s string) tea.KeyMsg {
 	switch s {
 	case "tab":
@@ -224,6 +235,7 @@ func TestAddServer_SubmitRequiresHost(t *testing.T) {
 }
 
 func TestAddServer_SubmitValidReturnsMsg(t *testing.T) {
+	withPassthroughKeyCopy(t)
 	a := NewAddServer()
 	a.Show()
 	a.inputs[0].SetValue("Test Server")
@@ -258,6 +270,7 @@ func TestAddServer_SubmitValidReturnsMsg(t *testing.T) {
 }
 
 func TestAddServer_SubmitDefaultsName(t *testing.T) {
+	withPassthroughKeyCopy(t)
 	a := NewAddServer()
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
@@ -274,6 +287,7 @@ func TestAddServer_SubmitDefaultsName(t *testing.T) {
 }
 
 func TestAddServer_SubmitDefaultsKey(t *testing.T) {
+	withPassthroughKeyCopy(t)
 	a := NewAddServer()
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
