@@ -2125,6 +2125,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.connected = true
 		a.reconnectAttempt = 0
 
+		// Seed our own online state so the green dot shows up next
+		// to our entries in the sidebar (DMs/groups containing us)
+		// and in the member panel. The server's `presence` push
+		// updates other users but doesn't always echo our self-
+		// presence at session start, so without this seed the local
+		// user appears offline in their own UI. Re-fires on every
+		// reconnect — fine, the map is idempotent.
+		if uid := a.client.UserID(); uid != "" {
+			a.sidebar.SetOnline(uid, true)
+		}
+
 		// Populate sidebar and messages
 		a.sidebar.SetRooms(a.client.Rooms())
 		a.messages.resolveName = a.client.DisplayName

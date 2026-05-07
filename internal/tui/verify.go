@@ -13,12 +13,13 @@ import (
 
 // VerifyModel manages the safety numbers verification dialog.
 type VerifyModel struct {
-	visible      bool
-	user         string // nanoid username (for VerifyActionMsg)
-	displayName  string // human-visible name (for rendering)
-	safetyNumber string
-	verified     bool
-	err          string
+	visible       bool
+	user          string // nanoid username (for VerifyActionMsg)
+	displayName   string // human-visible name of target (for rendering)
+	myDisplayName string // human-visible name of local user (for "tell them to run /verify <me>" instructions)
+	safetyNumber  string
+	verified      bool
+	err           string
 }
 
 // VerifyActionMsg is sent when the user marks someone as verified.
@@ -30,6 +31,7 @@ func (v *VerifyModel) Show(targetUser string, c *client.Client) {
 	v.visible = true
 	v.user = targetUser
 	v.displayName = targetUser // fallback
+	v.myDisplayName = ""
 	v.verified = false
 	v.safetyNumber = ""
 	v.err = ""
@@ -39,6 +41,7 @@ func (v *VerifyModel) Show(targetUser string, c *client.Client) {
 	}
 
 	v.displayName = c.DisplayName(targetUser)
+	v.myDisplayName = c.DisplayName(c.UserID())
 
 	// Can't verify yourself
 	if targetUser == c.UserID() {
@@ -132,7 +135,7 @@ func (v VerifyModel) View(width int) string {
 		return dialogStyle.Width(width - 4).Render(b.String())
 	}
 
-	b.WriteString("  Safety number:\n\n")
+	b.WriteString("  Shared safety number with " + v.displayName + ":\n\n")
 
 	if v.safetyNumber != "" {
 		parts := strings.Fields(v.safetyNumber)
@@ -145,8 +148,25 @@ func (v VerifyModel) View(width int) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString("  Compare this number with " + v.displayName + "\n")
-	b.WriteString("  via phone or in person.\n\n")
+	// The safety number is symmetric: SafetyNumber(myKey, theirKey)
+	// produces identical output to SafetyNumber(theirKey, myKey)
+	// because the keys are sorted before hashing. So both parties
+	// run /verify on each other and see the same digits — there's
+	// no separate "their number" vs "my number" to keep track of.
+	// The instruction below tells the local user how to direct the
+	// remote party to see the same screen — without it, the remote
+	// party has no obvious way to look up the digits to read back.
+	other := v.displayName
+	myName := v.myDisplayName
+	if myName == "" {
+		myName = "<your-name>"
+	}
+	b.WriteString("  Both sides see the SAME digits when they run\n")
+	b.WriteString("  /verify on each other. Ask " + other + " to run:\n\n")
+	b.WriteString("     /verify " + myName + "\n\n")
+	b.WriteString("  on their side and confirm they see the same\n")
+	b.WriteString("  number. Compare in person or by phone — never\n")
+	b.WriteString("  through this chat.\n\n")
 
 	if v.verified {
 		b.WriteString("  " + checkStyle.Render("✓ Verified") + "\n")

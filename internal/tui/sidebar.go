@@ -496,10 +496,20 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 			name = strings.Join(names, ", ")
 		}
 
+		// Group presence dot: green if any OTHER member is online,
+		// hollow if all other members are offline. Self is excluded
+		// — the local user is always online (we just connected) so
+		// counting self would make the dot uselessly always green
+		// and defeat the purpose of the indicator (knowing whether
+		// someone you can chat with is around). Same logic as the
+		// DM dot, which already uses the "other party" via
+		// dmOtherUserID. Retired-flag gathering still iterates all
+		// members since retirement is a per-account property
+		// independent of online state.
 		dot := offlineDot
 		anyRetired := false
 		for _, m := range g.Members {
-			if s.online[m] {
+			if m != s.selfUserID && s.online[m] {
 				dot = onlineDot
 			}
 			if s.retired[m] {
