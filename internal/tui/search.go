@@ -15,14 +15,14 @@ import (
 
 var (
 	searchHeaderStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#7C3AED"))
+				Bold(true).
+				Foreground(lipgloss.Color("#7C3AED"))
 
 	searchResultStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#64748B"))
+				Foreground(lipgloss.Color("#64748B"))
 
 	searchMatchStyle = lipgloss.NewStyle().
-		Bold(true)
+				Bold(true)
 )
 
 // SearchModel manages the search page.
@@ -76,8 +76,13 @@ type SearchJumpMsg struct {
 }
 
 func (s SearchModel) Update(msg tea.KeyMsg, c *client.Client) (SearchModel, tea.Cmd) {
+	if msg.Type == tea.KeyEsc {
+		s.Hide()
+		return s, nil
+	}
+
 	switch msg.String() {
-	case "esc":
+	case "esc", "ctrl+[":
 		s.Hide()
 		return s, nil
 	case "enter":

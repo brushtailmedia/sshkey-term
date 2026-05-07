@@ -932,6 +932,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Search screen intercepts keys when visible
 		if a.search.IsVisible() {
+			// Hard close path for terminals that emit escape variants that
+			// don't route cleanly through the search input's key map.
+			if msg.Type == tea.KeyEsc || msg.String() == "ctrl+[" {
+				a.search.Hide()
+				a.focus = FocusInput
+				return a, nil
+			}
 			var cmd tea.Cmd
 			a.search, cmd = a.search.Update(msg, a.client)
 			if !a.search.IsVisible() {
