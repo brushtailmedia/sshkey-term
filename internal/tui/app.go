@@ -2446,7 +2446,8 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 		// the wrong item, and clicks on header/blank rows still
 		// returned a (wrong) index.
 		visualRow := y - layout.SidebarY0 - 1
-		idx := a.sidebar.CursorAtRow(visualRow)
+		sidebarInnerHeight := layout.SidebarY1 - layout.SidebarY0 - 2
+		idx := a.sidebar.CursorAtRow(visualRow, sidebarInnerHeight)
 		if idx >= 0 && idx < a.sidebar.totalItems() {
 			a.sidebar.cursor = idx
 			a.sidebar.updateSelection()

@@ -42,6 +42,19 @@ var (
 	// but visually it fades into the background.
 	archivedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#475569")).Faint(true)
 
+	// Preview-pane placeholder styles. Used by buildPreviewPlaceholder
+	// when no image is selected: a small frame around the
+	// "sshkey-term" title in the same slate color as the status-bar
+	// "E2E encrypted" text, with a white "no image selected" label
+	// below. Frame color tracks the sidebar's focus state to mirror
+	// the outer-border behaviour — purple when the sidebar is the
+	// active panel (matches sidebarFocusedStyle's #7C3AED), slate
+	// otherwise (matches sidebarStyle's #64748B).
+	previewFrameStyleFocused   = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED"))
+	previewFrameStyleUnfocused = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B"))
+	previewTitleStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B"))
+	previewLabelStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
+
 	// verifiedMarker is the badge appended to a DM sidebar entry when the
 	// other party's key has been verified via the safety-number flow. A
 	// small green check so the user can see at a glance which DMs are with
@@ -336,88 +349,248 @@ func (s SidebarModel) totalItems() int {
 	return len(s.rooms) + len(s.groups) + len(s.dms)
 }
 
-// CursorAtRow maps a visual row inside the sidebar's bordered content
-// area (0-indexed; row 0 is the "Rooms" header line) to a cursor
-// index, or -1 if the row falls on a header / blank separator / out
-// of range.
+type sidebarListLine struct {
+	text      string
+	cursorIdx int // -1 for headers / separators (not selectable)
+}
+
+const (
+	// Fixed preview-box height (inner content rows) at the bottom of the
+	// sidebar. Set to 13 = imgMaxRows (12, messages.go) + 1 for the
+	// divider, so the image area within the preview is exactly 12 rows
+	// — matching the height the previous inline-image rendering used
+	// in the messages pane. Landscape photos cap at ~9 rows by aspect
+	// math; portraits get partial crop on tall 3:4/9:16 sources.
+	sidebarPreviewFixedRows = 13
+	// One row for the horizontal divider between list and preview.
+	sidebarPreviewDividerRows = 1
+	// If the sidebar is too short, preserve list usability by hiding the
+	// preview section entirely.
+	sidebarMinListRows = 6
+)
+
+// sidebarSectionHeights splits the sidebar's inner height into a top list area
+// and a fixed bottom preview area. Preview is hidden when the window is too
+// short to keep a usable list.
+func sidebarSectionHeights(height int) (listRows, previewRows int) {
+	if height < 1 {
+		return 0, 0
+	}
+	need := sidebarPreviewFixedRows + sidebarPreviewDividerRows + sidebarMinListRows
+	if height < need {
+		return height, 0
+	}
+	return height - sidebarPreviewFixedRows - sidebarPreviewDividerRows, sidebarPreviewFixedRows
+}
+
+func sidebarScrollStart(totalRows, selectedRow, windowRows int) int {
+	if totalRows <= windowRows || windowRows <= 0 {
+		return 0
+	}
+	if selectedRow < 0 {
+		selectedRow = 0
+	}
+	start := selectedRow - windowRows + 1
+	if start < 0 {
+		start = 0
+	}
+	maxStart := totalRows - windowRows
+	if start > maxStart {
+		start = maxStart
+	}
+	return start
+}
+
+func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarListLine {
+	var lines []sidebarListLine
+	add := func(text string, idx int) {
+		lines = append(lines, sidebarListLine{text: text, cursorIdx: idx})
+	}
+
+	// Rooms header
+	add(sidebarHeaderStyle.Render(" Rooms"), -1)
+	for i, room := range s.rooms {
+		displayName := room
+		if s.resolveRoomName != nil {
+			displayName = s.resolveRoomName(room)
+		}
+		isLeft := s.leftRooms[room]
+		isRetired := s.retiredRooms[room]
+		suffix := ""
+		if isRetired {
+			suffix += " " + helpDescStyle.Render("(retired)")
+		} else if isLeft {
+			suffix += " " + helpDescStyle.Render("(left)")
+		}
+		if count, ok := s.unread[room]; ok && count > 0 && !isLeft && !isRetired {
+			suffix += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
+		}
+		line := fitSidebarLine(" # ", displayName, suffix, contentWidth)
+		if isLeft || isRetired {
+			line = archivedStyle.Render(line)
+		}
+		if i == s.cursor && focused {
+			line = selectedStyle.Width(contentWidth).Render(line)
+		}
+		add(line, i)
+	}
+
+	// Groups header
+	add("", -1)
+	add(sidebarHeaderStyle.Render(" Groups"), -1)
+	for i, g := range s.groups {
+		name := g.Name
+		if name == "" {
+			var names []string
+			for _, m := range g.Members {
+				displayName := m
+				if s.resolveName != nil {
+					displayName = s.resolveName(m)
+				}
+				names = append(names, displayName)
+			}
+			name = strings.Join(names, ", ")
+		}
+
+		dot := offlineDot
+		anyRetired := false
+		for _, m := range g.Members {
+			if s.online[m] {
+				dot = onlineDot
+			}
+			if s.retired[m] {
+				anyRetired = true
+			}
+		}
+
+		isLeft := s.leftGroups[g.ID]
+		var isLocalAdmin bool
+		if s.resolveIsLocalAdmin != nil {
+			isLocalAdmin = s.resolveIsLocalAdmin(g.ID)
+		} else {
+			for _, a := range g.Admins {
+				if a == s.selfUserID {
+					isLocalAdmin = true
+					break
+				}
+			}
+		}
+
+		prefix := " " + dot + " "
+		if isLocalAdmin && !isLeft {
+			prefix += helpDescStyle.Render("★") + " "
+		}
+		suffix := ""
+		if anyRetired {
+			suffix += " " + helpDescStyle.Render("[retired]")
+		}
+		if isLeft {
+			suffix += " " + helpDescStyle.Render("(left)")
+		}
+		if count, ok := s.unread[g.ID]; ok && count > 0 && !isLeft {
+			suffix += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
+		}
+		line := fitSidebarLine(prefix, name, suffix, contentWidth)
+		if isLeft {
+			line = archivedStyle.Render(line)
+		}
+
+		idx := len(s.rooms) + i
+		if idx == s.cursor && focused {
+			line = selectedStyle.Width(contentWidth).Render(line)
+		}
+		add(line, idx)
+	}
+
+	// DMs section
+	if len(s.dms) > 0 {
+		add("", -1)
+		add(sidebarHeaderStyle.Render(" DMs"), -1)
+
+		for i, dm := range s.dms {
+			other := s.dmOtherUserID(dm)
+			name := ""
+			if s.resolveDMName != nil {
+				name = strings.TrimSpace(s.resolveDMName(dm.ID))
+			}
+			if name == "" && other != "" && s.resolveName != nil {
+				name = s.resolveName(other)
+			}
+			if name == "" {
+				name = other
+			}
+			if name == "" {
+				name = dm.ID
+			}
+
+			dot := offlineDot
+			if s.online[other] {
+				dot = onlineDot
+			}
+
+			prefix := " " + dot + " "
+			suffix := ""
+			if other != "" && s.resolveVerified != nil && s.resolveVerified(other) {
+				suffix += " " + verifiedMarker
+			}
+			if s.retired[other] {
+				suffix += " " + helpDescStyle.Render("[retired]")
+			}
+			if count, ok := s.unread[dm.ID]; ok && count > 0 {
+				suffix += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
+			}
+			line := fitSidebarLinePreferName(prefix, name, suffix, contentWidth)
+
+			idx := len(s.rooms) + len(s.groups) + i
+			if idx == s.cursor && focused {
+				line = selectedStyle.Width(contentWidth).Render(line)
+			}
+			add(line, idx)
+		}
+	}
+
+	return lines
+}
+
+// CursorAtRow maps a visual row inside the sidebar's bordered content area
+// (0-indexed inside the panel body) to a cursor index, or -1 if the row is
+// non-selectable.
 //
-// Mirrors the section layout written by View():
+// The sidebar body is split into:
+//   - top scroll window (rooms/groups/dms list)
+//   - divider
+//   - fixed preview area
 //
-//	row 0                              "Rooms" header
-//	rows 1..len(rooms)                 room items                      → cursor 0..len(rooms)-1
-//	row len(rooms)+1                   blank separator
-//	row len(rooms)+2                   "Messages" header
-//	rows len(rooms)+3..               group items                      → cursor len(rooms)..len(rooms)+len(groups)-1
-//	(DMs section omitted when empty — matches the `if len(s.dms) > 0`
-//	 guard in View)
-//	row +1                             blank separator
-//	row +1                             "DMs" header
-//	rows +1..                          dm items                        → cursor len(rooms)+len(groups)..total-1
-//
-// Mouse click handler in app.go uses this instead of the dumb
-// `y - 1` that ignored the headers and section gaps. Pre-2026-05-05
-// every click landed on the wrong item — and clicks on header /
-// blank rows still returned a (wrong) item index, jumping the
-// cursor unexpectedly.
-func (s SidebarModel) CursorAtRow(visualRow int) int {
+// Only rows in the top scroll window can select items. Divider + preview rows
+// always return -1 (clicking there should focus the sidebar without changing
+// selection).
+func (s SidebarModel) CursorAtRow(visualRow int, height int) int {
 	if visualRow < 0 {
 		return -1
 	}
-	row := 0
-
-	// "Rooms" header
-	if visualRow == row {
+	listRows, _ := sidebarSectionHeights(height)
+	if visualRow >= listRows {
+		// Divider + preview area: focus sidebar only; no item selection.
 		return -1
 	}
-	row++
 
-	// Room items.
-	for i := range s.rooms {
-		if visualRow == row {
-			return i
-		}
-		row++
-	}
-
-	// Blank separator + "Messages" header.
-	if visualRow == row {
-		return -1 // blank
-	}
-	row++
-	if visualRow == row {
-		return -1 // "Messages" header
-	}
-	row++
-
-	// Group items.
-	for i := range s.groups {
-		if visualRow == row {
-			return len(s.rooms) + i
-		}
-		row++
-	}
-
-	// DMs section is conditionally rendered (only when len(s.dms) > 0).
-	if len(s.dms) == 0 {
+	lines := s.buildListLines(1, false)
+	if len(lines) == 0 {
 		return -1
 	}
-	if visualRow == row {
-		return -1 // blank
-	}
-	row++
-	if visualRow == row {
-		return -1 // "DMs" header
-	}
-	row++
-
-	for i := range s.dms {
-		if visualRow == row {
-			return len(s.rooms) + len(s.groups) + i
+	selectedRow := -1
+	for i, line := range lines {
+		if line.cursorIdx == s.cursor {
+			selectedRow = i
+			break
 		}
-		row++
 	}
-
-	return -1
+	start := sidebarScrollStart(len(lines), selectedRow, listRows)
+	row := start + visualRow
+	if row < 0 || row >= len(lines) {
+		return -1
+	}
+	return lines[row].cursorIdx
 }
 
 func (s SidebarModel) Update(msg tea.KeyMsg, c *client.Client) (SidebarModel, tea.Cmd) {
@@ -518,200 +691,205 @@ func fitSidebarLinePreferName(prefix, name, suffix string, contentWidth int) str
 }
 
 func (s SidebarModel) View(width, height int, focused bool) string {
-	var b strings.Builder
 	contentWidth := width - 2
 	if contentWidth < 1 {
 		contentWidth = 1
 	}
-
-	// Rooms header
-	b.WriteString(sidebarHeaderStyle.Render(" Rooms"))
-	b.WriteString("\n")
-
-	for i, room := range s.rooms {
-		displayName := room
-		if s.resolveRoomName != nil {
-			displayName = s.resolveRoomName(room)
-		}
-		isLeft := s.leftRooms[room]
-		isRetired := s.retiredRooms[room]
-		suffix := ""
-		// Retired takes visual priority over left — a retired room is
-		// archived for everyone, whereas left is user-specific. Show the
-		// more "permanent" label so users know re-adding them to the
-		// room isn't possible.
-		if isRetired {
-			suffix += " " + helpDescStyle.Render("(retired)")
-		} else if isLeft {
-			suffix += " " + helpDescStyle.Render("(left)")
-		}
-		if count, ok := s.unread[room]; ok && count > 0 && !isLeft && !isRetired {
-			suffix += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
-		}
-		line := fitSidebarLine(" # ", displayName, suffix, contentWidth)
-
-		// Grey out archived rooms (left or retired)
-		if isLeft || isRetired {
-			line = archivedStyle.Render(line)
-		}
-
-		if i == s.cursor && focused {
-			line = selectedStyle.Width(contentWidth).Render(line)
-		}
-
-		b.WriteString(line)
-		b.WriteString("\n")
+	if height < 1 {
+		height = 1
 	}
 
-	// Messages header
-	b.WriteString("\n")
-	b.WriteString(sidebarHeaderStyle.Render(" Messages"))
-	b.WriteString("\n")
-
-	for i, g := range s.groups {
-		name := g.Name
-		if name == "" {
-			// Show member display names for unnamed groups
-			var names []string
-			for _, m := range g.Members {
-				displayName := m
-				if s.resolveName != nil {
-					displayName = s.resolveName(m)
-				}
-				names = append(names, displayName)
-			}
-			name = strings.Join(names, ", ")
+	listRows, previewRows := sidebarSectionHeights(height)
+	lines := s.buildListLines(contentWidth, focused)
+	selectedRow := -1
+	for i, line := range lines {
+		if line.cursorIdx == s.cursor {
+			selectedRow = i
+			break
 		}
+	}
+	start := sidebarScrollStart(len(lines), selectedRow, listRows)
 
-		dot := offlineDot
-		// Mark any retired member so the sidebar shows it. (Online dot is
-		// not driven from group members in chunk A — that was a 1:1-only
-		// thing in the legacy code.)
-		anyRetired := false
-		for _, m := range g.Members {
-			if s.online[m] {
-				dot = onlineDot
-			}
-			if s.retired[m] {
-				anyRetired = true
-			}
-		}
-
-		isLeft := s.leftGroups[g.ID]
-
-		// Phase 14: ★ indicator when the local user is an admin of
-		// this group. Prefer the resolveIsLocalAdmin callback so the
-		// marker reflects live group_event{promote,demote} updates
-		// without waiting for a group_list refetch. Fall back to
-		// the cached GroupInfo.Admins slice if the callback isn't
-		// wired (older tests or partial initialization paths).
-		var isLocalAdmin bool
-		if s.resolveIsLocalAdmin != nil {
-			isLocalAdmin = s.resolveIsLocalAdmin(g.ID)
+	var out []string
+	for i := 0; i < listRows; i++ {
+		row := start + i
+		if row >= 0 && row < len(lines) {
+			out = append(out, lines[row].text)
 		} else {
-			for _, a := range g.Admins {
-				if a == s.selfUserID {
-					isLocalAdmin = true
-					break
-				}
-			}
-		}
-
-		prefix := " " + dot + " "
-		if isLocalAdmin && !isLeft {
-			// Muted star before the group name. Using the same
-			// helpDescStyle as the bracket markers for consistency.
-			prefix += helpDescStyle.Render("★") + " "
-		}
-		suffix := ""
-		if anyRetired {
-			suffix += " " + helpDescStyle.Render("[retired]")
-		}
-		if isLeft {
-			suffix += " " + helpDescStyle.Render("(left)")
-		}
-		if count, ok := s.unread[g.ID]; ok && count > 0 && !isLeft {
-			suffix += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
-		}
-		line := fitSidebarLine(prefix, name, suffix, contentWidth)
-
-		// Grey out archived groups
-		if isLeft {
-			line = archivedStyle.Render(line)
-		}
-
-		idx := len(s.rooms) + i
-		if idx == s.cursor && focused {
-			line = selectedStyle.Width(contentWidth).Render(line)
-		}
-
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-
-	// DMs header + entries (Rooms → Groups → DMs ordering)
-	if len(s.dms) > 0 {
-		b.WriteString("\n")
-		b.WriteString(sidebarHeaderStyle.Render(" DMs"))
-		b.WriteString("\n")
-
-		for i, dm := range s.dms {
-			// Resolve the other party's display name
-			other := s.dmOtherUserID(dm)
-			name := ""
-			if s.resolveDMName != nil {
-				name = strings.TrimSpace(s.resolveDMName(dm.ID))
-			}
-			if name == "" && other != "" && s.resolveName != nil {
-				name = s.resolveName(other)
-			}
-			if name == "" {
-				name = other
-			}
-			if name == "" {
-				name = dm.ID // fallback
-			}
-
-			dot := offlineDot
-			if s.online[other] {
-				dot = onlineDot
-			}
-
-			prefix := " " + dot + " "
-			suffix := ""
-			if other != "" && s.resolveVerified != nil && s.resolveVerified(other) {
-				suffix += " " + verifiedMarker
-			}
-			if s.retired[other] {
-				suffix += " " + helpDescStyle.Render("[retired]")
-			}
-			if count, ok := s.unread[dm.ID]; ok && count > 0 {
-				suffix += unreadStyle.Render(fmt.Sprintf(" (%d)", count))
-			}
-			line := fitSidebarLinePreferName(prefix, name, suffix, contentWidth)
-
-			idx := len(s.rooms) + len(s.groups) + i
-			if idx == s.cursor && focused {
-				line = selectedStyle.Width(contentWidth).Render(line)
-			}
-
-			b.WriteString(line)
-			b.WriteString("\n")
+			out = append(out, "")
 		}
 	}
 
-	// Pad to fill height
-	content := b.String()
-	lines := strings.Count(content, "\n")
-	for lines < height-2 {
-		content += "\n"
-		lines++
+	if previewRows > 0 {
+		// Full-width `─` divider sized to the actual inner content
+		// area, NOT `contentWidth`. lipgloss's Width(W) treats W as
+		// the inner area (it adds borders outside), so the inner
+		// width is `width`, not `width - 2`. The pre-existing
+		// `contentWidth = width - 2` is a double-subtraction quirk
+		// that leaves every list row with a 2-cell trailing gap
+		// (invisible because spaces blend in) — not worth fixing
+		// globally since it's also acting as right-side breathing
+		// room for the list, but the divider needs the full span
+		// to tee into both side borders cleanly. The post-render
+		// step below swaps the edge `│` chars for `├`/`┤`.
+		//
+		// Color mirrors the outer panel border via `focused` so the
+		// `├` / `─` / `┤` characters are visually continuous (the
+		// post-render tee swap inherits the panel border color, so
+		// the inner `─` chars need to match — otherwise focused
+		// renders as `purple-├ slate-─── purple-┤`).
+		dividerStyle := previewFrameStyleUnfocused
+		if focused {
+			dividerStyle = previewFrameStyleFocused
+		}
+		divider := dividerStyle.Render(strings.Repeat("─", width))
+		out = append(out, divider)
+
+		// Placeholder content for the preview area when no image is
+		// selected. Returns exactly previewRows-1 rows so the total
+		// (divider + placeholder) fills the preview budget. Frame
+		// color is fixed purple inside (brand mark); the divider
+		// rendered above follows focus state to track the outer
+		// border.
+		out = append(out, buildPreviewPlaceholder(width, previewRows-1)...)
 	}
+	// Safety pad in case the preview-builder returned fewer rows than
+	// expected, or previewRows == 0 (no preview section).
+	for len(out) < height {
+		out = append(out, "")
+	}
+	content := strings.Join(out, "\n")
 
 	style := sidebarStyle
 	if focused {
 		style = sidebarFocusedStyle
 	}
 
-	return style.Width(width).Height(height).Render(content)
+	rendered := style.Width(width).Height(height).Render(content)
+
+	// Tee the divider row's edges into the panel border. Lipgloss
+	// renders the divider line as `│─────│` (border + content +
+	// border, with the border `│` chars added by Render and the
+	// `─` chars from our content). Swap the leftmost and rightmost
+	// `│` on the divider row for `├`/`┤` so the visual continues
+	// the border instead of cutting it. Row index = 1 (top border)
+	// + listRows (list content) — see sidebarSectionHeights for
+	// the height-budget split.
+	if previewRows > 0 {
+		rows := strings.Split(rendered, "\n")
+		dividerIdx := 1 + listRows
+		if dividerIdx >= 0 && dividerIdx < len(rows) {
+			rows[dividerIdx] = teeBorderEdges(rows[dividerIdx])
+			rendered = strings.Join(rows, "\n")
+		}
+	}
+	return rendered
+}
+
+// teeBorderEdges replaces the first `│` with `├` and the last `│`
+// with `┤` in the given rendered row, leaving every other byte
+// (including SGR escape sequences emitted by lipgloss for border
+// color) untouched. Used by the sidebar to make the list/preview
+// divider visually continuous with the panel's side borders.
+func teeBorderEdges(row string) string {
+	const pipe = "│"
+	first := strings.Index(row, pipe)
+	last := strings.LastIndex(row, pipe)
+	if first < 0 {
+		return row
+	}
+	if first == last {
+		return row[:first] + "├" + row[first+len(pipe):]
+	}
+	return row[:first] + "├" + row[first+len(pipe):last] + "┤" + row[last+len(pipe):]
+}
+
+// buildPreviewPlaceholder returns the rows that fill the sidebar's
+// preview area when no image is currently selected. Output length
+// is exactly `rows` (typically previewRows-1, the area below the
+// divider).
+//
+// Layout: a small purple-bordered frame containing the "sshkey-term"
+// title in slate, with a white "no image selected" label below it.
+// Both centered horizontally within the given width. Frame is 15
+// cells wide, label is 17 cells; if the sidebar is narrower than
+// either, that element is omitted gracefully.
+//
+// Frame is always purple regardless of sidebar focus state — it's a
+// brand mark, not chrome, so it doesn't dim when the sidebar isn't
+// active. The list/preview divider above (rendered in the View
+// function, not here) DOES follow focus state to remain visually
+// continuous with the outer panel border.
+//
+// Layout positioning (in a typical 12-row preview area):
+//
+//	rows 0-3:  blank (top padding)
+//	row 4:     frame top  ╭─────────────╮
+//	row 5:     frame mid  │ sshkey-term │
+//	row 6:     frame bot  ╰─────────────╯
+//	row 7:     blank
+//	row 8:     "no image selected" label (white)
+//	rows 9-11: blank (bottom padding)
+//
+// Smaller `rows` budgets compress the top/bottom padding first.
+func buildPreviewPlaceholder(width, rows int) []string {
+	out := make([]string, rows)
+	for i := range out {
+		out[i] = ""
+	}
+	if rows <= 0 {
+		return out
+	}
+
+	const frameWidth = 15
+	const labelWidth = 17
+
+	// Frame rows (3 rows). Skip if width too narrow. Frame is always
+	// purple regardless of focus state — the title surround is its
+	// own visual element, not part of the panel border, so it doesn't
+	// need to dim with the rest of the chrome when the sidebar isn't
+	// active.
+	var frameTop, frameMid, frameBot string
+	if width >= frameWidth {
+		framePad := (width - frameWidth) / 2
+		pad := strings.Repeat(" ", framePad)
+		frameTop = pad + previewFrameStyleFocused.Render("╭─────────────╮")
+		frameMid = pad +
+			previewFrameStyleFocused.Render("│") + " " +
+			previewTitleStyle.Render("sshkey-term") + " " +
+			previewFrameStyleFocused.Render("│")
+		frameBot = pad + previewFrameStyleFocused.Render("╰─────────────╯")
+	}
+
+	// Label row (1 row). Skip if width too narrow.
+	var label string
+	if width >= labelWidth {
+		labelPad := (width - labelWidth) / 2
+		label = strings.Repeat(" ", labelPad) +
+			previewLabelStyle.Render("no image selected")
+	}
+
+	// Center the placeholder vertically within the row budget.
+	// Need 5 content rows: 3 frame + 1 blank + 1 label.
+	// Top padding = (rows - 5) / 2, capped at 0.
+	const contentRows = 5
+	topPad := (rows - contentRows) / 2
+	if topPad < 0 {
+		topPad = 0
+	}
+
+	// Place each piece if there's room.
+	if frameTop != "" && topPad < rows {
+		out[topPad] = frameTop
+	}
+	if frameMid != "" && topPad+1 < rows {
+		out[topPad+1] = frameMid
+	}
+	if frameBot != "" && topPad+2 < rows {
+		out[topPad+2] = frameBot
+	}
+	if label != "" && topPad+4 < rows {
+		out[topPad+4] = label
+	}
+	return out
 }
