@@ -5129,6 +5129,54 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	return nil
 }
 
+// anyModalVisible reports whether any modal/overlay is currently
+// claiming the screen. Used by View to suppress sidebar preview-pane
+// image rendering whenever a modal is up — opening a modal acts as
+// an implicit "deselect image" trigger.
+//
+// Listing all the IsVisible callers keeps this rule centralized:
+// add a new modal? add it here too. See also the click-bleed-through
+// check around line ~2367 — that list is structurally similar but
+// not identical (full-screen overlays like help/settings handle
+// their own clicks so they don't appear there, but they still
+// suppress preview).
+func (a *App) anyModalVisible() bool {
+	return a.connectFailed.IsVisible() ||
+		a.passphrase.IsVisible() ||
+		a.memberMenu.IsVisible() ||
+		a.contextMenu.IsVisible() ||
+		a.quitConfirm.IsVisible() ||
+		a.retireConfirm.IsVisible() ||
+		a.leaveConfirm.IsVisible() ||
+		a.leaveRoomConfirm.IsVisible() ||
+		a.saveAttachment.IsVisible() ||
+		a.deleteDMConfirm.IsVisible() ||
+		a.deleteGroupConfirm.IsVisible() ||
+		a.deleteRoomConfirm.IsVisible() ||
+		a.auditOverlay.IsVisible() ||
+		a.membersOverlay.IsVisible() ||
+		a.lastAdminPicker.IsVisible() ||
+		a.addConfirm.IsVisible() ||
+		a.kickConfirm.IsVisible() ||
+		a.promoteConfirm.IsVisible() ||
+		a.demoteConfirm.IsVisible() ||
+		a.transferConfirm.IsVisible() ||
+		a.deviceRevoked.IsVisible() ||
+		a.deviceMgr.IsVisible() ||
+		a.keyWarning.IsVisible() ||
+		a.verify.IsVisible() ||
+		a.help.IsVisible() ||
+		a.settings.IsVisible() ||
+		a.addServer.IsVisible() ||
+		a.infoPanel.IsVisible() ||
+		a.pendingPanel.IsVisible() ||
+		a.emojiPicker.IsVisible() ||
+		a.newConv.IsVisible() ||
+		a.threadPanel.IsVisible() ||
+		a.search.IsVisible() ||
+		a.quickSwitch.IsVisible()
+}
+
 func (a App) View() string {
 	if a.width == 0 || a.height == 0 {
 		return "Loading..."
@@ -5172,6 +5220,18 @@ func (a App) View() string {
 	if mainHeight < 5 {
 		mainHeight = 5
 	}
+
+	// Compute the sidebar preview-pane image path each frame. State is
+	// purely derived from focus + cursor + modal-state — no event
+	// hooks, no stored "last viewed" image. Path is set when the
+	// messages pane has focus, no modal is intercepting input, and
+	// the cursor message has a downloaded image attachment. Empty
+	// otherwise (sidebar shows the default sshkey-term placeholder).
+	previewPath := ""
+	if a.focus == FocusMessages && !a.anyModalVisible() {
+		previewPath = a.messages.SelectedImagePath()
+	}
+	a.sidebar.SetPreviewImagePath(previewPath)
 
 	// Render panels
 	// Sidebar inner-content height (style.Height arg). Sidebar's outer

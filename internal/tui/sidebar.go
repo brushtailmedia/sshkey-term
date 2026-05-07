@@ -97,6 +97,14 @@ type SidebarModel struct {
 	errCh         chan error
 	keyWarnCh     chan KeyChangeEvent       // Phase 21 F3.a
 	attachReadyCh chan AttachmentReadyEvent // auto-preview image downloads
+
+	// previewImagePath, when non-empty, points at a locally-cached
+	// image file to render in the bottom preview pane area instead
+	// of the default placeholder. Set by App.View each frame from
+	// MessagesModel.SelectedImagePath when focus is on the messages
+	// pane and no modal is open. Empty otherwise (preview shows the
+	// default sshkey-term placeholder).
+	previewImagePath string
 }
 
 func NewSidebar() SidebarModel {
@@ -331,6 +339,14 @@ func (s *SidebarModel) IncrementUnread(key string) {
 
 func (s *SidebarModel) SetOnline(user string, online bool) {
 	s.online[user] = online
+}
+
+// SetPreviewImagePath updates the path of the image to render in the
+// preview pane. App.View calls this each frame with the current
+// derived state (cursor-on-image AND focus-on-messages AND no modal),
+// or "" otherwise. Empty path means render the default placeholder.
+func (s *SidebarModel) SetPreviewImagePath(path string) {
+	s.previewImagePath = path
 }
 
 func (s *SidebarModel) SelectedRoom() string {
@@ -745,13 +761,14 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 		divider := dividerStyle.Render(strings.Repeat("─", width))
 		out = append(out, divider)
 
-		// Placeholder content for the preview area when no image is
-		// selected. Returns exactly previewRows-1 rows so the total
-		// (divider + placeholder) fills the preview budget. Frame
-		// color is fixed purple inside (brand mark); the divider
-		// rendered above follows focus state to track the outer
-		// border.
-		out = append(out, buildPreviewPlaceholder(width, previewRows-1)...)
+		// Two paths for the preview-area content. When an image is
+		// currently selected (s.previewImagePath != ""), render the
+		// image cell-by-cell at the preview-pane dimensions.
+		// Otherwise emit the default placeholder ("sshkey-term"
+		// brand mark + "no image selected" label). Both paths
+		// produce exactly previewRows-1 rows so the divider +
+		// content fills the preview budget cleanly.
+		out = append(out, s.buildPreviewContent(width, previewRows-1)...)
 	}
 	// Safety pad in case the preview-builder returned fewer rows than
 	// expected, or previewRows == 0 (no preview section).
@@ -802,6 +819,92 @@ func teeBorderEdges(row string) string {
 		return row[:first] + "├" + row[first+len(pipe):]
 	}
 	return row[:first] + "├" + row[first+len(pipe):last] + "┤" + row[last+len(pipe):]
+}
+
+// buildPreviewContent returns the rows for the preview area below
+// the divider. Dispatches between two render paths based on whether
+// an image is currently selected:
+//
+//   - previewImagePath set → render the image as cell-aligned block
+//     characters via RenderImageInline, then pad to fill the area
+//   - previewImagePath empty → render the default placeholder
+//     (sshkey-term brand mark)
+//
+// Output length is exactly `rows`, matching the area below the
+// divider so that divider + content fills the preview budget.
+func (s SidebarModel) buildPreviewContent(width, rows int) []string {
+	if s.previewImagePath == "" {
+		return buildPreviewPlaceholder(width, rows)
+	}
+	return buildPreviewImageRows(s.previewImagePath, width, rows)
+}
+
+// buildPreviewImageRows renders the image at imgPath as cell-aligned
+// terminal escape sequences sized for the preview pane, centered
+// both horizontally and vertically within the (width × rows) area.
+// On render failure (decode panic recovered, file missing, etc.)
+// the function falls through to a blank fill so the UI doesn't
+// break — the placeholder isn't substituted because the caller
+// already decided "image mode," and a momentary blank pane is less
+// jarring than flashing back to the brand mark.
+//
+// Centering rationale: RenderImageInline preserves source aspect
+// ratio, so the rendered image is rarely exactly width × rows.
+// Landscape sources are width-bound and leave vertical headroom;
+// portrait sources are height-bound and leave horizontal headroom.
+// Without centering, images render top-left-aligned with empty
+// trailing space, which looks unfinished. Centering both axes
+// produces a balanced layout regardless of source aspect.
+func buildPreviewImageRows(imgPath string, width, rows int) []string {
+	out := make([]string, rows)
+	for i := range out {
+		out[i] = ""
+	}
+	if rows <= 0 || width <= 0 {
+		return out
+	}
+	rendered := RenderImageInline(imgPath, width, rows)
+	if rendered == "" {
+		return out
+	}
+
+	imgRows := strings.Split(rendered, "\n")
+
+	// Compute rendered image width from the first row's visible cell
+	// count. Rows have ANSI escape sequences for fg/bg colors, so we
+	// use ansi.StringWidth to get the cell-correct width. All rows
+	// in the rendered image have the same visible width since the
+	// renderer pads each row to the cell grid width.
+	imgWidth := 0
+	if len(imgRows) > 0 {
+		imgWidth = ansi.StringWidth(imgRows[0])
+	}
+
+	// Horizontal padding: spaces prepended to each row to center the
+	// image within `width`. Spaces have no fg/bg styling so they
+	// pick up the terminal background — visually transparent.
+	hPad := 0
+	if imgWidth < width {
+		hPad = (width - imgWidth) / 2
+	}
+	hPadStr := strings.Repeat(" ", hPad)
+
+	// Vertical padding: number of blank rows above the image. Cap at
+	// (rows - len(imgRows)) / 2 ≥ 0; if the image has more rows than
+	// the preview can show, the bottom is truncated.
+	vPad := 0
+	if len(imgRows) < rows {
+		vPad = (rows - len(imgRows)) / 2
+	}
+
+	for i, r := range imgRows {
+		dst := vPad + i
+		if dst >= rows {
+			break
+		}
+		out[dst] = hPadStr + r
+	}
+	return out
 }
 
 // buildPreviewPlaceholder returns the rows that fill the sidebar's

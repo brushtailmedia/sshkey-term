@@ -238,6 +238,42 @@ func (m *MessagesModel) attachmentLocalPath(fileID string) string {
 	return path
 }
 
+// SelectedImagePath returns the local-cached path of the first image
+// attachment on the currently-selected message, or "" if no message
+// is selected, the message has no image attachments, or the image
+// hasn't been downloaded locally yet.
+//
+// Drives the sidebar preview pane: app.View calls this each frame
+// and pushes the result into sidebar.SetPreviewImagePath. State is
+// purely derived from the cursor position — no event hooks, no
+// stored "last viewed" state. Cursor moves to a new image →
+// preview updates; cursor moves off → preview clears.
+//
+// Returns the FIRST image attachment on the message. Multi-attachment
+// messages with mixed types (image + file) prefer the image. The
+// rare multi-image-on-one-message case is left for a future "page
+// through attachments" feature; for now the first one wins.
+func (m *MessagesModel) SelectedImagePath() string {
+	if m.cursor < 0 || m.cursor >= len(m.messages) {
+		return ""
+	}
+	msg := m.messages[m.cursor]
+	for _, att := range msg.Attachments {
+		if att.IsImage {
+			if path := m.attachmentLocalPath(att.FileID); path != "" {
+				return path
+			}
+			// Image attachment exists but isn't downloaded yet.
+			// Don't fall through to a non-image attachment — the
+			// user picked a row whose primary content is an image,
+			// the preview should reflect that intent (i.e., empty)
+			// rather than show a different attachment.
+			return ""
+		}
+	}
+	return ""
+}
+
 func NewMessages() MessagesModel {
 	// Initial viewport size is a reasonable default; View() resizes
 	// every render to the actual panel dimensions. Mouse wheel
@@ -1514,24 +1550,14 @@ func (m MessagesModel) renderHeader() (string, int) {
 // Used for line wrapping inside lipgloss styles (e.g. selectedMsgStyle
 // .Width(width-2)) and for image-render bounds.
 //
-// imgMaxRows / imgMaxCols are the per-image inline-display caps.
-// 40 cols × 12 rows is a thumbnail-sized window — slightly larger
-// than the original 32×8 cap because the block-cell renderer
-// (imagerender.go) lives in the text-cell layer instead of the
-// graphics-protocol layer, so:
-//   - There's no layout-break risk at this size (cells respect the
-//     message pane bounds; modal overlays clear cleanly).
-//   - The encoded escape sequence is small (~10 KB regardless of
-//     source pixel count, since output is cell × color escapes
-//     not encoded image data).
-// 40×12 keeps images visibly thumbnail-sized vs message text without
-// dominating the pane on smaller terminals. Subject legibility at
-// this density comes from the NearestNeighbor thumbnail-sampling
-// kernel (see client/thumbnail.go), not from raw cell count — bumping
-// dims is available if needed but trades off layout discipline.
-// Users press `o` to open the original at full resolution in their
-// system viewer.
 // buildContent renders the full scrollable content + a row map.
+//
+// Image attachments are rendered as `🖼 name (size)` placeholders in
+// the messages pane — actual image content goes to the sidebar's
+// preview pane (driven by SelectedImagePath, see app.View). This
+// keeps the messages pane purely text-cell content so modals can
+// overlay it without the graphics-layer concerns the previous
+// inline-render path had to defend against.
 //
 // The returned rowMap has one entry per message: rowMap[i] is the
 // 0-indexed content row at which message i begins. Used by mouse
@@ -1540,12 +1566,9 @@ func (m MessagesModel) renderHeader() (string, int) {
 //
 // Counting is done against the EMITTED line shape (count of '\n' in
 // the rendered line + 1), not against the message struct, so any
-// component that adds rows (reply preview, reactions, attachments,
-// inline images) is automatically accounted for.
+// component that adds rows (reply preview, reactions, attachments)
+// is automatically accounted for.
 func (m MessagesModel) buildContent(width int) (string, []int) {
-	const imgMaxRows = 12
-	const imgMaxCols = 40
-
 	var b strings.Builder
 	rowMap := make([]int, len(m.messages))
 	currentRow := 0
@@ -1684,41 +1707,13 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 				line += "\n   " + strings.Join(reactions, "  ")
 			}
 
-			// Attachments
+			// Attachments — placeholders only. Image content for the
+			// cursor-selected message is rendered in the sidebar's
+			// preview pane, not inline (see SelectedImagePath +
+			// app.View). Non-image attachments use the paperclip
+			// glyph; images use the picture-frame glyph.
 			for _, att := range msg.Attachments {
-				localPath := m.attachmentLocalPath(att.FileID)
-				if att.IsImage && localPath != "" && CanRenderImages() {
-					// Inline image rendering — image takes up width minus
-					// edge padding, fixed-height cap from the buildContent
-					// outer-scope const (see imgMaxRows comment above).
-					// Pre-viewport refactor this was visibleHeight*2/3 of
-					// the visible panel; now images live in scrollable
-					// content so an image is N rows of buffer instead of
-					// "consumes 2/3 of the on-screen pane."
-					maxC := width - 8
-					if maxC > imgMaxCols {
-						maxC = imgMaxCols
-					}
-					imgStr := RenderImageInline(localPath, maxC, imgMaxRows)
-					if imgStr != "" {
-						// Indent each row of the rendered image by the
-						// same one-cell left gutter used by message
-						// headers, body lines (bodyWithGutter), reply
-						// previews, reactions, and attachment captions
-						// — so an image visually aligns with its
-						// surrounding message text instead of starting
-						// at column 0.
-						imgStr = " " + strings.ReplaceAll(imgStr, "\n", "\n ")
-						line += "\n" + imgStr
-						line += "\n " + fmt.Sprintf("%s (%s)", att.Name, formatSize(att.Size))
-					} else {
-						// Decoder returned empty (malformed image, decoder
-						// panic recovered, or unsupported format). Fall
-						// back to the placeholder so the user still sees
-						// the attachment metadata.
-						line += "\n " + fmt.Sprintf("🖼 %s (%s)", att.Name, formatSize(att.Size))
-					}
-				} else if att.IsImage {
+				if att.IsImage {
 					line += "\n " + fmt.Sprintf("🖼 %s (%s)", att.Name, formatSize(att.Size))
 				} else {
 					line += "\n " + fmt.Sprintf("📎 %s (%s)", att.Name, formatSize(att.Size))
