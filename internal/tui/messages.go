@@ -1638,9 +1638,15 @@ func (m MessagesModel) renderHeader(width int) (string, int) {
 //
 // buildContent renders the full scrollable content + a row map.
 //
-// Image attachments are rendered as `🖼 name (size)` placeholders in
-// the messages pane — actual image content goes to the sidebar's
-// preview pane (driven by SelectedImagePath, see app.View). This
+// Image attachments are rendered as `🖼 (size)` placeholders in the
+// messages pane — actual image content goes to the sidebar's
+// preview pane (driven by SelectedImagePath, see app.View). The
+// filename isn't repeated in the placeholder because the upload
+// command (`/upload <path>`) sets the message body to the filename
+// already; keeping it in the placeholder produced redundant
+// "name / 🖼 name (size)" output. If a future caption-aware upload
+// path lands, the placeholder will need to surface the filename
+// again to avoid losing it. This
 // keeps the messages pane purely text-cell content so modals can
 // overlay it without the graphics-layer concerns the previous
 // inline-render path had to defend against.
@@ -1805,6 +1811,39 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 				line += "\n " + replyRefStyle.Render("  ↳ "+replyPreview)
 			}
 
+			// Attachments — placeholders only. Image content for the
+			// cursor-selected message is rendered in the sidebar's
+			// preview pane, not inline (see SelectedImagePath +
+			// app.View). Non-image attachments use the paperclip
+			// glyph; images use the picture-frame glyph.
+			//
+			// Rendered BEFORE reactions so reactions always sit at the
+			// bottom of the message block, matching the no-attachment
+			// case (where reactions are the last thing under the body).
+			// Earlier ordering put reactions between body and
+			// placeholder, which read as "reactions on the text" with
+			// the file dangling below — visually disconnected.
+			//
+			// Filename is intentionally NOT printed in the placeholder.
+			// Today the /upload handler uses `body = filepath.Base(path)`
+			// as the message text, so the filename already appears one
+			// row above the placeholder; repeating it here produces
+			// "3.png / 🖼 3.png (102.7 KB)" — pure duplication. If we
+			// later add caption-aware uploads (body becomes the user's
+			// caption rather than the filename), the placeholder will
+			// need to surface the filename again. Worth flagging at
+			// that future change site.
+			for _, att := range msg.Attachments {
+				if att.IsImage {
+					line += "\n " + fmt.Sprintf("🖼 (%s)", formatSize(att.Size))
+				} else {
+					line += "\n " + fmt.Sprintf("📎 (%s)", formatSize(att.Size))
+				}
+				if i == m.cursor {
+					line += timestampStyle.Render("  o=open  s=save")
+				}
+			}
+
 			if counts := msg.DisplayReactions(); len(counts) > 0 {
 				// Sort emojis deterministically so reactions don't jitter
 				// between renders.
@@ -1818,22 +1857,6 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 					reactions = append(reactions, reactionStyle.Render(fmt.Sprintf("%s %d", emoji, counts[emoji])))
 				}
 				line += "\n   " + strings.Join(reactions, "  ")
-			}
-
-			// Attachments — placeholders only. Image content for the
-			// cursor-selected message is rendered in the sidebar's
-			// preview pane, not inline (see SelectedImagePath +
-			// app.View). Non-image attachments use the paperclip
-			// glyph; images use the picture-frame glyph.
-			for _, att := range msg.Attachments {
-				if att.IsImage {
-					line += "\n " + fmt.Sprintf("🖼 %s (%s)", att.Name, formatSize(att.Size))
-				} else {
-					line += "\n " + fmt.Sprintf("📎 %s (%s)", att.Name, formatSize(att.Size))
-				}
-				if i == m.cursor {
-					line += timestampStyle.Render("  o=open  s=save")
-				}
 			}
 
 			if i == m.cursor {
