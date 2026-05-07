@@ -10,8 +10,10 @@ import (
 	_ "image/png"
 	"math"
 	"os"
+	"strings"
 	"sync"
 
+	"github.com/BourgeoisBear/rasterm"
 	"golang.org/x/image/draw"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
@@ -201,6 +203,14 @@ type imageRenderCacheKey struct {
 	maxCols   int
 	maxRows   int
 	truecolor bool
+	// rasterm distinguishes cached output produced by the rasterm
+	// encoder (kitty / iTerm2 escape sequences) from the block-char
+	// encoder (quadrant glyphs + ANSI color). Without this, switching
+	// terminals mid-session — or hitting the `SSHKEY_NO_INLINE_IMAGES=1`
+	// diagnostic toggle — could return stale block-char output to a
+	// rasterm-capable session, or vice versa. Cheap to add to the key;
+	// each encoder gets its own cache slot per (path, dims, truecolor).
+	rasterm bool
 }
 
 type imageRenderCacheEntry struct {
@@ -249,6 +259,199 @@ func useTrueColor() bool {
 	return c == "truecolor" || c == "24bit"
 }
 
+// rastermProtocol is the encoder choice when rasterm is in use.
+// Detected once at process start (env-var only, no terminal probing —
+// see rastermCapable for the rationale). One of:
+//
+//   - rastermNone   (block-char path)
+//   - rastermKitty  (Kitty graphics protocol; also Ghostty + WezTerm
+//     when their TERM_PROGRAM matches IsKittyCapable)
+//   - rastermIterm  (iTerm2 inline image protocol; also WezTerm when
+//     IsItermCapable matches)
+//
+// Sixel is intentionally absent: rasterm.IsSixelCapable probes the
+// terminal via DA1 (write ESC, read response) which is unsafe inside
+// a bubbletea program — bubbletea owns stdin/stdout. Sixel-only
+// terminals (foot, Contour, mlterm) get the block-char fallback.
+type rastermProtocol int
+
+const (
+	rastermNone rastermProtocol = iota
+	rastermKitty
+	rastermIterm
+)
+
+var rastermProtocolCache = func() rastermProtocol {
+	if os.Getenv("SSHKEY_NO_RASTERM") != "" {
+		return rastermNone
+	}
+	// Kitty wins over iTerm when both env vars look set — the kitty
+	// protocol is more capable (placement IDs, deletes, z-index) and
+	// terminals that truly support both (notably WezTerm) implement
+	// kitty better than iterm.
+	if rasterm.IsKittyCapable() {
+		return rastermKitty
+	}
+	if rasterm.IsItermCapable() {
+		return rastermIterm
+	}
+	return rastermNone
+}()
+
+// rastermCapable reports whether the active terminal supports a
+// rasterm-rendered protocol. Cached once at startup. Wrapped in a
+// helper so tests can override behavior via the package-level
+// rastermProtocolCache (set in TestMain or per-test).
+func rastermCapable() bool {
+	return rastermProtocolCache != rastermNone
+}
+
+// rastermImagePlacementID is the kitty image-id we attach to every
+// preview-pane placement. Stable across renders so the sidebar's
+// transition-clear path can issue a targeted delete escape (`a=d,
+// d=I,i=<id>`) rather than wiping every kitty image on screen.
+//
+// Any non-zero uint32 works — we pick a number unlikely to collide
+// with images placed by other tools sharing the same terminal.
+const rastermImagePlacementID uint32 = 0x73686b79 // 'shky'
+
+// rastermDeleteEscape is the kitty graphics-protocol escape that
+// removes our preview placement. No-op for terminals that didn't
+// render via rasterm in the first place — the bytes still get
+// emitted but the terminal doesn't recognize the sequence and
+// silently drops it (kitty escapes are wrapped in `\x1b_G` … `\x1b\\`
+// which non-kitty terminals treat as an unknown DCS string).
+//
+// iTerm2 / WezTerm-iterm-mode don't need an explicit delete — their
+// inline images are part of the text scrollback and get overwritten
+// by subsequent text cells. The escape is harmless there too.
+func rastermDeleteEscape() string {
+	return fmt.Sprintf("\x1b_Ga=d,d=I,i=%d;\x1b\\", rastermImagePlacementID)
+}
+
+// rasterFitCells computes an aspect-preserving terminal-cell rectangle
+// for raster renderers inside a maxCols x maxRows preview box.
+//
+// Returns:
+//   - cols, rows: chosen display rectangle in terminal cells (>=1)
+//   - widthBound: true if width is the limiting dimension, false if height
+//
+// Uses the same 1:2 terminal-cell aspect assumption as renderBlockImage.
+func rasterFitCells(imgW, imgH, maxCols, maxRows int) (cols, rows int) {
+	if maxCols < 1 {
+		maxCols = 1
+	}
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	if imgW < 1 {
+		imgW = 1
+	}
+	if imgH < 1 {
+		imgH = 1
+	}
+
+	scaledRows := (imgH * maxCols) / (imgW * 2)
+	if scaledRows < 1 {
+		scaledRows = 1
+	}
+	if scaledRows <= maxRows {
+		return maxCols, scaledRows
+	}
+
+	scaledCols := (imgW * maxRows * 2) / imgH
+	if scaledCols < 1 {
+		scaledCols = 1
+	}
+	if scaledCols > maxCols {
+		scaledCols = maxCols
+	}
+	return scaledCols, maxRows
+}
+
+// tryRenderRasterm encodes the image at filePath using the detected
+// rasterm protocol, sized to fit (maxCols × maxRows) terminal cells.
+// Returns ("", false) when rasterm isn't capable, the file can't be
+// decoded, or the encoder errors. Callers fall back to the block-
+// char path on the false return.
+//
+// Uses the rasterm-specific thumbnail (256×256 max) instead of the
+// block-char thumbnail (80×24) to give the encoder enough source
+// pixels to render crisply at the preview pane's screen-pixel area.
+// Lazy thumbnail generation: if the rasterm thumbnail is missing,
+// decode the original and fire a fire-and-forget write goroutine.
+//
+// The encoder output starts with the kitty placement header (which
+// includes our image-id) so the sidebar's transition-clear logic can
+// issue a matched delete on deselect/modal-open. iTerm2 output uses
+// rasterm's default opts (no placement ID needed — the image is
+// inline in the text stream and gets cleared by overwriting cells).
+func tryRenderRasterm(filePath string, maxCols, maxRows int) (string, bool) {
+	thumbPath := client.ThumbnailPathRasterm(filePath)
+	img, err := decodeImageFile(thumbPath)
+	if err != nil {
+		// Lazy fallback: decode original, fire generation goroutine
+		// for next render. Mirror the block-char path's pattern so
+		// behavior is symmetric across encoders.
+		img, err = decodeImageFile(filePath)
+		if err != nil {
+			return "", false
+		}
+		go func() {
+			_ = client.GenerateRastermThumbnail(filePath, thumbPath)
+		}()
+	}
+	dstCols, dstRows := rasterFitCells(img.Bounds().Dx(), img.Bounds().Dy(), maxCols, maxRows)
+
+	var buf bytes.Buffer
+	switch rastermProtocolCache {
+	case rastermKitty:
+		opts := rasterm.KittyImgOpts{
+			DstCols:     uint32(dstCols),
+			DstRows:     uint32(dstRows),
+			ImageId:     rastermImagePlacementID,
+			PlacementId: rastermImagePlacementID,
+		}
+		if err := rasterm.KittyWriteImage(&buf, img, opts); err != nil {
+			return "", false
+		}
+	case rastermIterm:
+		// Constrain iTerm/WezTerm inline images to the preview pane
+		// bounds in cell units. Without explicit width/height, iTerm
+		// defaults to "auto" and can render larger than the pane.
+		opts := rasterm.ItermImgOpts{
+			DisplayInline: true,
+			Width:         fmt.Sprintf("%d", dstCols),
+			Height:        fmt.Sprintf("%d", dstRows),
+		}
+		if err := rasterm.ItermWriteImageWithOptions(&buf, img, opts); err != nil {
+			return "", false
+		}
+	default:
+		return "", false
+	}
+	out := buf.String()
+	if out == "" {
+		return "", false
+	}
+	// Prevent kitty from moving the text cursor after placement.
+	// Rasterm doesn't currently expose C=1 in KittyImgOpts, so patch
+	// only the initial placement header.
+	if rastermProtocolCache == rastermKitty {
+		out = strings.Replace(out, "\x1b_Ga=T,", "\x1b_Ga=T,C=1,", 1)
+	}
+	// rasterm's encoders don't emit a trailing newline — the encoded
+	// escape sequence sits as a single "logical line" in the output.
+	// The block-char path emits one '\n'-separated row per cell row;
+	// callers (specifically buildPreviewImageRows) split on '\n' to
+	// vertically center. Pad rasterm's output with empty rows so the
+	// caller sees the right row count and centers correctly.
+	if dstRows > 1 {
+		out += strings.Repeat("\n", dstRows-1)
+	}
+	return out, true
+}
+
 // RenderImageInline renders an image file as a string of cell-aligned
 // terminal escape sequences. maxCols/maxRows define the bounding box
 // in terminal cells; aspect ratio is preserved within those bounds
@@ -258,6 +461,13 @@ func useTrueColor() bool {
 // image (untrusted sender-supplied bytes) that trips a decoder panic
 // does not crash the TUI — we fall back to the empty-string result
 // which makes the caller render the 🖼 placeholder instead.
+//
+// Encoder selection: when the active terminal advertises a rasterm-
+// supported graphics protocol (kitty / iTerm2 / WezTerm / Ghostty
+// per env-var detection), rasterm runs FIRST. On success it returns
+// kitty / iTerm2 escape sequences sized to the preview pane. If
+// rasterm is not capable or the encode fails, the block-char path
+// runs unchanged.
 func RenderImageInline(filePath string, maxCols, maxRows int) (result string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -274,6 +484,30 @@ func RenderImageInline(filePath string, maxCols, maxRows int) (result string) {
 	}
 
 	tc := useTrueColor()
+
+	// Try rasterm first when capable. Cache rasterm output under a
+	// distinct key (rasterm:true) so swapping encoders mid-session
+	// doesn't return stale block-char bytes.
+	if rastermCapable() {
+		rkey := imageRenderCacheKey{
+			path:      filePath,
+			maxCols:   maxCols,
+			maxRows:   maxRows,
+			truecolor: tc,
+			rasterm:   true,
+		}
+		if cached, ok := getCachedInlineImage(rkey, info.ModTime().UnixNano(), info.Size()); ok {
+			return cached
+		}
+		if rendered, ok := tryRenderRasterm(filePath, maxCols, maxRows); ok {
+			putCachedInlineImage(rkey, info.ModTime().UnixNano(), info.Size(), rendered)
+			return rendered
+		}
+		// Rasterm capability detected but encode failed (decode error,
+		// IO error, etc.). Fall through to block-char path so the
+		// preview still renders something.
+	}
+
 	key := imageRenderCacheKey{
 		path:      filePath,
 		maxCols:   maxCols,

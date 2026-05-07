@@ -1,8 +1,13 @@
 package tui
 
 import (
+	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -171,4 +176,216 @@ func TestRenderImageInline_MissingFile(t *testing.T) {
 	if got != "" {
 		t.Errorf("RenderImageInline on missing file = %d bytes, want \"\"", len(got))
 	}
+}
+
+// withRastermProtocol overrides the cached rasterm protocol detection
+// for the duration of a test, restoring on cleanup. Used by tests that
+// need to exercise the rasterm branch without depending on the host
+// terminal's actual capabilities (CI runners typically aren't kitty
+// or iTerm2).
+func withRastermProtocol(t *testing.T, p rastermProtocol) {
+	t.Helper()
+	prev := rastermProtocolCache
+	rastermProtocolCache = p
+	t.Cleanup(func() { rastermProtocolCache = prev })
+}
+
+// TestRastermCapable_FollowsCache verifies the public predicate
+// reflects rastermProtocolCache. Sanity check before the
+// branch-routing tests below assume override semantics work.
+func TestRastermCapable_FollowsCache(t *testing.T) {
+	withRastermProtocol(t, rastermNone)
+	if rastermCapable() {
+		t.Error("rastermCapable() should be false when cache is rastermNone")
+	}
+	withRastermProtocol(t, rastermKitty)
+	if !rastermCapable() {
+		t.Error("rastermCapable() should be true when cache is rastermKitty")
+	}
+}
+
+// TestRastermDeleteEscape_ContainsImageID confirms the escape carries
+// the placement-targeted delete (`d=I,i=<id>`) rather than the
+// "delete every image on screen" form (`d=A`). Hard-coded so a future
+// refactor that broadens the delete scope shows up loudly.
+func TestRastermDeleteEscape_ContainsImageID(t *testing.T) {
+	esc := rastermDeleteEscape()
+	if !strings.Contains(esc, "a=d") {
+		t.Error("delete escape should set a=d")
+	}
+	if !strings.Contains(esc, "d=I") {
+		t.Error("delete escape should target by image-id (d=I), not all (d=A)")
+	}
+	if !strings.HasPrefix(esc, "\x1b_G") || !strings.HasSuffix(esc, "\x1b\\") {
+		t.Errorf("delete escape should be wrapped in kitty graphics DCS (\\x1b_G ... \\x1b\\), got %q", esc)
+	}
+}
+
+// writeImageWithThumbs creates a source PNG plus pre-existing
+// thumbnail files for both the block-char and rasterm paths. The
+// pre-existing thumbnails short-circuit the lazy thumbnail-generation
+// goroutines that RenderImageInline normally fires on cache miss —
+// without these, the goroutines race t.TempDir cleanup and produce
+// flaky "directory not empty" failures. Same PNG bytes for src and
+// thumbnails since the test only cares about decode + encode shape,
+// not visual fidelity.
+func writeImageWithThumbs(t *testing.T, dir string) string {
+	t.Helper()
+	pngBytes := smallPNGBytes()
+	srcPath := filepath.Join(dir, "test.png")
+	if err := os.WriteFile(srcPath, pngBytes, 0644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if err := os.WriteFile(srcPath+".thumb_v2.png", pngBytes, 0644); err != nil {
+		t.Fatalf("write block-char thumb: %v", err)
+	}
+	if err := os.WriteFile(srcPath+".thumb_rasterm_v1.png", pngBytes, 0644); err != nil {
+		t.Fatalf("write rasterm thumb: %v", err)
+	}
+	return srcPath
+}
+
+// withCleanInlineImageEnv unsets SSHKEY_NO_INLINE_IMAGES for the
+// duration of a test and restores the original value on cleanup.
+// Several rasterm tests need the inline-image path to actually run.
+func withCleanInlineImageEnv(t *testing.T) {
+	t.Helper()
+	prev, set := os.LookupEnv("SSHKEY_NO_INLINE_IMAGES")
+	t.Cleanup(func() {
+		if set {
+			os.Setenv("SSHKEY_NO_INLINE_IMAGES", prev)
+		} else {
+			os.Unsetenv("SSHKEY_NO_INLINE_IMAGES")
+		}
+	})
+	os.Unsetenv("SSHKEY_NO_INLINE_IMAGES")
+}
+
+// TestRenderImageInline_RastermBranchUsedWhenCapable verifies that
+// when rastermProtocolCache is set to a kitty/iterm protocol, the
+// rendered output contains the rasterm escape header rather than
+// block-character cells. The actual encoded bytes vary by image
+// content, but the protocol prefix is stable.
+func TestRenderImageInline_RastermBranchUsedWhenCapable(t *testing.T) {
+	resetInlineImageRenderCache()
+	withRastermProtocol(t, rastermKitty)
+	withCleanInlineImageEnv(t)
+
+	srcPath := writeImageWithThumbs(t, t.TempDir())
+
+	out := RenderImageInline(srcPath, 20, 12)
+	if out == "" {
+		t.Fatal("RenderImageInline returned empty output for valid PNG with rasterm capable")
+	}
+	// Kitty-protocol output starts with `\x1b_G` (the DCS header rasterm
+	// emits via KITTY_IMG_HDR). Block-char output uses ANSI SGR sequences
+	// (`\x1b[`) plus block runes — disjoint from the kitty header.
+	if !strings.HasPrefix(out, "\x1b_G") {
+		t.Errorf("rasterm-capable render should produce kitty escape, got prefix %q",
+			out[:min(20, len(out))])
+	}
+	if !strings.Contains(out, "C=1") {
+		t.Error("kitty raster output should set C=1 (do not move cursor)")
+	}
+}
+
+// TestRenderImageInline_FallsBackToBlockCharsWhenNotCapable verifies
+// that when rastermProtocolCache is rastermNone, RenderImageInline
+// runs the existing block-char path — rendering is non-empty and
+// does NOT carry the kitty DCS prefix.
+func TestRenderImageInline_FallsBackToBlockCharsWhenNotCapable(t *testing.T) {
+	resetInlineImageRenderCache()
+	withRastermProtocol(t, rastermNone)
+	withCleanInlineImageEnv(t)
+
+	srcPath := writeImageWithThumbs(t, t.TempDir())
+
+	out := RenderImageInline(srcPath, 20, 12)
+	if out == "" {
+		t.Fatal("RenderImageInline returned empty output for valid PNG with block-char path")
+	}
+	if strings.HasPrefix(out, "\x1b_G") {
+		t.Errorf("rasterm-disabled render should not emit kitty escape, got prefix %q",
+			out[:min(20, len(out))])
+	}
+}
+
+// TestRenderImageInline_CacheKeyHonorsRastermBool verifies that
+// switching encoders mid-session doesn't return stale cached output.
+// First render under rasterm caches the kitty-encoded bytes; second
+// render with the same path/dims/truecolor but rasterm disabled must
+// re-render via block-char (different cache slot).
+func TestRenderImageInline_CacheKeyHonorsRastermBool(t *testing.T) {
+	resetInlineImageRenderCache()
+	withCleanInlineImageEnv(t)
+
+	srcPath := writeImageWithThumbs(t, t.TempDir())
+
+	withRastermProtocol(t, rastermKitty)
+	rastermOut := RenderImageInline(srcPath, 20, 12)
+	if !strings.HasPrefix(rastermOut, "\x1b_G") {
+		t.Fatalf("first render: expected kitty prefix, got %q", rastermOut[:min(20, len(rastermOut))])
+	}
+
+	withRastermProtocol(t, rastermNone)
+	blockOut := RenderImageInline(srcPath, 20, 12)
+	if strings.HasPrefix(blockOut, "\x1b_G") {
+		t.Errorf("second render with rasterm disabled returned kitty escape — cache key not honoring rasterm bool")
+	}
+	if blockOut == "" {
+		t.Error("second render returned empty — block-char path didn't fire")
+	}
+}
+
+// TestRenderImageInline_ItermBranchIncludesPaneBounds verifies the
+// iTerm/WezTerm rasterm branch encodes explicit width/height in cell
+// units, keeping graphics confined to the preview-pane dimensions.
+func TestRenderImageInline_ItermBranchIncludesPaneBounds(t *testing.T) {
+	resetInlineImageRenderCache()
+	withRastermProtocol(t, rastermIterm)
+	withCleanInlineImageEnv(t)
+
+	srcPath := writeImageWithThumbs(t, t.TempDir())
+
+	out := RenderImageInline(srcPath, 20, 12)
+	if out == "" {
+		t.Fatal("RenderImageInline returned empty output for valid PNG with iTerm rasterm capable")
+	}
+	if !strings.HasPrefix(out, "\x1b]1337;File=") {
+		t.Fatalf("expected iTerm inline-image prefix, got %q", out[:min(32, len(out))])
+	}
+	// Square source image in a 20x12 pane should fit to 20x10 under the
+	// 1:2 cell aspect model used by renderer sizing.
+	if !strings.Contains(out, "width=20") {
+		t.Error("iTerm inline output missing width=20 option")
+	}
+	if !strings.Contains(out, "height=10") {
+		t.Error("iTerm inline output missing aspect-fit height=10 option")
+	}
+}
+
+// smallPNGBytes returns a valid 4×4 red PNG, encoded via the standard
+// image/png path. Used by the rasterm + block-char render tests as a
+// minimal real image — small enough that the encode/decode round-trip
+// is sub-millisecond, large enough that thumbnail downscale logic
+// (which assumes >0 dimensions) doesn't degenerate.
+func smallPNGBytes() []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 4; x++ {
+			img.Set(x, y, color.RGBA{R: 255, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

@@ -41,6 +41,25 @@ const (
 	thumbnailMaxPixelW = 80
 	thumbnailMaxPixelH = 24
 	thumbnailSuffix    = ".thumb_v2.png"
+
+	// Rasterm thumbnail target: 256×256 px max, aspect-ratio preserved.
+	// Sized for the sidebar preview pane (~20 cells wide × ~12 rows tall)
+	// at typical font cell densities (10–14 px wide × 20–28 px tall),
+	// which works out to roughly 200–280 screen pixels of horizontal
+	// canvas and 240–336 vertical. 256×256 is the smallest "round
+	// number" that comfortably covers the common-case preview area on
+	// non-HiDPI terminals; HiDPI cells (≥16×32 px) will see a slight
+	// rasterm upscale but still cleaner than the block-char path. Disk
+	// cost: ~50–80 KB per file, vs ~5 KB for the block-char thumbnail.
+	//
+	// Stored under a separate filename so the block-char path's
+	// thumbnail (`<src>.thumb_v2.png`) stays untouched. Opening the
+	// same data dir in a non-rasterm-capable terminal continues to
+	// hit the block-char path against its existing thumbnail without
+	// any cross-encoder cache contamination.
+	rastermThumbnailMaxPixelW = 256
+	rastermThumbnailMaxPixelH = 256
+	rastermThumbnailSuffix    = ".thumb_rasterm_v1.png"
 )
 
 // ThumbnailPath returns the canonical thumbnail path for a cached
@@ -48,6 +67,18 @@ const (
 // See thumbnailSuffix for the version history.
 func ThumbnailPath(srcPath string) string {
 	return srcPath + thumbnailSuffix
+}
+
+// ThumbnailPathRasterm returns the rasterm-encoder thumbnail path —
+// a sibling file at higher resolution than the block-char path's
+// thumbnail. Used by terminals that support kitty / iTerm2 graphics
+// protocols (see internal/tui/imagerender.go's rasterm branch).
+//
+// Versioned suffix follows the same convention as ThumbnailPath —
+// bumping the version makes old files orphans, regenerated lazily
+// on next view.
+func ThumbnailPathRasterm(srcPath string) string {
+	return srcPath + rastermThumbnailSuffix
 }
 
 // GenerateThumbnail decodes the original at srcPath, downscales it
@@ -116,6 +147,61 @@ func GenerateThumbnail(srcPath, dstPath string) error {
 		// Crisp wins for recognition.
 		scaled := image.NewRGBA(image.Rect(0, 0, targetW, targetH))
 		draw.NearestNeighbor.Scale(scaled, scaled.Rect, img, img.Bounds(), draw.Over, nil)
+		thumb = scaled
+	}
+
+	return writeThumbnailPNGAtomic(dstPath, thumb)
+}
+
+// GenerateRastermThumbnail is the rasterm sibling of GenerateThumbnail.
+// Same atomic-write semantics, same skip-if-exists short-circuit, but
+// targets the larger (256×256 max) rasterm dimensions and uses a
+// quality-preserving kernel (CatmullRom) instead of NearestNeighbor.
+//
+// Why a different kernel: NearestNeighbor at 50:1 reduction is right
+// for the block-char path because each output cell encodes a 2×2
+// pixel region as a quadrant glyph — preserving one pixel's contrast
+// per cell beats averaging hundreds. At 256-pixel target dimensions
+// the rasterm output is rendered native-pixel-by-native-pixel, so a
+// smoothing kernel produces a sharper-feeling image (no aliased
+// staircase edges from nearest-neighbor's hard cuts at this density).
+//
+// Errors are returned but not load-bearing — callers fire-and-forget
+// in goroutines, falling back to the original on next render if the
+// thumbnail isn't yet on disk.
+func GenerateRastermThumbnail(srcPath, dstPath string) error {
+	if _, err := os.Stat(dstPath); err == nil {
+		return nil
+	}
+
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	img, _, err := image.Decode(f)
+	if err != nil {
+		return err
+	}
+
+	imgW := img.Bounds().Dx()
+	imgH := img.Bounds().Dy()
+	if imgW == 0 || imgH == 0 {
+		return fmt.Errorf("zero-dimensional image")
+	}
+
+	targetW, targetH := scaleToFit(imgW, imgH, rastermThumbnailMaxPixelW, rastermThumbnailMaxPixelH)
+
+	var thumb image.Image = img
+	if targetW < imgW || targetH < imgH {
+		scaled := image.NewRGBA(image.Rect(0, 0, targetW, targetH))
+		// CatmullRom: a cubic resampling kernel that preserves edge
+		// sharpness while smoothing flat regions — visually close to
+		// what people expect from a "nice thumbnail." Slower than
+		// NearestNeighbor (the block-char kernel) but irrelevant at
+		// 256 px output and the work happens in a goroutine anyway.
+		draw.CatmullRom.Scale(scaled, scaled.Rect, img, img.Bounds(), draw.Over, nil)
 		thumb = scaled
 	}
 

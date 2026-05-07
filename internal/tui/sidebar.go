@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -126,6 +127,28 @@ type SidebarModel struct {
 	// pane and no modal is open. Empty otherwise (preview shows the
 	// default sshkey-term placeholder).
 	previewImagePath string
+
+	// pendingRastermClear is set by SetPreviewImagePath when the
+	// preview transitions from "showing an image" to "no image" while
+	// rasterm is the active encoder. Consumed and reset on the next
+	// View() render, which prepends the kitty graphics-protocol
+	// delete escape to the rendered output.
+	//
+	// Why this matters: rasterm's kitty branch places images in a
+	// separate compositing layer that bubbletea's text-cell repaints
+	// don't touch. Without an explicit delete escape, an image stays
+	// on screen after deselect / modal-open / context-switch. The
+	// flag-then-emit-on-next-render pattern ties the clear to the
+	// next visual update so the terminal sees "delete escape +
+	// fresh placeholder content" together, avoiding a flash of
+	// "image still there + new placeholder cells overlapping."
+	//
+	// iTerm2 / WezTerm-iterm don't need this — their inline images
+	// are part of the text scrollback and clear automatically when
+	// cells get overwritten — but emitting the kitty escape there is
+	// harmless: non-kitty terminals treat the `\x1b_G` … `\x1b\\`
+	// sequence as an unknown DCS string and silently drop it.
+	pendingRastermClear bool
 
 	// activeRoom / activeGroup / activeDM — the room, group, or DM
 	// currently shown in the messages pane. Distinct from
@@ -473,11 +496,42 @@ func (s SidebarModel) groupPresenceDot(members []string) string {
 	return offlineDot
 }
 
+// SetPreviewImagePathFlagsClear is the transition test that gates
+// pendingRastermClear. Documented as a separate predicate because
+// the conditions are subtle:
+//
+//   - previewImagePath WAS non-empty (we'd been showing an image)
+//   - new path IS empty (we're hiding it)
+//   - rasterm is the active encoder (the only encoder that needs an
+//     explicit clear escape — block-char "clears" naturally because
+//     bubbletea overwrites the text cells)
+//
+// Returning true means the next View() should prepend the kitty
+// delete escape; returning false means no escape is needed.
+func setPreviewNeedsRastermClear(prevPath, newPath string) bool {
+	return prevPath != "" && newPath == "" && rastermCapable()
+}
+
 // SetPreviewImagePath updates the path of the image to render in the
 // preview pane. App.View calls this each frame with the current
 // derived state (cursor-on-image AND focus-on-messages AND no modal),
 // or "" otherwise. Empty path means render the default placeholder.
+//
+// Side effect: when transitioning from a non-empty path to empty
+// while rasterm is the active encoder, set pendingRastermClear so
+// the next View() emits the kitty delete escape. New non-empty
+// paths atomically replace the prior placement (kitty places
+// against the same image-id), so no clear is needed in that
+// direction.
 func (s *SidebarModel) SetPreviewImagePath(path string) {
+	if setPreviewNeedsRastermClear(s.previewImagePath, path) {
+		s.pendingRastermClear = true
+	} else if path != "" {
+		// Going to a new image — the upcoming placement will
+		// replace the prior one in-place. Drop any stale clear
+		// flag so we don't accidentally erase the new image.
+		s.pendingRastermClear = false
+	}
 	s.previewImagePath = path
 }
 
@@ -859,13 +913,33 @@ func fitSidebarLinePreferName(prefix, name, suffix string, contentWidth int) str
 	return ansi.Truncate(line, contentWidth, "")
 }
 
-func (s SidebarModel) View(width, height int, focused bool) string {
+// View renders the sidebar.
+//
+// Pointer receiver: the rasterm-clear path needs to consume and
+// reset pendingRastermClear within the render call. A value
+// receiver would mutate a local copy and the next render would
+// re-emit the escape forever. The performance delta vs a value
+// receiver is irrelevant — the method ends up addressing the same
+// memory either way.
+func (s *SidebarModel) View(width, height int, focused bool) string {
 	contentWidth := width - 2
 	if contentWidth < 1 {
 		contentWidth = 1
 	}
 	if height < 1 {
 		height = 1
+	}
+
+	// Consume the pending kitty-clear flag (set by
+	// SetPreviewImagePath when the preview was deselected while
+	// rasterm was active). Prepend the escape to whatever the
+	// preview area produces below — terminals interpret the escape
+	// as soon as it lands in the byte stream regardless of where in
+	// the rendered string it sits, so this position is fine.
+	var rastermClear string
+	if s.pendingRastermClear {
+		rastermClear = rastermDeleteEscape()
+		s.pendingRastermClear = false
 	}
 
 	listRows, previewRows := sidebarSectionHeights(height)
@@ -953,7 +1027,14 @@ func (s SidebarModel) View(width, height int, focused bool) string {
 			rendered = strings.Join(rows, "\n")
 		}
 	}
-	return rendered
+	// Prepend the kitty delete escape (when needed) BEFORE the
+	// rendered content. The terminal consumes it before drawing any
+	// of the new cells, so the previous frame's image is gone before
+	// the placeholder renders into its slot. Position-within-string
+	// doesn't matter for kitty escape interpretation, but prefix
+	// keeps the intent obvious to anyone reading the rendered output
+	// in tests / logs.
+	return rastermClear + rendered
 }
 
 // teeBorderEdges replaces the first `│` with `├` and the last `│`
@@ -1020,8 +1101,37 @@ func buildPreviewImageRows(imgPath string, width, rows int) []string {
 	if rendered == "" {
 		return out
 	}
+	// Rasterm output (kitty/iTerm inline-graphics escapes) draws into
+	// a graphics layer and has zero printable cell width. Text-centric
+	// centering math (ansi.StringWidth + left-space padding) shifts the
+	// placement right/outside the preview pane. Keep raster output
+	// anchored at the preview pane origin; block-char fallback still
+	// uses centering below.
+	isRasterm := strings.HasPrefix(rendered, "\x1b_G") || strings.HasPrefix(rendered, "\x1b]1337;File=")
 
 	imgRows := strings.Split(rendered, "\n")
+	if isRasterm {
+		if len(imgRows) == 0 || imgRows[0] == "" {
+			return out
+		}
+		// Center raster placements using the encoded display rectangle
+		// dimensions. Unlike block-char fallback, raster escapes have
+		// zero printable width, so ansi.StringWidth-based centering does
+		// not work.
+		imgCols, imgCellRows := rasterCellRectFromEscape(imgRows[0], width, rows)
+		hPad := 0
+		if imgCols < width {
+			hPad = (width - imgCols) / 2
+		}
+		vPad := 0
+		if imgCellRows < rows {
+			vPad = (rows - imgCellRows) / 2
+		}
+		if vPad >= 0 && vPad < rows {
+			out[vPad] = strings.Repeat(" ", hPad) + imgRows[0]
+		}
+		return out
+	}
 
 	// Compute rendered image width from the first row's visible cell
 	// count. Rows have ANSI escape sequences for fg/bg colors, so we
@@ -1058,6 +1168,64 @@ func buildPreviewImageRows(imgPath string, width, rows int) []string {
 		out[dst] = hPadStr + r
 	}
 	return out
+}
+
+// rasterCellRectFromEscape extracts the intended cell rectangle from
+// the first raster escape line:
+//   - kitty: ... c=<cols>,r=<rows> ...
+//   - iTerm: ... ;width=<cols>;height=<rows> ...
+//
+// Falls back to the full preview box on parse miss.
+func rasterCellRectFromEscape(escape string, fallbackCols, fallbackRows int) (cols, rows int) {
+	cols, rows = fallbackCols, fallbackRows
+	if strings.HasPrefix(escape, "\x1b_G") {
+		if c, ok := extractRasterInt(escape, "c="); ok && c > 0 {
+			cols = c
+		}
+		if r, ok := extractRasterInt(escape, "r="); ok && r > 0 {
+			rows = r
+		}
+	} else if strings.HasPrefix(escape, "\x1b]1337;File=") {
+		if c, ok := extractRasterInt(escape, "width="); ok && c > 0 {
+			cols = c
+		}
+		if r, ok := extractRasterInt(escape, "height="); ok && r > 0 {
+			rows = r
+		}
+	}
+	if cols < 1 {
+		cols = 1
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	if cols > fallbackCols {
+		cols = fallbackCols
+	}
+	if rows > fallbackRows {
+		rows = fallbackRows
+	}
+	return cols, rows
+}
+
+func extractRasterInt(s, key string) (int, bool) {
+	i := strings.Index(s, key)
+	if i < 0 {
+		return 0, false
+	}
+	j := i + len(key)
+	k := j
+	for k < len(s) && s[k] >= '0' && s[k] <= '9' {
+		k++
+	}
+	if k == j {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[j:k])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // buildPreviewPlaceholder returns the rows that fill the sidebar's
