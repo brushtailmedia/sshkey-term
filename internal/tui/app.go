@@ -5196,6 +5196,17 @@ func (a App) View() string {
 		return "Loading..."
 	}
 
+	// Re-sync the member panel's internal focused-state from the
+	// canonical a.focus. memberPanel keeps a separate `focused` bool
+	// because it's set point-in-time via SetFocused, which can drift
+	// from a.focus when focus changes through paths that don't all
+	// remember to call SetFocused (notably modal-close paths like
+	// the info panel closing back to FocusInput). Re-deriving each
+	// render guarantees only the panel matching a.focus shows the
+	// focused-border styling — fixes the "two panels look focused
+	// at once" class of bug systemically rather than per-call-site.
+	a.memberPanel.SetFocused(a.focus == FocusMembers)
+
 	// Connect-failed overlay takes precedence over the err+!connected
 	// raw-error fallback below. ErrMsg sets a.err AND calls
 	// connectFailed.Show() on first-time auth failures, and we want
