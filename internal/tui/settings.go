@@ -422,7 +422,87 @@ func (s SettingsModel) View(width, height int) string {
 	}
 	b.WriteString(helpDescStyle.Render(" ↑/↓=navigate  Enter=select  d=remove server  Esc=close"))
 
-	return dialogStyle.Width(width - 4).Render(b.String())
+	// Slice to a cursor-following scroll window when total content
+	// exceeds the available inner rows. Pre-2026-05-09 the full
+	// content was passed to dialogStyle.Render unconditionally, and
+	// when it overflowed the terminal height bubbletea's standard
+	// renderer dropped lines from the TOP of the buffer
+	// (standard_renderer.go:186-188) — the dialog's top border, the
+	// "Settings" header, and the first few items were silently
+	// truncated. Now we slice ourselves so the dialog chrome stays
+	// intact and the cursor-highlighted row stays visible. Same
+	// pattern the help panel uses for its scroll, just driven by
+	// cursor position instead of independent scroll state since
+	// settings already has cursor-based item selection.
+	//
+	// Inner rows budget = height - 4. The 4 = 1 row top border +
+	// 1 row top vertical padding (from dialogStyle's Padding(1, 2))
+	// + 1 row bottom padding + 1 row bottom border. If
+	// dialogStyle's Padding ever changes, update this constant in
+	// lockstep.
+	full := b.String()
+	lines := strings.Split(full, "\n")
+	innerRows := height - 4
+	if innerRows < 1 {
+		innerRows = 1
+	}
+	if len(lines) > innerRows {
+		// Cursor's rendered row = 2 (header + blank) + s.cursor.
+		// Each items[i] produces exactly one line in the loop above
+		// (blanks are rendered as "\n", real items as their content
+		// + "\n"), so the index-to-line mapping is direct.
+		cursorRow := 2 + s.cursor
+		// Center the cursor in the window where possible. Clamps at
+		// both ends so the first visible row is in [0, len-innerRows].
+		scroll := cursorRow - innerRows/2
+		if scroll < 0 {
+			scroll = 0
+		}
+		maxScroll := len(lines) - innerRows
+		if scroll > maxScroll {
+			scroll = maxScroll
+		}
+		if scroll < 0 {
+			scroll = 0
+		}
+		end := scroll + innerRows
+		if end > len(lines) {
+			end = len(lines)
+		}
+		lines = lines[scroll:end]
+	}
+	visible := strings.Join(lines, "\n")
+
+	out := dialogStyle.Width(width - 4).Render(visible)
+
+	// Append the kitty graphics-protocol delete escape so any
+	// rasterm-rendered preview placement is removed when this
+	// dialog is the rendered frame.
+	//
+	// Why this lives here, not in App.View: the settings dialog's
+	// body is uniquely tall (active server + profile + storage +
+	// keys + every configured server + device + account sections —
+	// routinely 30+ lines on a typical 24-row terminal). When the
+	// total render exceeds the terminal height, bubbletea's
+	// standard renderer drops lines from the TOP of the buffer
+	// (standard_renderer.go: `if r.height > 0 && len(newLines) > r.height`).
+	// A kitty escape prepended at the App.View layer therefore
+	// gets truncated away before reaching the terminal, and the
+	// rasterm image visibly persists behind the dialog. Appending
+	// to the dialog's own output puts the escape in the tail of
+	// the rendered string — which bubbletea keeps when truncating
+	// — so the terminal actually receives it.
+	//
+	// Kitty's `a=d,d=I,i=<id>` is idempotent (no-op if the image
+	// is already gone), so re-emitting on every settings render
+	// is harmless. Gated on rastermCapable to avoid emitting
+	// stray bytes to non-rasterm terminals (where the escape
+	// would be silently dropped as an unknown DCS sequence
+	// anyway, but cleaner to skip).
+	if rastermCapable() {
+		out += rastermDeleteEscape()
+	}
+	return out
 }
 
 func formatBytes(b int64) string {

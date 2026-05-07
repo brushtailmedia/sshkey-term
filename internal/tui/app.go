@@ -641,6 +641,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// not persist between events.
 	a.syncMessageViewportState()
 
+	// Consume the previous frame's pendingRastermClear flag, if any.
+	// View is value-receiver — it can read the flag and prepend the
+	// kitty delete escape to its output but can't persist a clear of
+	// the flag. Update is the place where mutations stick (returned
+	// model becomes the new persistent state). Clearing here means
+	// the previous frame's View, if it saw the flag, has already
+	// emitted the escape; this frame's View must not re-emit, and any
+	// fresh transition detected later in this Update (via the
+	// SetPreviewImagePath call below) sets a new flag for THIS
+	// frame's View to consume.
+	a.sidebar.pendingRastermClear = false
+
 	model, cmd := a.updateInner(msg)
 	if app, ok := model.(App); ok {
 		app.syncMessageViewportState()
@@ -5626,6 +5638,26 @@ const (
 )
 
 func (a App) View() string {
+	body := a.viewBody()
+	// Prepend the kitty graphics-protocol delete escape if the
+	// previous Update queued one (sidebar.pendingRastermClear set by
+	// SetPreviewImagePath when the preview transitioned away from
+	// rasterm). Owned at this layer rather than in sidebar.View
+	// because full-screen modals (settings, infoPanel, addServer,
+	// search, etc.) early-return the modal's view directly without
+	// ever calling sidebar.View — so an escape queued here would be
+	// lost, and the rasterm placement would persist in the kitty
+	// graphics layer behind the modal text. Hoisting the emit to
+	// App.View covers every render path. Update clears the flag at
+	// the start of the next event so the emission happens exactly
+	// once per transition.
+	if a.sidebar.pendingRastermClear {
+		return rastermDeleteEscape() + body
+	}
+	return body
+}
+
+func (a App) viewBody() string {
 	if a.width == 0 || a.height == 0 {
 		return "Loading..."
 	}

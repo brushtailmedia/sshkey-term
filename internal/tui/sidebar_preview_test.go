@@ -252,34 +252,77 @@ func TestApp_ComputePreviewPath_PreservedOnFocusShiftToInput(t *testing.T) {
 	a.help.Toggle() // close
 }
 
-// TestSidebarView_PrependsRastermClearEscape verifies that View()
-// emits the kitty delete escape when pendingRastermClear is set, AND
-// resets the flag so subsequent renders don't repeat the escape.
-func TestSidebarView_PrependsRastermClearEscape(t *testing.T) {
+// TestAppView_PrependsRastermClearEscape verifies that App.View
+// emits the kitty delete escape when sidebar.pendingRastermClear is
+// set, regardless of which render path App takes.
+//
+// Pre-2026-05-08, the consume-and-emit lived inside sidebar.View().
+// That worked for normal-render frames but broke when a full-screen
+// modal (settings, infoPanel, addServer, etc.) early-returned the
+// modal's view at the top of App.View — sidebar.View was never
+// called, so the queued escape was never emitted, and the rasterm
+// placement persisted in the kitty graphics layer behind the modal
+// text. Hoisting the emit to App.View covers every render path.
+//
+// The escape stays in the rendered output for the frame that has
+// the flag set; Update clears the flag at the start of the next
+// event so View doesn't re-emit on subsequent frames.
+func TestAppView_PrependsRastermClearEscape(t *testing.T) {
 	withRastermProtocol(t, rastermKitty)
 
-	s := NewSidebar()
-	s.SetRooms([]string{"general"})
-	s.SetPreviewImagePath("/img.png")
-	s.SetPreviewImagePath("")
-	if !s.pendingRastermClear {
-		t.Fatal("precondition: clear should be queued")
-	}
+	a, _ := newEditAppHarness(t)
+	a.width = appMinWidth
+	a.height = appMinHeight
+	a.sidebar = NewSidebar()
+	a.sidebar.SetRooms([]string{"general"})
+	a.sidebar.pendingRastermClear = true
 
-	out := s.View(20, 30, false)
+	out := a.View()
 	if !strings.HasPrefix(out, "\x1b_Ga=d") {
-		t.Errorf("View output should start with kitty delete escape, got prefix %q",
-			truncateForLog(out, 20))
+		t.Errorf("App.View output should start with kitty delete escape when pendingRastermClear is set, got prefix %q",
+			truncateForLog(out, 32))
 	}
-	if s.pendingRastermClear {
-		t.Error("View should reset pendingRastermClear after consuming it")
-	}
+}
 
-	// Second render: no escape should be emitted (flag was cleared).
-	out2 := s.View(20, 30, false)
-	if strings.HasPrefix(out2, "\x1b_Ga=d") {
-		t.Errorf("second render after clear consumed should NOT prepend escape, got prefix %q",
-			truncateForLog(out2, 20))
+// TestAppView_DoesNotPrependEscapeWhenFlagUnset confirms the inverse
+// — when no clear is queued, App.View doesn't emit a stray escape
+// that could disrupt other rendering.
+func TestAppView_DoesNotPrependEscapeWhenFlagUnset(t *testing.T) {
+	withRastermProtocol(t, rastermKitty)
+
+	a, _ := newEditAppHarness(t)
+	a.width = appMinWidth
+	a.height = appMinHeight
+	a.sidebar = NewSidebar()
+	a.sidebar.SetRooms([]string{"general"})
+	a.sidebar.pendingRastermClear = false
+
+	out := a.View()
+	if strings.HasPrefix(out, "\x1b_Ga=d") {
+		t.Errorf("App.View should NOT prepend escape when pendingRastermClear is false, got prefix %q",
+			truncateForLog(out, 32))
+	}
+}
+
+// TestApp_UpdateClearsPendingRastermClearAtStart verifies the
+// "consume by Update" half of the contract: Update at the start of
+// the next event resets pendingRastermClear so this frame's View
+// (which already emitted the escape) doesn't re-emit on subsequent
+// frames.
+func TestApp_UpdateClearsPendingRastermClearAtStart(t *testing.T) {
+	withRastermProtocol(t, rastermKitty)
+
+	a, _ := newEditAppHarness(t)
+	a.sidebar = NewSidebar()
+	a.sidebar.pendingRastermClear = true
+
+	// A no-op msg should still trigger the clear-at-start logic via
+	// the Update wrapper.
+	model, _ := a.Update(struct{}{})
+	updated := model.(App)
+
+	if updated.sidebar.pendingRastermClear {
+		t.Error("Update should clear pendingRastermClear at start so View doesn't re-emit the escape on subsequent frames")
 	}
 }
 

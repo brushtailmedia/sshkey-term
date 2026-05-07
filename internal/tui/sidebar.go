@@ -915,12 +915,11 @@ func fitSidebarLinePreferName(prefix, name, suffix string, contentWidth int) str
 
 // View renders the sidebar.
 //
-// Pointer receiver: the rasterm-clear path needs to consume and
-// reset pendingRastermClear within the render call. A value
-// receiver would mutate a local copy and the next render would
-// re-emit the escape forever. The performance delta vs a value
-// receiver is irrelevant — the method ends up addressing the same
-// memory either way.
+// Pointer receiver kept for forward-compatibility with future
+// render-time mutations; the rasterm-clear escape is now emitted
+// at the App.View layer (since full-screen modals bypass this
+// View entirely) so this method no longer mutates the
+// pendingRastermClear flag.
 func (s *SidebarModel) View(width, height int, focused bool) string {
 	contentWidth := width - 2
 	if contentWidth < 1 {
@@ -928,18 +927,6 @@ func (s *SidebarModel) View(width, height int, focused bool) string {
 	}
 	if height < 1 {
 		height = 1
-	}
-
-	// Consume the pending kitty-clear flag (set by
-	// SetPreviewImagePath when the preview was deselected while
-	// rasterm was active). Prepend the escape to whatever the
-	// preview area produces below — terminals interpret the escape
-	// as soon as it lands in the byte stream regardless of where in
-	// the rendered string it sits, so this position is fine.
-	var rastermClear string
-	if s.pendingRastermClear {
-		rastermClear = rastermDeleteEscape()
-		s.pendingRastermClear = false
 	}
 
 	listRows, previewRows := sidebarSectionHeights(height)
@@ -1027,14 +1014,7 @@ func (s *SidebarModel) View(width, height int, focused bool) string {
 			rendered = strings.Join(rows, "\n")
 		}
 	}
-	// Prepend the kitty delete escape (when needed) BEFORE the
-	// rendered content. The terminal consumes it before drawing any
-	// of the new cells, so the previous frame's image is gone before
-	// the placeholder renders into its slot. Position-within-string
-	// doesn't matter for kitty escape interpretation, but prefix
-	// keeps the intent obvious to anyone reading the rendered output
-	// in tests / logs.
-	return rastermClear + rendered
+	return rendered
 }
 
 // teeBorderEdges replaces the first `│` with `├` and the last `│`
