@@ -5557,9 +5557,44 @@ func (a *App) anyModalVisible() bool {
 		a.statusPicker.IsVisible()
 }
 
+// appMinWidth and appMinHeight are the minimum terminal dimensions
+// at which the app is willing to render its full UI. Below these,
+// View returns a bouncer message (see renderTerminalTooSmall) instead
+// of the normal panels.
+//
+// Why a bouncer instead of "render anyway and hope":
+//
+//   - The hard-coded layout uses a 20-cell sidebar + ~5 cells of
+//     gaps/borders + a 20-cell mainWidth floor (clamped in View),
+//     totaling 45 cells of composition width. Below that, lipgloss
+//     wraps or truncates the right edge — the user sees missing
+//     borders, scroll-offs, and HitTest geometry that no longer
+//     matches what's on screen (clicks land on wrong panes).
+//
+//   - On the height axis, status (1) + input outer (5) + main outer
+//     (>= 7) = ~13 rows minimum. Below that, the bottom rows scroll
+//     off and the status bar disappears.
+//
+//   - Specific bugs are even tighter than the layout floor — e.g.
+//     `input.go`'s reply-banner truncation does
+//     `preview[:width-23]` which panics on widths under ~23.
+//
+// 80×24 is the conventional TUI minimum (vt100 default) and aligns
+// with what users expect from "this is too small." A more aggressive
+// floor (e.g. 60×20) would technically work but the rendering is
+// cramped enough that the bouncer is less surprising than the
+// half-broken UI.
+const (
+	appMinWidth  = 80
+	appMinHeight = 24
+)
+
 func (a App) View() string {
 	if a.width == 0 || a.height == 0 {
 		return "Loading..."
+	}
+	if a.width < appMinWidth || a.height < appMinHeight {
+		return renderTerminalTooSmall(a.width, a.height)
 	}
 
 	// Re-sync the member panel's internal focused-state from the
