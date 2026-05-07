@@ -72,6 +72,25 @@ func TestMemberPanel_NavigationUpDown(t *testing.T) {
 	}
 }
 
+func TestMemberPanel_SetPresenceUpdatesInPlaceWithoutResettingCursor(t *testing.T) {
+	m := buildMemberPanel("alice", "bob")
+	m.cursor = 1
+	m.members[1].Online = true
+	m.members[1].Status = StatusAvailable
+
+	m.SetPresence("bob", true, StatusAway)
+
+	if m.members[1].Status != StatusAway {
+		t.Fatalf("status = %q, want %q", m.members[1].Status, StatusAway)
+	}
+	if !m.members[1].Online {
+		t.Fatal("online should remain true for updated member")
+	}
+	if m.cursor != 1 {
+		t.Fatalf("cursor changed to %d, want 1", m.cursor)
+	}
+}
+
 func TestMemberPanel_NoopWhenUnfocused(t *testing.T) {
 	m := buildMemberPanel("alice")
 	m.focused = false

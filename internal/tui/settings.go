@@ -389,7 +389,20 @@ func (s SettingsModel) View(width, height int) string {
 		}
 
 		if i == s.cursor && item.action != "" {
-			line = completionSelectedStyle.Render(line)
+			// Match the cursor-highlight treatment used by the
+			// sidebar, member panel, and messages pane —
+			// selectedMsgStyle (dark grey bg, no fg change) is
+			// less overpowering than the purple-bg + white-fg
+			// completionSelectedStyle when the row content carries
+			// its own color cues (helpDescStyle for values, etc.).
+			// Width = inner content area: dialog width - 4 (border) -
+			// 4 (padding) = width - 8, matching the label/value
+			// padding logic above.
+			rowWidth := width - 8
+			if rowWidth < 1 {
+				rowWidth = 1
+			}
+			line = selectedMsgStyle.Width(rowWidth).Render(line)
 		}
 
 		b.WriteString(line + "\n")

@@ -404,3 +404,62 @@ func TestApp_MemberPanelMouseClick_SelectsVisualRowWithLongNames(t *testing.T) {
 		t.Fatalf("clicking bob row should select index 1, got %d", updated.memberPanel.cursor)
 	}
 }
+
+func TestApp_PresenceMessageUpdatesOpenMemberPanelStatusInPlace(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.sidebar = NewSidebar()
+	a.memberPanel = NewMemberPanel()
+	a.memberPanel.visible = true
+	a.memberPanel.focused = true
+	a.memberPanel.members = []memberPanelEntry{
+		{User: "usr_alice", DisplayName: "alice", Online: true, Status: StatusAvailable},
+		{User: "usr_bob", DisplayName: "bob", Online: true, Status: StatusAvailable},
+	}
+	a.memberPanel.cursor = 1
+
+	raw, _ := json.Marshal(protocol.Presence{
+		Type:       "presence",
+		User:       "usr_bob",
+		Status:     "online",
+		StatusText: StatusAway,
+	})
+	a.handleServerMessage(ServerMsg{Type: "presence", Raw: raw})
+
+	if a.memberPanel.members[1].Status != StatusAway {
+		t.Fatalf("member status = %q, want %q", a.memberPanel.members[1].Status, StatusAway)
+	}
+	if !a.memberPanel.members[1].Online {
+		t.Fatal("member online should be true after online presence event")
+	}
+	if a.memberPanel.cursor != 1 {
+		t.Fatalf("cursor changed to %d, want 1", a.memberPanel.cursor)
+	}
+}
+
+func TestApp_SetStatusCommandUpdatesOpenMemberPanelOptimistically(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.sidebar = NewSidebar()
+	a.memberPanel = NewMemberPanel()
+	a.memberPanel.visible = true
+	a.memberPanel.members = []memberPanelEntry{
+		{User: "usr_alice", DisplayName: "alice", Online: true, Status: StatusAvailable},
+	}
+
+	var out bytes.Buffer
+	client.SetEncoderForTesting(a.client, protocol.NewEncoder(&out))
+
+	a.handleSlashCommand(&SlashCommandMsg{
+		Command: "/setstatus",
+		Arg:     "away",
+	})
+
+	if a.memberPanel.members[0].Status != StatusAway {
+		t.Fatalf("member status = %q, want %q", a.memberPanel.members[0].Status, StatusAway)
+	}
+	if !a.memberPanel.members[0].Online {
+		t.Fatal("self should remain online in optimistic member-panel update")
+	}
+	if a.statusBar.errorMsg != "Status set to away" {
+		t.Fatalf("status bar = %q, want %q", a.statusBar.errorMsg, "Status set to away")
+	}
+}

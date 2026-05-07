@@ -25,11 +25,6 @@ var (
 				Bold(true).
 				Foreground(lipgloss.Color("#64748B"))
 
-	selectedStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("#7C3AED")).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Bold(true)
-
 	unreadStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#7C3AED")).
 			Bold(true)
@@ -50,15 +45,10 @@ var (
 	archivedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#475569")).Faint(true)
 
 	// Preview-pane placeholder styles. Used by buildPreviewPlaceholder
-	// when no image is selected: a small frame around the
-	// "sshkey-term" title in the same slate color as the status-bar
-	// "E2E encrypted" text, with a white "no image selected" label
-	// below. Frame color tracks the sidebar's focus state to mirror
-	// the outer-border behaviour — purple when the sidebar is the
-	// active panel (matches sidebarFocusedStyle's #7C3AED), slate
-	// otherwise (matches sidebarStyle's #64748B).
+	// when no image is selected.
 	previewFrameStyleFocused   = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED"))
 	previewFrameStyleUnfocused = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B"))
+	previewBadgeBorderStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B"))
 	previewTitleStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B"))
 	previewLabelStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
 
@@ -101,10 +91,10 @@ type SidebarModel struct {
 	online          map[string]bool   // user -> online
 	status          map[string]string // user -> StatusAvailable|StatusAway|StatusBusy ("" = available default)
 	retired         map[string]bool   // user -> retired
-	leftGroups      map[string]bool // group ID -> user has left (archived, read-only)
-	leftRooms       map[string]bool // room ID -> user has left (archived, read-only)
-	retiredRooms    map[string]bool // room ID -> room was retired by an admin (archived, read-only)
-	cursor          int             // position in the combined list
+	leftGroups      map[string]bool   // group ID -> user has left (archived, read-only)
+	leftRooms       map[string]bool   // room ID -> user has left (archived, read-only)
+	retiredRooms    map[string]bool   // room ID -> room was retired by an admin (archived, read-only)
+	cursor          int               // position in the combined list
 	selectedRoom    string
 	selectedGroup   string
 	selectedDM      string
@@ -604,7 +594,7 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 		// feedback). Active highlight persists when focus moves
 		// elsewhere so the user can see which room they're in.
 		if room == s.activeRoom || (i == s.cursor && focused) {
-			line = selectedStyle.Width(contentWidth).Render(line)
+			line = selectedMsgStyle.Width(contentWidth).Render(line)
 		}
 		add(line, i)
 	}
@@ -674,7 +664,7 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 		// Active or cursor-under-focus → highlight (see rooms loop
 		// for full rationale).
 		if g.ID == s.activeGroup || (idx == s.cursor && focused) {
-			line = selectedStyle.Width(contentWidth).Render(line)
+			line = selectedMsgStyle.Width(contentWidth).Render(line)
 		}
 		add(line, idx)
 	}
@@ -722,7 +712,7 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 			// Active or cursor-under-focus → highlight (see rooms
 			// loop for full rationale).
 			if dm.ID == s.activeDM || (idx == s.cursor && focused) {
-				line = selectedStyle.Width(contentWidth).Render(line)
+				line = selectedMsgStyle.Width(contentWidth).Render(line)
 			}
 			add(line, idx)
 		}
@@ -1075,17 +1065,15 @@ func buildPreviewImageRows(imgPath string, width, rows int) []string {
 // is exactly `rows` (typically previewRows-1, the area below the
 // divider).
 //
-// Layout: a small purple-bordered frame containing the "sshkey-term"
+// Layout: a small slate-bordered frame containing the "sshkey-term"
 // title in slate, with a white "no image selected" label below it.
 // Both centered horizontally within the given width. Frame is 15
 // cells wide, label is 17 cells; if the sidebar is narrower than
 // either, that element is omitted gracefully.
 //
-// Frame is always purple regardless of sidebar focus state — it's a
-// brand mark, not chrome, so it doesn't dim when the sidebar isn't
-// active. The list/preview divider above (rendered in the View
-// function, not here) DOES follow focus state to remain visually
-// continuous with the outer panel border.
+// Frame uses a slate border. The list/preview divider above (rendered
+// in the View function, not here) still follows focus state to remain
+// visually continuous with the outer panel border.
 //
 // Layout positioning (in a typical 12-row preview area):
 //
@@ -1110,21 +1098,17 @@ func buildPreviewPlaceholder(width, rows int) []string {
 	const frameWidth = 15
 	const labelWidth = 17
 
-	// Frame rows (3 rows). Skip if width too narrow. Frame is always
-	// purple regardless of focus state — the title surround is its
-	// own visual element, not part of the panel border, so it doesn't
-	// need to dim with the rest of the chrome when the sidebar isn't
-	// active.
+	// Frame rows (3 rows). Skip if width too narrow. Border stays slate.
 	var frameTop, frameMid, frameBot string
 	if width >= frameWidth {
 		framePad := (width - frameWidth) / 2
 		pad := strings.Repeat(" ", framePad)
-		frameTop = pad + previewFrameStyleFocused.Render("╭─────────────╮")
+		frameTop = pad + previewBadgeBorderStyle.Render("╭─────────────╮")
 		frameMid = pad +
-			previewFrameStyleFocused.Render("│") + " " +
+			previewBadgeBorderStyle.Render("│") + " " +
 			previewTitleStyle.Render("sshkey-term") + " " +
-			previewFrameStyleFocused.Render("│")
-		frameBot = pad + previewFrameStyleFocused.Render("╰─────────────╯")
+			previewBadgeBorderStyle.Render("│")
+		frameBot = pad + previewBadgeBorderStyle.Render("╰─────────────╯")
 	}
 
 	// Label row (1 row). Skip if width too narrow.

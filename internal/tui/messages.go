@@ -1706,10 +1706,37 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 			// messages align consistently.
 			body := bodyWithGutter(highlightLinks(highlightMentions(msg.Body, m.currentUser)))
 
-			// Check if this message mentions the current user (mentions are nanoids)
+			// Show the purple ▐ left bar whenever the message body
+			// contains an @mention token, regardless of whether the
+			// CURRENT user is in msg.Mentions. The data-driven check
+			// (`msg.Mentions` populated by the sender's
+			// ExtractMentions) is dependent on the sender having the
+			// member list cached at send time, which can race during
+			// session start; falling back to a body-text scan catches
+			// the common cases where the cache wasn't warm yet.
+			//
+			// Match rule: an `@` at start-of-string or following
+			// whitespace, immediately followed by an alphanumeric
+			// character. Avoids false positives on email addresses
+			// (`a@b.com` — `@` not at a word boundary) and trailing
+			// `@` with no name.
 			isMentioned := false
-			for _, mention := range msg.Mentions {
-				if mention == m.currentUserID {
+			rawBody := msg.Body
+			for j := 0; j < len(rawBody); j++ {
+				if rawBody[j] != '@' {
+					continue
+				}
+				if j > 0 {
+					prev := rawBody[j-1]
+					if prev != ' ' && prev != '\n' && prev != '\t' {
+						continue
+					}
+				}
+				if j+1 >= len(rawBody) {
+					continue
+				}
+				c := rawBody[j+1]
+				if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
 					isMentioned = true
 					break
 				}

@@ -11,7 +11,7 @@ func TestQuitConfirm_NoPendingSends_NoWarning(t *testing.T) {
 	var q QuitConfirmModel
 	q.ShowWithPending("server_a", 0)
 
-	view := q.View(80)
+	view := q.View()
 	if strings.Contains(view, "still sending") {
 		t.Errorf("warning shown when pendingSend=0: %q", view)
 	}
@@ -24,7 +24,7 @@ func TestQuitConfirm_SinglePending_SingularNoun(t *testing.T) {
 	var q QuitConfirmModel
 	q.ShowWithPending("server_a", 1)
 
-	view := q.View(80)
+	view := q.View()
 	if !strings.Contains(view, "1 message still sending") {
 		t.Errorf("expected singular 'message' for N=1, got: %q", view)
 	}
@@ -34,7 +34,7 @@ func TestQuitConfirm_MultiplePending_PluralNoun(t *testing.T) {
 	var q QuitConfirmModel
 	q.ShowWithPending("server_a", 3)
 
-	view := q.View(80)
+	view := q.View()
 	if !strings.Contains(view, "3 messages still sending") {
 		t.Errorf("expected plural 'messages' for N=3, got: %q", view)
 	}
@@ -44,7 +44,7 @@ func TestQuitConfirm_LargeCount_RendersDecimal(t *testing.T) {
 	var q QuitConfirmModel
 	q.ShowWithPending("server_a", 128)
 
-	view := q.View(80)
+	view := q.View()
 	if !strings.Contains(view, "128 messages") {
 		t.Errorf("large count not rendered correctly: %q", view)
 	}
@@ -60,7 +60,7 @@ func TestQuitConfirm_Hide(t *testing.T) {
 	if q.IsVisible() {
 		t.Error("should be hidden after Hide")
 	}
-	if view := q.View(80); view != "" {
+	if view := q.View(); view != "" {
 		t.Errorf("hidden dialog rendered non-empty: %q", view)
 	}
 }

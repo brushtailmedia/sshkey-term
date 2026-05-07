@@ -46,7 +46,12 @@ func (q QuitConfirmModel) Update(msg tea.KeyMsg) (QuitConfirmModel, tea.Cmd) {
 	return q, nil
 }
 
-func (q QuitConfirmModel) View(width int) string {
+// View renders the dialog as an auto-sized compact overlay — caller
+// (app.View) splices it onto the existing screen via overlay() at a
+// centered position rather than replacing the screen. Width()-bound
+// rendering would force a near-full-screen modal that felt heavy
+// for a yes/no prompt.
+func (q QuitConfirmModel) View() string {
 	if !q.visible {
 		return ""
 	}
@@ -69,9 +74,9 @@ func (q QuitConfirmModel) View(width int) string {
 		b.WriteString(errorStyle.Render("  ⚠ " + fmtInt(q.pendingSend) + " " + noun + " still sending — quit will lose them."))
 		b.WriteString("\n")
 	}
-	b.WriteString("\n  [y] Quit  [n] Cancel\n")
+	b.WriteString("\n  [y] Quit  [n] Cancel")
 
-	return dialogStyle.Width(width - 4).Render(b.String())
+	return dialogStyle.Render(b.String())
 }
 
 // fmtInt is a tiny helper — strconv.Itoa without importing strconv.

@@ -151,6 +151,19 @@ func (m *MemberPanelModel) SetRoomMembers(members []string, c *client.Client, on
 	}
 }
 
+// SetPresence applies a presence/status update in-place to any visible member
+// rows for the given user. Unlike Refresh, this preserves cursor position and
+// avoids rebuilding the whole panel.
+func (m *MemberPanelModel) SetPresence(user string, online bool, status string) {
+	for i := range m.members {
+		if m.members[i].User != user {
+			continue
+		}
+		m.members[i].Online = online
+		m.members[i].Status = status
+	}
+}
+
 // SelectedUser returns the currently selected member's username.
 func (m *MemberPanelModel) SelectedUser() string {
 	if m.cursor >= 0 && m.cursor < len(m.members) {
@@ -245,9 +258,14 @@ func (m MemberPanelModel) View(width, height int) string {
 		line = ansi.Truncate(line, contentWidth, "")
 
 		if i == m.cursor && m.focused {
-			// Selected rows are padded/highlighted to full width; truncation above
-			// guarantees this render path remains single-line.
-			line = selectedStyle.Width(contentWidth).Render(line)
+			// Selected rows are padded/highlighted to full width;
+			// truncation above guarantees this render path remains
+			// single-line. Uses selectedMsgStyle (dark grey bg) for
+			// a uniform cursor-highlight treatment across the
+			// sidebar, member panel, and messages pane — a heavy
+			// purple-bg + white-fg highlight overpowered the
+			// colored presence dots and verified/retired markers.
+			line = selectedMsgStyle.Width(contentWidth).Render(line)
 		}
 
 		b.WriteString(line + "\n")

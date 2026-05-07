@@ -12,9 +12,18 @@ var (
 			BorderForeground(lipgloss.Color("#7C3AED")).
 			Padding(0, 1)
 
+	// Selection highlight used by every popup / modal / overlay that
+	// shows a "currently-cursored" row: tab-completion popup, member
+	// menu, context menu, status picker, emoji picker, member overlay,
+	// info panel member listings, etc. Dark grey background (no fg
+	// change) matches the messages-pane and sidebar/member-panel
+	// cursor highlight — uniform "this is the selected item"
+	// vocabulary across every UI surface. Was purple bg + white fg;
+	// the heavier purple competed with row-content colors (presence
+	// dots, verified ✓, status emoji, etc.) and felt out of step
+	// with the messages pane's subtler highlight.
 	completionSelectedStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color("#7C3AED")).
-				Foreground(lipgloss.Color("#FFFFFF"))
+				Background(lipgloss.Color("#1E1E2E"))
 
 	completionDescStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#64748B"))

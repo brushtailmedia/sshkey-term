@@ -5,13 +5,34 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
+// pinnedSelectedStyle keeps the louder purple-bg + white-fg
+// highlight for the pinned-bar cursor row. The general selection
+// highlight (completionSelectedStyle) was muted to a subtle dark
+// grey to match the messages pane, but the pinned bar is a small
+// transient overlay where the louder accent helps the eye land on
+// the cursor row faster — same rationale that originally motivated
+// the purple style.
+var pinnedSelectedStyle = lipgloss.NewStyle().
+	Background(lipgloss.Color("#7C3AED")).
+	Foreground(lipgloss.Color("#FFFFFF"))
+
 // PinnedMessage holds a pin with preview info.
+//
+// FromID stores the raw nanoid sender (never changes after pin
+// creation); the rendered display name is resolved at View time
+// via PinnedBarModel.resolveName so a profile arriving AFTER the
+// pin was created still updates the visible name. Without that,
+// pins created with a cold profile cache would freeze the
+// fallback nanoid into From and only refresh on context switch
+// (when SetPins runs against a freshly-resolved messages list).
 type PinnedMessage struct {
-	ID   string
-	From string
-	Body string // truncated body for the preview line (≤ 60 chars)
+	ID     string
+	From   string // resolved display name at SetPins/AddPin time — fallback only; View prefers resolveName(FromID)
+	FromID string // raw nanoid for live re-resolution at render time
+	Body   string // truncated body for the preview line (≤ 60 chars)
 }
 
 // PinnedJumpMsg is emitted when the user presses Enter (or clicks) on
@@ -29,6 +50,18 @@ type PinnedBarModel struct {
 	pins     []PinnedMessage
 	room     string
 	cursor   int
+
+	// resolveName maps a sender nanoid → human display name,
+	// re-resolved at render time so a pin created with a cold
+	// profile cache picks up the display name once the profile
+	// arrives. App wires this from client.DisplayName.
+	resolveName func(string) string
+}
+
+// SetResolveName wires the nanoid → display name lookup. Called
+// once during App init.
+func (p *PinnedBarModel) SetResolveName(fn func(string) string) {
+	p.resolveName = fn
 }
 
 func (p *PinnedBarModel) SetPins(room string, pinIDs []string, messages []DisplayMessage) {
@@ -46,6 +79,7 @@ func (p *PinnedBarModel) SetPins(room string, pinIDs []string, messages []Displa
 		pin := PinnedMessage{ID: id, From: "unknown", Body: "(not loaded)"}
 		if msg, ok := msgMap[id]; ok {
 			pin.From = msg.From
+			pin.FromID = msg.FromID
 			pin.Body = msg.Body
 			if len(pin.Body) > 60 {
 				pin.Body = pin.Body[:57] + "..."
@@ -68,6 +102,7 @@ func (p *PinnedBarModel) AddPin(id string, messages []DisplayMessage) {
 	for _, msg := range messages {
 		if msg.ID == id {
 			pin.From = msg.From
+			pin.FromID = msg.FromID
 			pin.Body = msg.Body
 			if len(pin.Body) > 60 {
 				pin.Body = pin.Body[:57] + "..."
@@ -184,12 +219,23 @@ func (p PinnedBarModel) View(width int) string {
 	b.WriteString("\n")
 
 	for i, pin := range p.pins {
-		line := fmt.Sprintf(" 📌 %s: %s", usernameStyle.Render(pin.From), pin.Body)
+		// Resolve display name at render time — pin.From was a
+		// snapshot taken when the message was first received,
+		// which may have used the nanoid fallback if the profile
+		// cache was cold then. resolveName(FromID) reflects the
+		// current profile state.
+		from := pin.From
+		if p.resolveName != nil && pin.FromID != "" {
+			if resolved := p.resolveName(pin.FromID); resolved != "" {
+				from = resolved
+			}
+		}
+		line := fmt.Sprintf(" 📌 %s: %s", usernameStyle.Render(from), pin.Body)
 		if len(line) > width-4 {
 			line = line[:width-7] + "..."
 		}
 		if i == p.cursor {
-			line = completionSelectedStyle.Render(line)
+			line = pinnedSelectedStyle.Render(line)
 		}
 		b.WriteString(line + "\n")
 	}

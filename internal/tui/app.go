@@ -12,6 +12,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
@@ -1318,7 +1319,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Type: "set_status",
 				Text: msg.Status,
 			})
-			a.sidebar.SetStatus(a.client.UserID(), msg.Status)
+			self := a.client.UserID()
+			a.sidebar.SetStatus(self, msg.Status)
+			online, ok := a.sidebar.online[self]
+			if !ok {
+				online = true
+			}
+			a.memberPanel.SetPresence(self, online, msg.Status)
 			a.statusBar.SetError("Status set to " + msg.Status)
 		}
 		return a, nil
@@ -1344,7 +1351,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
-case SettingsActionMsg:
+	case SettingsActionMsg:
 		switch msg.Action {
 		case "clear_history":
 			if a.client != nil && a.appConfig != nil && msg.ServerIdx < len(a.appConfig.Servers) {
@@ -2184,6 +2191,7 @@ case SettingsActionMsg:
 		// Populate sidebar and messages
 		a.sidebar.SetRooms(a.client.Rooms())
 		a.messages.resolveName = a.client.DisplayName
+		a.pinnedBar.SetResolveName(a.client.DisplayName)
 		a.messages.resolveRoomName = a.client.DisplayRoomName
 		a.messages.resolveGroupName = a.client.DisplayGroupName
 		a.messages.resolveDMName = a.client.DisplayDMName
@@ -3460,7 +3468,13 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			Type: "set_status",
 			Text: arg,
 		})
-		a.sidebar.SetStatus(a.client.UserID(), arg)
+		self := a.client.UserID()
+		a.sidebar.SetStatus(self, arg)
+		online, ok := a.sidebar.online[self]
+		if !ok {
+			online = true
+		}
+		a.memberPanel.SetPresence(self, online, arg)
 		a.statusBar.SetError("Status set to " + arg)
 	case "/help", "/?":
 		// Phase 14: context-aware /help — show admin commands only
@@ -4368,12 +4382,14 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	case "presence":
 		var m protocol.Presence
 		json.Unmarshal(msg.Raw, &m)
-		a.sidebar.SetOnline(m.User, m.Status == "online")
+		online := m.Status == "online"
+		a.sidebar.SetOnline(m.User, online)
 		// StatusText carries the locked-set status (available / away /
 		// busy) when the user has set one via /setstatus. Empty
 		// resets to the default (Available). Stored separately from
 		// online so the dot color can combine both signals.
 		a.sidebar.SetStatus(m.User, m.StatusText)
+		a.memberPanel.SetPresence(m.User, online, m.StatusText)
 	case "unread":
 		var m protocol.Unread
 		json.Unmarshal(msg.Raw, &m)
@@ -5456,7 +5472,28 @@ func (a App) View() string {
 		return a.keyWarning.View(a.width)
 	}
 	if a.quitConfirm.IsVisible() {
-		return a.quitConfirm.View(a.width)
+		// Centered overlay — splice onto the current screen instead
+		// of replacing it, so the underlying messages/sidebar stay
+		// visible behind the dialog. Compact yes/no prompt feels
+		// out of place as a near-full-screen modal.
+		dialog := a.quitConfirm.View()
+		dialogLines := strings.Split(strings.TrimRight(dialog, "\n"), "\n")
+		dialogH := len(dialogLines)
+		dialogW := 0
+		for _, dl := range dialogLines {
+			if w := ansi.StringWidth(dl); w > dialogW {
+				dialogW = w
+			}
+		}
+		col := (a.width - dialogW) / 2
+		row := (a.height - dialogH) / 2
+		if col < 0 {
+			col = 0
+		}
+		if row < 0 {
+			row = 0
+		}
+		return overlay(screen, dialog, col, row, a.width, a.height)
 	}
 	if a.retireConfirm.IsVisible() {
 		return a.retireConfirm.View(a.width)
