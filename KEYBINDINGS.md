@@ -15,17 +15,28 @@
 | `Enter` | `Enter` | Send message |
 | `Esc` | `Esc` | Close panel / cancel / back to input |
 | `Tab` | `Tab` | Cycle focus: Input → Sidebar → Messages → Members → Input |
-| `Ctrl+K` | `Cmd+K` | Quick switch (fuzzy room/DM picker) |
-| `Ctrl+N` | `Cmd+N` | New conversation (DM or group DM) |
-| `Ctrl+M` | `Cmd+M` | Toggle member panel |
+| `Ctrl+g` | `Cmd+g` | Enter navigation prefix mode |
 | `Ctrl+P` | `Cmd+P` | Toggle pinned messages |
-| `Ctrl+I` | `Cmd+I` | Room/group info panel |
-| `Ctrl+,` | `Cmd+,` | Settings |
-| `Ctrl+F` | `Cmd+F` | Search |
-| `Ctrl+1-9` | `Cmd+1-9` | Switch server tab |
 | `Ctrl+Q` | `Cmd+Q` | Quit (confirmation dialog) |
 | `Ctrl+C` | `Ctrl+C` | Force quit (alternative to Ctrl+Q) |
 | `?` | `?` | Open help screen (when not in input) |
+
+### Navigation Prefix Mode (`Ctrl+g`)
+
+Press `Ctrl+g`, then one of:
+
+| Key | Action |
+|---|---|
+| `k` | Quick switch |
+| `n` | New conversation (DM or group DM) |
+| `m` | Toggle member panel |
+| `i` | Room/group/DM info panel |
+| `s` | Settings |
+| `/` | Search |
+| `1`-`9` | Switch server tab |
+| `g` or `Esc` | Cancel nav mode |
+
+Default timeout is `2000ms`. Set `[navigation] nav_mode_timeout_ms = 0` to disable auto-exit.
 
 ### Navigation
 
@@ -210,18 +221,18 @@ Custom keybindings via `~/.sshkey-term/keybindings.toml`. Only uncommented lines
 
 # [global]
 # quit = "ctrl+q"
-# quick_switch = "ctrl+k"
-# new_conversation = "ctrl+n"
-# member_panel = "ctrl+m"
+# quick_switch = "ctrl+g k"
+# new_group = "ctrl+g n"
 # pinned_messages = "ctrl+p"
-# info_panel = "ctrl+i"
-# settings = "ctrl+,"
+# settings = "ctrl+g s"
+# search = "ctrl+g /"
 
 # [navigation]
 # prev_room = "alt+up"
 # next_room = "alt+down"
 # scroll_up = "pageup"
 # scroll_down = "pagedown"
+# nav_mode_timeout_ms = 2000
 
 # [message]
 # reply = "r"

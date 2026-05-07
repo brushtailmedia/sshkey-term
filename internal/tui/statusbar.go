@@ -11,19 +11,19 @@ import (
 
 var (
 	statusBarStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#64748B"))
+			Foreground(lipgloss.Color("#64748B"))
 
 	statusConnected = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#22C55E")).Render("●")
+			Foreground(lipgloss.Color("#22C55E")).Render("●")
 
 	statusReconnecting = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#F59E0B")).Render("●")
+				Foreground(lipgloss.Color("#F59E0B")).Render("●")
 
 	statusDisconnected = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#EF4444")).Render("●")
+				Foreground(lipgloss.Color("#EF4444")).Render("●")
 
 	errorStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#F59E0B"))
+			Foreground(lipgloss.Color("#F59E0B"))
 
 	// Phase 16 Gap 4 live strength hint palette (Phase 18 doc sync
 	// note: used by wizard.go and addserver.go for the one-line
@@ -33,11 +33,11 @@ var (
 	//     press-Enter-again confirmation on submit
 	//   - strengthHintPassStyle: green dim — passes silently
 	strengthHintBlockStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#EF4444"))
+				Foreground(lipgloss.Color("#EF4444"))
 	strengthHintWarnStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#F59E0B"))
+				Foreground(lipgloss.Color("#F59E0B"))
 	strengthHintPassStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#22C55E"))
+				Foreground(lipgloss.Color("#22C55E"))
 )
 
 // renderStrengthHint formats a keygen.LiveHint for display under a
@@ -59,13 +59,14 @@ func renderStrengthHint(h keygen.LiveHint) string {
 
 // StatusBarModel manages the bottom status bar.
 type StatusBarModel struct {
-	username      string
-	admin         bool
-	hasPending    bool
-	connected     bool
-	reconnecting  bool
-	reconnAttempt int
-	errorMsg      string
+	username       string
+	admin          bool
+	hasPending     bool
+	connected      bool
+	navigationMode bool
+	reconnecting   bool
+	reconnAttempt  int
+	errorMsg       string
 
 	// refreshingUntil (Phase 17c Step 6) holds the earliest time at
 	// which the "refreshing…" keypress-ack indicator may disappear.
@@ -94,6 +95,10 @@ func (s *StatusBarModel) SetConnected(connected bool) {
 	if connected {
 		s.reconnecting = false
 	}
+}
+
+func (s *StatusBarModel) SetNavigationMode(active bool) {
+	s.navigationMode = active
 }
 
 func (s *StatusBarModel) SetReconnecting(attempt int, nextRetry time.Duration) {
@@ -173,14 +178,17 @@ func (s StatusBarModel) View(width int) string {
 				right += " " + statusReconnecting + statusBarStyle.Render(" pending")
 			}
 		}
-		right = statusBarStyle.Render(right + " ") + statusConnected
+		right = statusBarStyle.Render(right+" ") + statusConnected
 	}
 
 	// Error (persists until next user action clears it)
-	// OR refreshing indicator (takes precedence over refreshing — an
-	// error is the more important signal when both are true).
+	// OR refreshing indicator. Navigation mode takes precedence so the
+	// user always gets immediate feedback that the Ctrl+g prefix was
+	// accepted.
 	mid := ""
-	if s.errorMsg != "" {
+	if s.navigationMode {
+		mid = statusBarStyle.Render("  navigation mode")
+	} else if s.errorMsg != "" {
 		mid = errorStyle.Render("  ⚠ " + s.errorMsg)
 	} else if time.Now().Before(s.refreshingUntil) {
 		// Phase 17c Step 6: keypress-ack indicator. Minimum 200ms

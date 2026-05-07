@@ -287,7 +287,7 @@ The TUI has four focus states defined in `internal/tui/app.go`:
 FocusInput (0) → FocusSidebar (1) → FocusMessages (2) → FocusMembers (3) → FocusInput
 ```
 
-**Tab** cycles through them. `FocusMembers` is skipped if the member panel is not visible (Ctrl+M toggles it). **Esc** always returns to `FocusInput` and dismisses any open modal.
+**Tab** cycles through them. `FocusMembers` is skipped if the member panel is not visible (`Ctrl+g m` toggles it). **Esc** always returns to `FocusInput` and dismisses any open modal.
 
 Each focus state determines which key bindings are active:
 - `FocusInput` — text entry, slash command parsing, @mention tab completion

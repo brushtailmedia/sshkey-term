@@ -19,26 +19,25 @@ type GlobalKeys struct {
 	Quit           string `toml:"quit"`
 	QuickSwitch    string `toml:"quick_switch"`
 	NewGroup       string `toml:"new_group"`
-	MemberPanel    string `toml:"member_panel"`
 	PinnedMessages string `toml:"pinned_messages"`
-	InfoPanel      string `toml:"info_panel"`
 	Settings       string `toml:"settings"`
 	Search         string `toml:"search"`
 	CommandMode    string `toml:"command_mode"`
 }
 
 type NavigationKeys struct {
-	PrevRoom   string `toml:"prev_room"`
-	NextRoom   string `toml:"next_room"`
-	Focus      string `toml:"sidebar_focus"`
-	ScrollUp   string `toml:"scroll_up"`
-	ScrollDown string `toml:"scroll_down"`
-	JumpTop    string `toml:"jump_top"`
-	JumpBottom string `toml:"jump_bottom"`
-	Up         string `toml:"up"`
-	Down       string `toml:"down"`
-	VimUp      string `toml:"vim_up"`
-	VimDown    string `toml:"vim_down"`
+	PrevRoom         string `toml:"prev_room"`
+	NextRoom         string `toml:"next_room"`
+	Focus            string `toml:"sidebar_focus"`
+	ScrollUp         string `toml:"scroll_up"`
+	ScrollDown       string `toml:"scroll_down"`
+	JumpTop          string `toml:"jump_top"`
+	JumpBottom       string `toml:"jump_bottom"`
+	Up               string `toml:"up"`
+	Down             string `toml:"down"`
+	VimUp            string `toml:"vim_up"`
+	VimDown          string `toml:"vim_down"`
+	NavModeTimeoutMs int    `toml:"nav_mode_timeout_ms"`
 }
 
 type MessageKeys struct {
@@ -60,27 +59,26 @@ func DefaultKeybindings() Keybindings {
 	return Keybindings{
 		Global: GlobalKeys{
 			Quit:           "ctrl+q",
-			QuickSwitch:    "ctrl+k",
-			NewGroup:       "ctrl+n",
-			MemberPanel:    "ctrl+m",
+			QuickSwitch:    "ctrl+g k",
+			NewGroup:       "ctrl+g n",
 			PinnedMessages: "ctrl+p",
-			InfoPanel:      "ctrl+i",
-			Settings:       "ctrl+,",
-			Search:         "ctrl+f",
+			Settings:       "ctrl+g s",
+			Search:         "ctrl+g /",
 			CommandMode:    "/",
 		},
 		Navigation: NavigationKeys{
-			PrevRoom:   "alt+up",
-			NextRoom:   "alt+down",
-			Focus:      "tab",
-			ScrollUp:   "pageup",
-			ScrollDown: "pagedown",
-			JumpTop:    "home",
-			JumpBottom: "end",
-			Up:         "up",
-			Down:       "down",
-			VimUp:      "k",
-			VimDown:    "j",
+			PrevRoom:         "alt+up",
+			NextRoom:         "alt+down",
+			Focus:            "tab",
+			ScrollUp:         "pageup",
+			ScrollDown:       "pagedown",
+			JumpTop:          "home",
+			JumpBottom:       "end",
+			Up:               "up",
+			Down:             "down",
+			VimUp:            "k",
+			VimDown:          "j",
+			NavModeTimeoutMs: 2000,
 		},
 		Message: MessageKeys{
 			Reply:       "r",
@@ -128,19 +126,18 @@ func LoadKeybindings(configDir string) Keybindings {
 
 # [global]
 # quit = "ctrl+q"
-# quick_switch = "ctrl+k"
-# new_group = "ctrl+n"
-# member_panel = "ctrl+m"
+# quick_switch = "ctrl+g k"
+# new_group = "ctrl+g n"
 # pinned_messages = "ctrl+p"
-# info_panel = "ctrl+i"
-# settings = "ctrl+,"
-# search = "ctrl+f"
+# settings = "ctrl+g s"
+# search = "ctrl+g /"
 
 # [navigation]
 # prev_room = "alt+up"
 # next_room = "alt+down"
 # scroll_up = "pageup"
 # scroll_down = "pagedown"
+# nav_mode_timeout_ms = 2000
 
 # [message]
 # reply = "r"
@@ -159,8 +156,13 @@ func LoadKeybindings(configDir string) Keybindings {
 
 	// Load user overrides
 	var overrides Keybindings
-	if _, err := toml.DecodeFile(userPath, &overrides); err == nil {
+	if md, err := toml.DecodeFile(userPath, &overrides); err == nil {
 		mergeKeybindings(&kb, &overrides)
+		// Int fields need metadata checks so an explicit zero is not
+		// mistaken for "unset".
+		if md.IsDefined("navigation", "nav_mode_timeout_ms") {
+			kb.Navigation.NavModeTimeoutMs = overrides.Navigation.NavModeTimeoutMs
+		}
 	}
 
 	return kb
@@ -177,20 +179,17 @@ func mergeKeybindings(dst, src *Keybindings) {
 	if src.Global.NewGroup != "" {
 		dst.Global.NewGroup = src.Global.NewGroup
 	}
-	if src.Global.MemberPanel != "" {
-		dst.Global.MemberPanel = src.Global.MemberPanel
-	}
 	if src.Global.PinnedMessages != "" {
 		dst.Global.PinnedMessages = src.Global.PinnedMessages
-	}
-	if src.Global.InfoPanel != "" {
-		dst.Global.InfoPanel = src.Global.InfoPanel
 	}
 	if src.Global.Settings != "" {
 		dst.Global.Settings = src.Global.Settings
 	}
 	if src.Global.Search != "" {
 		dst.Global.Search = src.Global.Search
+	}
+	if src.Global.CommandMode != "" {
+		dst.Global.CommandMode = src.Global.CommandMode
 	}
 	if src.Navigation.PrevRoom != "" {
 		dst.Navigation.PrevRoom = src.Navigation.PrevRoom
@@ -201,11 +200,29 @@ func mergeKeybindings(dst, src *Keybindings) {
 	if src.Navigation.Focus != "" {
 		dst.Navigation.Focus = src.Navigation.Focus
 	}
+	if src.Navigation.ScrollUp != "" {
+		dst.Navigation.ScrollUp = src.Navigation.ScrollUp
+	}
+	if src.Navigation.ScrollDown != "" {
+		dst.Navigation.ScrollDown = src.Navigation.ScrollDown
+	}
+	if src.Navigation.JumpTop != "" {
+		dst.Navigation.JumpTop = src.Navigation.JumpTop
+	}
+	if src.Navigation.JumpBottom != "" {
+		dst.Navigation.JumpBottom = src.Navigation.JumpBottom
+	}
 	if src.Navigation.Up != "" {
 		dst.Navigation.Up = src.Navigation.Up
 	}
 	if src.Navigation.Down != "" {
 		dst.Navigation.Down = src.Navigation.Down
+	}
+	if src.Navigation.VimUp != "" {
+		dst.Navigation.VimUp = src.Navigation.VimUp
+	}
+	if src.Navigation.VimDown != "" {
+		dst.Navigation.VimDown = src.Navigation.VimDown
 	}
 	if src.Message.Reply != "" {
 		dst.Message.Reply = src.Message.Reply
@@ -221,6 +238,9 @@ func mergeKeybindings(dst, src *Keybindings) {
 	}
 	if src.Message.Copy != "" {
 		dst.Message.Copy = src.Message.Copy
+	}
+	if src.Message.ContextMenu != "" {
+		dst.Message.ContextMenu = src.Message.ContextMenu
 	}
 	if src.Input.Send != "" {
 		dst.Input.Send = src.Input.Send

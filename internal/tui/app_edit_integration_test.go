@@ -58,6 +58,35 @@ func TestApp_UpArrowEntersEditModeOnEmpty(t *testing.T) {
 	}
 }
 
+func TestApp_UpArrowJumpsMessagesCursorToEditTarget(t *testing.T) {
+	// When edit mode is entered via Up-arrow, the messages pane
+	// cursor must land on the target message so the user has visual
+	// confirmation of which message they're editing — otherwise the
+	// input populates silently and the target may be scrolled off-
+	// screen entirely.
+	a, _ := newEditAppHarness(t)
+	a.messages.SetContext("room_edit", "", "")
+	a.messages.messages = []DisplayMessage{
+		{ID: "msg_1", FromID: "usr_alice", Body: "first", TS: 1},
+		{ID: "msg_2", FromID: "usr_bob", Body: "second", TS: 2},
+		{ID: "msg_3", FromID: "usr_alice", Body: "latest from me", TS: 3},
+	}
+	// Pre-position the cursor somewhere unrelated (msg_2) so the
+	// assertion that it MOVED isn't satisfied by the initial-zero
+	// default.
+	a.messages.cursor = 1
+
+	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	updated := model.(App)
+
+	if !updated.input.IsEditing() {
+		t.Fatal("precondition: expected edit mode to be entered")
+	}
+	if updated.messages.cursor != 2 {
+		t.Errorf("messages.cursor = %d, want 2 (index of msg_3)", updated.messages.cursor)
+	}
+}
+
 func TestApp_UpArrowNoopWhenInputHasContent(t *testing.T) {
 	a, _ := newEditAppHarness(t)
 	// Keep this case focused on the Up-arrow edit gate itself. With a non-empty

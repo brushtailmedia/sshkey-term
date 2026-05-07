@@ -132,6 +132,15 @@ type App struct {
 	width  int
 	height int
 	focus  Focus
+	// navMode gates the Ctrl+g prefix flow. When true, the next key
+	// is interpreted as a navigation verb, then nav mode auto-exits.
+	navMode bool
+	// navModeTimeout controls auto-exit duration. Zero disables
+	// timeout and keeps nav mode active until explicit keypress.
+	navModeTimeout time.Duration
+	// navModeTickGen increments on each enter; timeout ticks carry a
+	// generation so stale ticks from prior enters can be ignored.
+	navModeTickGen int
 	// Layout is no longer cached on the App. It's a derived value of
 	// (width, height, memberPanel.IsVisible) and is computed on
 	// demand by mouse handlers and View via computeLayout(). The
@@ -222,6 +231,12 @@ const refreshingMinVisibleMs = 200
 // server message arrived, which could be much later.
 type refreshingTickMsg struct{}
 
+// navModeTimeoutMsg is emitted by tea.Tick when nav-mode's timeout
+// window elapses.
+type navModeTimeoutMsg struct {
+	Gen int
+}
+
 // Focus tracks which panel has keyboard focus.
 type Focus int
 
@@ -234,6 +249,12 @@ const (
 
 // New creates the app model.
 func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx int) App {
+	kb := config.LoadKeybindings(configDir)
+	navTimeoutMs := kb.Navigation.NavModeTimeoutMs
+	if navTimeoutMs < 0 {
+		navTimeoutMs = 0
+	}
+
 	return App{
 		cfg:             cfg,
 		sidebar:         NewSidebar(),
@@ -262,6 +283,7 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		muted:           config.LoadMutedMap(appCfg),
 		showHelpHint:    !appCfg.Notifications.HelpShown,
 		focus:           FocusInput,
+		navModeTimeout:  time.Duration(navTimeoutMs) * time.Millisecond,
 	}
 }
 
@@ -270,6 +292,158 @@ func (a App) Init() tea.Cmd {
 		a.input.Init(),
 		a.connect(),
 	)
+}
+
+func (a *App) openQuickSwitch() {
+	a.quickSwitch.Show(a.sidebar.rooms, a.sidebar.groups, a.sidebar.resolveName, a.sidebar.resolveRoomName)
+}
+
+func (a *App) openNewConversation() {
+	if a.client == nil {
+		return
+	}
+	var allMembers []string
+	// Collect all known users except self, skipping retired accounts.
+	a.client.ForEachProfile(func(p *protocol.Profile) {
+		if p.User == a.client.UserID() {
+			return
+		}
+		if retired, _ := a.client.IsRetired(p.User); retired {
+			return
+		}
+		allMembers = append(allMembers, p.User)
+	})
+	a.newConv.Show(allMembers)
+	a.membersPanelCreateSource = false
+}
+
+func (a *App) toggleMemberPanel() {
+	a.memberPanel.Toggle()
+	if a.memberPanel.IsVisible() {
+		a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
+		// Request actual room membership from server (lazy).
+		if a.messages.room != "" && a.client != nil {
+			a.client.RequestRoomMembers(a.messages.room)
+		}
+		a.input.SetMembers(a.activeMemberEntries())
+		a.input.SetNonMembers(a.activeNonMemberEntries())
+	}
+	// Toggling the member panel changes the messages-pane width
+	// (member column takes 18 columns when shown). The viewport
+	// content is wrapped to that width — re-wrap so it doesn't
+	// overflow or under-fill the new pane.
+	a.refreshMessageContent()
+}
+
+func (a *App) openSettingsPanel() {
+	displayName := ""
+	if a.client != nil {
+		// Resolve nanoid → human display name. Settings shows
+		// this in the "Display name" row; rendering the raw
+		// nanoid was a bug (it's the internal user ID, not
+		// what the user typed as their display name).
+		displayName = a.client.DisplayName(a.client.UserID())
+	}
+	a.settings.Show(a.appConfig, a.configDir, displayName, a.serverIdx)
+}
+
+func (a *App) switchServerByIndex(idx int) tea.Cmd {
+	if a.appConfig == nil || idx < 0 || idx >= len(a.appConfig.Servers) || idx == a.serverIdx {
+		return nil
+	}
+	// Disconnect current server.
+	if a.client != nil {
+		a.client.Close()
+	}
+
+	// Switch to new server.
+	srv := a.appConfig.Servers[idx]
+	a.serverIdx = idx
+	a.connected = false
+	a.reconnectAttempt = 0
+
+	// Update config for new server.
+	a.cfg.Host = srv.Host
+	a.cfg.Port = srv.Port
+	a.cfg.KeyPath = srv.Key
+	a.cfg.DataDir = filepath.Join(a.configDir, srv.Host)
+
+	// Clear UI state.
+	a.messages.SetContext("", "", "")
+	a.onContextSwitch()
+	a.sidebar.SetRooms(nil)
+	a.sidebar.SetGroups(nil)
+	a.pinnedBar = PinnedBarModel{}
+	a.statusBar.SetError("Switching to " + srv.Name + "...")
+	a.statusBar.SetConnected(false)
+	a.updateTitle()
+
+	// Connect to new server.
+	return a.connect()
+}
+
+func (a *App) enterNavMode() tea.Cmd {
+	a.navMode = true
+	a.navModeTickGen++
+	a.statusBar.SetNavigationMode(true)
+	if a.navModeTimeout <= 0 {
+		return nil
+	}
+	gen := a.navModeTickGen
+	return tea.Tick(a.navModeTimeout, func(time.Time) tea.Msg {
+		return navModeTimeoutMsg{Gen: gen}
+	})
+}
+
+func (a *App) exitNavMode() {
+	a.navMode = false
+	a.statusBar.SetNavigationMode(false)
+}
+
+// handleNavModeKey handles the second key in Ctrl+g nav mode.
+// Returns handled=true when the key was consumed by nav-mode logic.
+// Unrecognized keys return handled=false after exiting nav mode so
+// the key can fall through to normal panel handlers.
+func (a *App) handleNavModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
+	key := msg.String()
+	switch key {
+	case "g", "esc", "ctrl+g":
+		a.exitNavMode()
+		return nil, true
+	case "k":
+		a.exitNavMode()
+		a.openQuickSwitch()
+		return nil, true
+	case "n":
+		a.exitNavMode()
+		a.openNewConversation()
+		return nil, true
+	case "m":
+		a.exitNavMode()
+		a.toggleMemberPanel()
+		return nil, true
+	case "i":
+		a.exitNavMode()
+		a.showInfoPanelForContext(a.messages.room, a.messages.group, a.messages.dm)
+		return nil, true
+	case "s":
+		a.exitNavMode()
+		a.openSettingsPanel()
+		return nil, true
+	case "/":
+		a.exitNavMode()
+		a.search.Show()
+		return nil, true
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		a.exitNavMode()
+		idx := int(key[0]-'0') - 1
+		return a.switchServerByIndex(idx), true
+	default:
+		// Unrecognized key exits nav mode and falls through to the
+		// normal dispatcher (e.g., typing into input).
+		a.exitNavMode()
+		return nil, false
+	}
 }
 
 // KeyChangeEvent is the tea.Msg form of a client-layer OnKeyWarning
@@ -778,6 +952,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
+		// Global navigation prefix mode (Ctrl+g). Modal overlays above
+		// short-circuit before this block, so modal-local handlers win.
+		// When nav mode is active, one key dispatches an action and exits.
+		// Unrecognized keys exit nav mode and fall through to normal
+		// handling (so input-focus users can still type the key).
+		if a.navMode {
+			if cmd, handled := a.handleNavModeKey(msg); handled {
+				return a, cmd
+			}
+		}
+
 		switch msg.String() {
 		// ctrl+c is handled at the top of the dispatcher (above every
 		// modal IsVisible check) so it can't be swallowed by any
@@ -812,6 +997,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.quitConfirm.ShowWithPending(serverName, pendingSend)
 			return a, nil
 
+		case "ctrl+g":
+			return a, a.enterNavMode()
+
 		case "?":
 			if a.focus != FocusInput {
 				// Phase 14: same context-aware help filter as the
@@ -825,65 +1013,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, nil
 			}
 
-		case "ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5", "ctrl+6", "ctrl+7", "ctrl+8", "ctrl+9":
-			idx := int(msg.String()[len(msg.String())-1]-'0') - 1
-			if a.appConfig != nil && idx < len(a.appConfig.Servers) && idx != a.serverIdx {
-				// Disconnect current server
-				if a.client != nil {
-					a.client.Close()
-				}
-
-				// Switch to new server
-				srv := a.appConfig.Servers[idx]
-				a.serverIdx = idx
-				a.connected = false
-				a.reconnectAttempt = 0
-
-				// Update config for new server
-				a.cfg.Host = srv.Host
-				a.cfg.Port = srv.Port
-				a.cfg.KeyPath = srv.Key
-				a.cfg.DataDir = filepath.Join(a.configDir, srv.Host)
-
-				// Clear UI state
-				a.messages.SetContext("", "", "")
-				a.onContextSwitch()
-				a.sidebar.SetRooms(nil)
-				a.sidebar.SetGroups(nil)
-				a.pinnedBar = PinnedBarModel{}
-				a.statusBar.SetError("Switching to " + srv.Name + "...")
-				a.statusBar.SetConnected(false)
-				a.updateTitle()
-
-				// Connect to new server
-				return a, a.connect()
-			}
-			return a, nil
-
-		case "ctrl+m":
-			a.memberPanel.Toggle()
-			if a.memberPanel.IsVisible() {
-				a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
-				// Request actual room membership from server (lazy)
-				if a.messages.room != "" && a.client != nil {
-					a.client.RequestRoomMembers(a.messages.room)
-				}
-				a.input.SetMembers(a.activeMemberEntries())
-				a.input.SetNonMembers(a.activeNonMemberEntries())
-			}
-			// Toggling the member panel changes the messages-pane width
-			// (member column takes 18 columns when shown). The viewport
-			// content is wrapped to that width — re-wrap so it doesn't
-			// overflow or under-fill the new pane.
-			a.refreshMessageContent()
-			return a, nil
-
 		case "ctrl+p":
 			a.pinnedBar.Toggle()
-			return a, nil
-
-		case "ctrl+f":
-			a.search.Show()
 			return a, nil
 
 		case "ctrl+shift+r":
@@ -893,54 +1024,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// keypress-ack indicator consistently.
 			return a, func() tea.Msg { return RefreshRequestMsg{Kind: "reconnect"} }
 
-		case "ctrl+,":
-			displayName := ""
-			if a.client != nil {
-				// Resolve nanoid → human display name. Settings shows
-				// this in the "Display name" row; rendering the raw
-				// nanoid was a bug (it's the internal user ID, not
-				// what the user typed as their display name).
-				displayName = a.client.DisplayName(a.client.UserID())
-			}
-			a.settings.Show(a.appConfig, a.configDir, displayName, a.serverIdx)
-			return a, nil
-
-		case "ctrl+i":
-			a.showInfoPanelForContext(a.messages.room, a.messages.group, a.messages.dm)
-			return a, nil
-
 		case "i":
-			// Alternative to Ctrl+I for terminals/tmux setups where Ctrl+I
-			// is captured (or conflated with Tab). Keep this scoped to the
-			// messages pane so normal typing in the input field is unaffected.
+			// Info-panel shortcut scoped to the messages pane so normal
+			// typing in the input field is unaffected.
 			if a.focus == FocusMessages {
 				a.showInfoPanelForContext(a.messages.room, a.messages.group, a.messages.dm)
 				return a, nil
 			}
 			// Not in messages focus: let the key continue to normal handlers
 			// (notably the input field) instead of swallowing typed "i".
-
-		case "ctrl+n":
-			// Get all known user names from profiles
-			if a.client != nil {
-				var allMembers []string
-				for _, room := range a.client.Rooms() {
-					_ = room // profiles are global, not per-room
-				}
-				// Collect all known users except self, skipping retired accounts
-				a.client.ForEachProfile(func(p *protocol.Profile) {
-					if p.User == a.client.UserID() {
-						return
-					}
-					if retired, _ := a.client.IsRetired(p.User); retired {
-						return
-					}
-					allMembers = append(allMembers, p.User)
-				})
-				a.newConv.Show(allMembers)
-				a.membersPanelCreateSource = false
-			}
-			return a, nil
 
 		case "alt+up":
 			if a.sidebar.cursor > 0 {
@@ -956,10 +1048,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.sidebar.updateSelection()
 				a.switchToSidebarSelection()
 			}
-			return a, nil
-
-		case "ctrl+k":
-			a.quickSwitch.Show(a.sidebar.rooms, a.sidebar.groups, a.sidebar.resolveName, a.sidebar.resolveRoomName)
 			return a, nil
 
 		case "tab":
@@ -1745,6 +1833,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Tick(refreshingMinVisibleMs*time.Millisecond, func(time.Time) tea.Msg {
 			return refreshingTickMsg{}
 		})
+
+	case navModeTimeoutMsg:
+		if a.navMode && msg.Gen == a.navModeTickGen {
+			a.exitNavMode()
+		}
+		return a, nil
 
 	case refreshingTickMsg:
 		// Phase 17c Step 6: the 200ms minimum-visibility window
@@ -2789,6 +2883,16 @@ func (a *App) refreshMessageContent() {
 // it respects whatever the user is currently viewing — if they've
 // scrolled back through history and the local list has older rows,
 // the "most recent" is still the highest TS row in the visible list.
+//
+// Side effect: scrolls the messages pane so the message being edited
+// is visible, matching the affordance of "you can see what you're
+// editing." The user pressed Up from the input bar — they expect
+// the input to populate AND the messages pane to surface the target.
+// Without the scroll, edit mode could activate against a message
+// that's currently scrolled off-screen and the user has no visual
+// confirmation of which message is being edited (the input just
+// fills with text). Focus stays on the input — only the cursor and
+// viewport position move.
 func (a *App) tryEnterEditMode() bool {
 	selfID := a.client.UserID()
 	if selfID == "" {
@@ -2805,8 +2909,13 @@ func (a *App) tryEnterEditMode() bool {
 		if msg.FromID != selfID {
 			continue
 		}
-		// Found the user's most recent editable message.
+		// Found the user's most recent editable message. Populate the
+		// input AND scroll the messages pane to show the target. The
+		// duplicate ID lookup inside ScrollToMessage is cheap (linear
+		// scan over the same in-memory list) and keeps the side-effect
+		// localized to one method call.
 		a.input.EnterEditMode(msg.ID, msg.Body)
+		a.messages.ScrollToMessage(msg.ID)
 		return true
 	}
 	return false
@@ -3449,7 +3558,7 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 	case "/settings":
 		displayName := ""
 		if a.client != nil {
-			// Resolve nanoid → human display name. See ctrl+, handler
+			// Resolve nanoid → human display name. See openSettingsPanel
 			// for the full rationale (settings shows this in the
 			// "Display name" row, raw nanoid was wrong).
 			displayName = a.client.DisplayName(a.client.UserID())

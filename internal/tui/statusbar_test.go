@@ -93,3 +93,33 @@ func TestStatusBar_ClearRefreshing_RespectsFloor(t *testing.T) {
 		t.Errorf("ClearRefreshing hid the indicator before the floor elapsed: %q", view)
 	}
 }
+
+func TestStatusBar_NavigationModeIndicatorRenders(t *testing.T) {
+	var s StatusBarModel
+	s.SetConnected(true)
+	s.SetNavigationMode(true)
+
+	view := s.View(80)
+	if !strings.Contains(view, "navigation mode") {
+		t.Errorf("navigation mode indicator missing: %q", view)
+	}
+}
+
+func TestStatusBar_NavigationModePrecedesErrorAndRefreshing(t *testing.T) {
+	var s StatusBarModel
+	s.SetConnected(true)
+	s.SetRefreshing(1 * time.Second)
+	s.SetError("something failed")
+	s.SetNavigationMode(true)
+
+	view := s.View(80)
+	if !strings.Contains(view, "navigation mode") {
+		t.Errorf("navigation mode indicator missing: %q", view)
+	}
+	if strings.Contains(view, "something failed") {
+		t.Errorf("error should be hidden while nav mode is active: %q", view)
+	}
+	if strings.Contains(view, "refreshing") {
+		t.Errorf("refreshing should be hidden while nav mode is active: %q", view)
+	}
+}

@@ -537,7 +537,8 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		i.pendingCmd = &SlashCommandMsg{Command: cmd, Room: room, Group: group, DM: dm}
 	case "/groupinfo":
 		// Phase 14: open the info panel for the current group. Same
-		// effect as Ctrl+I when already in a group context, but
+		// effect as the in-pane `i` shortcut (or Ctrl+g i) when already
+		// in a group context, but
 		// discoverable via /help and chainable in scripted usage.
 		if group != "" {
 			i.pendingCmd = &SlashCommandMsg{Command: cmd, Group: group}
@@ -696,18 +697,47 @@ func (i InputModel) BannerRows() int {
 // BannerView renders the reply-preview or edit-mode banner. Returns
 // an empty string when no banner is active, so callers can
 // unconditionally splice the result into mainPanel without
-// branching. width is the content-area width (= mainWidth in app.go
-// View) — the banner uses it to truncate the preview to fit.
+// branching. width is the input pane's content-area width
+// (= mainWidth in app.go View) — the banner uses it to truncate the
+// preview to fit AND to align the row's outer edges with the input
+// pane's outer edges via `.Width(width + 2)`.
+//
+// The +2 accounts for the input pane's rounded border (1 cell on
+// each side) — the banner has no border of its own, so it has to
+// pad to that width manually to reach the same outer extent.
+// `inputFocusedStyle.Padding(0, 1)` doesn't add to the outer width
+// in the lipgloss version in use; padding is reserved inside the
+// content area (`mainWidth`), not added on top. So the input pane's
+// outer width is `mainWidth + 2` and the banner needs `width + 2`
+// to match.
+//
+// Why this matters: the banner sits between the bordered messages
+// pane (above) and the bordered input pane (below) without a frame
+// of its own. If it rendered at just `mainWidth`, the row's trailing
+// whitespace stopped 2 cells short of the input pane's outer right
+// edge, exposing the borders of any panel joined horizontally to
+// mainPanel (sidebar's right border, member panel's left/right
+// borders) as floating `│` chars on an otherwise blank stretch.
+// Rendering at the input pane's full outer width fills the row
+// uniformly so the layout reads as a continuous chrome strip flush
+// with the input pane's left/right edges.
+//
+// `Style.Width` returns a NEW style — `replyRefStyle` stays
+// unchanged for the inline reply preview in messages.go, which
+// doesn't want padding.
+//
+// If `inputFocusedStyle`'s border ever changes, the +2 here must
+// change in lockstep.
 func (i InputModel) BannerView(width int) string {
 	if i.replyTo != "" {
 		preview := i.replyText
 		if len(preview) > width-20 {
 			preview = preview[:width-23] + "..."
 		}
-		return replyRefStyle.Render(" ↳ replying to: " + preview)
+		return replyRefStyle.Width(width + 2).Render(" ↳ replying to: " + preview)
 	}
 	if i.editMode {
-		return replyRefStyle.Render(" ✎ editing message — Esc to cancel")
+		return replyRefStyle.Width(width + 2).Render(" ✎ editing message — Esc to cancel")
 	}
 	return ""
 }

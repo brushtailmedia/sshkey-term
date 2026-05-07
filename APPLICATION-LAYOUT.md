@@ -40,7 +40,7 @@ Phase 18 shipped the display-only path: the client already persists topics in th
 
 Header line 1 uses the `searchHeaderStyle` (bold, accent-colored) for visual consistency with the info panel title bar. Line 2 uses `helpDescStyle` (muted, dim italic) to visually subordinate the topic to the room name — the name is the primary identifier, the topic is context. A blank line separates the header from the message stream below.
 
-**Server tabs:** top bar shows tabs for each configured server. Active tab is highlighted. Connection dot to the left of the active server name. `Ctrl+1`/`Ctrl+2`/etc or click to switch servers. Single server = no tabs, just the server name.
+**Server tabs:** top bar shows tabs for each configured server. Active tab is highlighted. Connection dot to the left of the active server name. `Ctrl+g 1`/`Ctrl+g 2`/etc or click to switch servers. Single server = no tabs, just the server name.
 
 **Connection status dot (left of server name):**
 
@@ -50,7 +50,7 @@ Header line 1 uses the `searchHeaderStyle` (bold, accent-colored) for visual con
 ● red     disconnected / offline
 ```
 
-With member panel (Ctrl+M):
+With member panel (`Ctrl+g m`):
 
 ```
 ┌─ Sidebar ────┐  ┌─ #general ──────────────────────┐  ┌─ Members ──┐
@@ -410,7 +410,7 @@ Click or arrow keys to select. Type to filter emoji by name. `1`-`8` quick-selec
 
 ---
 
-## Info Panels (Ctrl+I)
+## Info Panels (`i` or `Ctrl+g i`)
 
 ### Group DM Info Panel
 
@@ -540,7 +540,7 @@ Shows the root message and all its replies in order. Press `g` on a reply in the
 
 ---
 
-## Quick Switch (Ctrl+K)
+## Quick Switch (`Ctrl+g k`)
 
 Fuzzy search across all rooms and conversations:
 
@@ -1289,7 +1289,7 @@ On a successful generate, the new key's fingerprint is shown in the form mode as
 
 ---
 
-## Search Overlay (Ctrl+F or /search)
+## Search Overlay (`Ctrl+g /` or `/search`)
 
 ```
 ┌─ Sidebar ────┐  ┌─ Search ──────────────────────────────────────────┐
@@ -1318,13 +1318,13 @@ Results show sender, timestamp, room/group context, and a snippet with the match
 │                                                                       │
 │  Keyboard Shortcuts                                                   │
 │                                                                       │
-│  Ctrl+K    quick switch          r    reply to message               │
-│  Ctrl+N    new conversation      e    react with emoji               │
-│  Ctrl+M    toggle members        p    pin/unpin (rooms)              │
+│  Ctrl+g k  quick switch          r    reply to message               │
+│  Ctrl+g n  new conversation      e    react with emoji               │
+│  Ctrl+g m  toggle members        p    pin/unpin (rooms)              │
 │  Ctrl+P    toggle pinned         d    delete message                 │
-│  Ctrl+I    info panel            c    copy message text              │
-│  Ctrl+F    search                g    jump to parent                 │
-│  Ctrl+,    settings              t    thread view                    │
+│  i         info panel            c    copy message text              │
+│  Ctrl+g /  search                g    jump to parent                 │
+│  Ctrl+g s  settings              t    thread view                    │
 │  Alt+↑/↓   switch room           o    open attachment                │
 │  Tab       cycle focus           s    save attachment                │
 │  Esc       close / back          u    unreact                        │
