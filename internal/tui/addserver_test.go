@@ -88,6 +88,7 @@ func TestAddServer_EscHides(t *testing.T) {
 func TestAddServer_CtrlGEntersGenerateMode(t *testing.T) {
 	a := NewAddServer()
 	a.Show()
+	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
 	if a.mode != addServerGenerate {
 		t.Errorf("mode after Ctrl+G = %d, want addServerGenerate", a.mode)
@@ -97,9 +98,43 @@ func TestAddServer_CtrlGEntersGenerateMode(t *testing.T) {
 	}
 }
 
+func TestAddServer_CtrlGRequiresHost(t *testing.T) {
+	a := NewAddServer()
+	a.Show()
+	// Host left empty — Ctrl+G should refuse to enter generate mode.
+	a, _ = a.Update(keyMsg("ctrl+g"))
+	if a.mode != addServerForm {
+		t.Errorf("Ctrl+G with empty host should stay in form mode, got %d", a.mode)
+	}
+	if a.formErr == "" {
+		t.Error("Ctrl+G with empty host should set formErr")
+	}
+	if !strings.Contains(a.formErr, "hostname") {
+		t.Errorf("formErr should mention hostname, got: %q", a.formErr)
+	}
+	if a.focused != 1 {
+		t.Errorf("focus should jump to host field (1), got %d", a.focused)
+	}
+}
+
+func TestAddServer_CtrlGRejectsWhitespaceOnlyHost(t *testing.T) {
+	a := NewAddServer()
+	a.Show()
+	// Whitespace-only host — same treatment as empty.
+	a.inputs[1].SetValue("   ")
+	a, _ = a.Update(keyMsg("ctrl+g"))
+	if a.mode != addServerForm {
+		t.Errorf("Ctrl+G with whitespace host should stay in form, got mode=%d", a.mode)
+	}
+	if a.formErr == "" {
+		t.Error("whitespace host should set formErr")
+	}
+}
+
 func TestAddServer_GenerateEscReturnsToForm(t *testing.T) {
 	a := NewAddServer()
 	a.Show()
+	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
 	if a.mode != addServerGenerate {
 		t.Fatal("precondition: should be in generate mode")
@@ -116,6 +151,7 @@ func TestAddServer_GenerateEscReturnsToForm(t *testing.T) {
 func TestAddServer_GenerateTabCyclesFields(t *testing.T) {
 	a := NewAddServer()
 	a.Show()
+	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
 	// 3 fields: path, pass, confirm
 	for want := 1; want < 3; want++ {
@@ -133,6 +169,7 @@ func TestAddServer_GenerateTabCyclesFields(t *testing.T) {
 func TestAddServer_GenerateEmptyPathRejected(t *testing.T) {
 	a := NewAddServer()
 	a.Show()
+	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
 	// Clear default path
 	a.genInputs[0].SetValue("")
@@ -151,6 +188,7 @@ func TestAddServer_GenerateEmptyPathRejected(t *testing.T) {
 func TestAddServer_GeneratePassphraseMismatch(t *testing.T) {
 	a := NewAddServer()
 	a.Show()
+	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
 
 	dir := t.TempDir()
@@ -167,6 +205,7 @@ func TestAddServer_GeneratePassphraseMismatch(t *testing.T) {
 func TestAddServer_GenerateExistingFileRejected(t *testing.T) {
 	a := NewAddServer()
 	a.Show()
+	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
 
 	dir := t.TempDir()
@@ -186,6 +225,7 @@ func TestAddServer_GenerateExistingFileRejected(t *testing.T) {
 func TestAddServer_GenerateSuccessReturnsToForm(t *testing.T) {
 	a := NewAddServer()
 	a.Show()
+	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
 
 	dir := t.TempDir()
@@ -407,6 +447,7 @@ func TestAddServer_HandleMouse_IgnoresNonLeftClick(t *testing.T) {
 func TestAddServer_HandleMouse_IgnoresInGenerateMode(t *testing.T) {
 	a := NewAddServer()
 	a.Show()
+	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
 	if a.mode != addServerGenerate {
 		t.Fatal("should be in generate mode")

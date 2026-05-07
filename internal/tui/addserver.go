@@ -297,30 +297,35 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		return a, nil
 
 	case "ctrl+g":
+		// Require a hostname before opening the generate sub-view.
+		// The new key file is named id_ed25519_<host> so every server
+		// gets its own physical file in ~/.sshkey-term/keys/. Without
+		// a host, the only sensible default is bare id_ed25519, which
+		// collides with whatever the wizard or a prior add-server run
+		// already wrote there — and the collision wouldn't surface
+		// until AFTER the user typed a passphrase and we'd already
+		// written the new keypair to disk, leaving an orphan file
+		// when the post-generate copy step refuses to overwrite.
+		//
+		// Refuse early: don't switch modes, set formErr to explain,
+		// move focus to the host field so the next keystroke lands
+		// where the user needs to type. One-step fix from the user's
+		// side and the filesystem never sees a misnamed key.
+		host := sanitizeForFilename(strings.TrimSpace(a.inputs[1].Value()))
+		if host == "" {
+			a.formErr = "Type a hostname first — used to name the new key file."
+			a.inputs[a.focused].Blur()
+			a.focused = 1
+			a.inputs[1].Focus()
+			return a, nil
+		}
 		// Enter generate sub-view
 		a.mode = addServerGenerate
 		for i := range a.inputs {
 			a.inputs[i].Blur()
 		}
-		// Pre-fill the "Save to" path with a host-derived filename
-		// so adding a 2nd / 3rd server doesn't collide with the
-		// first server's key. Without this, all add-server generate
-		// flows defaulted to `~/.sshkey-term/keys/id_ed25519` —
-		// trying to generate a 2nd key with the unmodified default
-		// would fail the file-exists check (or worse, in earlier
-		// versions, silently overwrite the first key).
-		//
-		// Each server typically has a unique host, so embedding the
-		// sanitized host in the filename keeps keys distinct without
-		// any user effort. Falls back to the bare `id_ed25519` if
-		// host is empty (user opened generate before typing host —
-		// they can edit the path manually).
 		home, _ := os.UserHomeDir()
-		keyName := "id_ed25519"
-		if host := sanitizeForFilename(strings.TrimSpace(a.inputs[1].Value())); host != "" {
-			keyName = "id_ed25519_" + host
-		}
-		a.genInputs[0].SetValue(filepath.Join(home, ".sshkey-term", "keys", keyName))
+		a.genInputs[0].SetValue(filepath.Join(home, ".sshkey-term", "keys", "id_ed25519_"+host))
 		a.genFocused = 0
 		a.genInputs[0].Focus()
 		a.genErr = ""
