@@ -2770,8 +2770,8 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 		// sits AFTER the header — pre-2026-05-05 click handler treated
 		// pinnedBarRows as starting at relY=0 which is now the room
 		// header.
-		headerLines := a.messages.HeaderLines()
-		pinnedBarRows := a.messages.PinnedBarRows()
+		headerLines := a.messages.HeaderRowsForHitTest(layout.MessagesWidth)
+		pinnedBarRows := a.messages.PinnedBarRowsForHitTest(layout.MessagesWidth)
 		relY := y - layout.MessagesY0 - 1 // 0-indexed inside panel content area
 
 		// Click on the pinned bar.
@@ -2780,13 +2780,11 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			if !a.pinnedBar.expanded {
 				// Click on collapsed bar — expand
 				a.pinnedBar.Toggle()
-			} else if pinRel > 0 && pinRel <= len(a.pinnedBar.pins) {
-				// Expanded: row 0 is the "Pinned (N)" header, then
-				// per-pin rows, then the hint footer. Click on a
-				// pin row jumps to it — same shape as Enter on the
-				// keyboard: scroll, select, collapse the bar, focus
-				// moves to messages.
-				pinIdx := pinRel - 1
+			} else {
+				// Expanded: map visual row -> pin index using the same
+				// rendered line shape (including soft-wrap) as the pinned
+				// bar view. Header/footer rows are non-selectable.
+				pinIdx := a.pinnedBar.PinIndexAtVisualRow(pinRel, layout.MessagesWidth-2)
 				if pinIdx >= 0 && pinIdx < len(a.pinnedBar.pins) {
 					id := a.pinnedBar.pins[pinIdx].ID
 					a.pinnedBar.cursor = pinIdx

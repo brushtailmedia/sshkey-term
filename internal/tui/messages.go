@@ -1997,6 +1997,63 @@ func (m MessagesModel) HeaderLines() int {
 	return 2
 }
 
+// wrappedRows returns how many terminal rows s occupies when rendered
+// into a region with the given content width (cell columns), accounting
+// for soft-wrapping of long visual lines. ANSI escape sequences are
+// ignored for width measurement via ansi.StringWidth.
+//
+// This helper is used by mouse hit-testing math only. Rendering remains
+// unchanged.
+func wrappedRows(s string, contentWidth int) int {
+	if s == "" {
+		return 0
+	}
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	lines := strings.Split(s, "\n")
+	// Split keeps a trailing empty element when s ends with '\n'. That
+	// final element is a post-terminator cursor position, not a rendered
+	// row in the middle of a concatenated block.
+	if strings.HasSuffix(s, "\n") && len(lines) > 0 {
+		lines = lines[:len(lines)-1]
+	}
+	rows := 0
+	for _, line := range lines {
+		w := ansi.StringWidth(line)
+		if w <= 0 {
+			rows++
+			continue
+		}
+		rows += 1 + (w-1)/contentWidth
+	}
+	return rows
+}
+
+// HeaderRowsForHitTest returns the effective number of rows the
+// non-scrolling header occupies for mouse hit-testing at the current
+// panel width. Unlike HeaderLines (which is the structural base = 2),
+// this includes any soft-wrap on the title/topic row at narrow widths.
+func (m MessagesModel) HeaderRowsForHitTest(panelWidth int) int {
+	header, base := m.renderHeader(panelWidth)
+	contentWidth := panelWidth - 2
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+
+	titleLine := header
+	if nl := strings.IndexByte(titleLine, '\n'); nl >= 0 {
+		titleLine = titleLine[:nl]
+	}
+	titleRows := wrappedRows(titleLine, contentWidth)
+	if titleRows < 1 {
+		titleRows = 1
+	}
+	// base is currently 2 (title + blank separator). If title wraps,
+	// add the extra wrapped rows above that base.
+	return base + (titleRows - 1)
+}
+
 // SetPinnedBar installs the pre-rendered pinned-messages bar string
 // that View will splice in between the room header and the viewport.
 // Pointer receiver because View is value-receiver — this needs to
@@ -2015,6 +2072,17 @@ func (m MessagesModel) PinnedBarRows() int {
 		return 0
 	}
 	return strings.Count(m.pinnedBar, "\n") + 1
+}
+
+// PinnedBarRowsForHitTest returns the effective number of visual rows
+// consumed by the pinned bar for mouse hit-testing at the given panel
+// width, including soft-wrap from narrow panes.
+func (m MessagesModel) PinnedBarRowsForHitTest(panelWidth int) int {
+	contentWidth := panelWidth - 2
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	return wrappedRows(m.pinnedBar, contentWidth)
 }
 
 // ScrollUp moves the viewport up by n lines without touching the cursor.

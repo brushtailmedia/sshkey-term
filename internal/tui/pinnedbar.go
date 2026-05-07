@@ -64,6 +64,63 @@ func (p *PinnedBarModel) SetResolveName(fn func(string) string) {
 	p.resolveName = fn
 }
 
+// renderPinLine builds one expanded-row pin preview line using the exact
+// formatting/truncation path used by View, so any click-row mapping that
+// depends on rendered row shape can share one source of truth.
+func (p PinnedBarModel) renderPinLine(pin PinnedMessage, width, pinIdx int) string {
+	// Resolve display name at render time — pin.From was a snapshot taken
+	// when the message was first received, which may have used the nanoid
+	// fallback if the profile cache was cold then.
+	from := pin.From
+	if p.resolveName != nil && pin.FromID != "" {
+		if resolved := p.resolveName(pin.FromID); resolved != "" {
+			from = resolved
+		}
+	}
+	line := fmt.Sprintf(" 📌 %s: %s", usernameStyle.Render(from), pin.Body)
+	if len(line) > width-4 {
+		line = line[:width-7] + "..."
+	}
+	if pinIdx == p.cursor {
+		line = pinnedSelectedStyle.Render(line)
+	}
+	return line
+}
+
+// PinIndexAtVisualRow maps an expanded pinned-bar visual row index
+// (0-indexed within the pinned bar block) to the pin index at that row.
+// Returns -1 when the row lands on the pinned header, footer, or outside
+// any pin line. Width is the pinned-bar content width passed to View.
+func (p PinnedBarModel) PinIndexAtVisualRow(visualRow, width int) int {
+	if !p.expanded || visualRow < 0 || len(p.pins) == 0 {
+		return -1
+	}
+	if width < 1 {
+		width = 1
+	}
+
+	// Expanded header row(s): "Pinned (N)".
+	header := searchHeaderStyle.Render(fmt.Sprintf(" Pinned (%d)", len(p.pins)))
+	rows := wrappedRows(header, width)
+	if visualRow < rows {
+		return -1
+	}
+	visualRow -= rows
+
+	// Pin lines: each may wrap to multiple visual rows.
+	for i, pin := range p.pins {
+		line := p.renderPinLine(pin, width, i)
+		lineRows := wrappedRows(line, width)
+		if visualRow < lineRows {
+			return i
+		}
+		visualRow -= lineRows
+	}
+
+	// Footer/help rows are non-selectable.
+	return -1
+}
+
 func (p *PinnedBarModel) SetPins(room string, pinIDs []string, messages []DisplayMessage) {
 	p.room = room
 	p.cursor = 0
@@ -219,24 +276,7 @@ func (p PinnedBarModel) View(width int) string {
 	b.WriteString("\n")
 
 	for i, pin := range p.pins {
-		// Resolve display name at render time — pin.From was a
-		// snapshot taken when the message was first received,
-		// which may have used the nanoid fallback if the profile
-		// cache was cold then. resolveName(FromID) reflects the
-		// current profile state.
-		from := pin.From
-		if p.resolveName != nil && pin.FromID != "" {
-			if resolved := p.resolveName(pin.FromID); resolved != "" {
-				from = resolved
-			}
-		}
-		line := fmt.Sprintf(" 📌 %s: %s", usernameStyle.Render(from), pin.Body)
-		if len(line) > width-4 {
-			line = line[:width-7] + "..."
-		}
-		if i == p.cursor {
-			line = pinnedSelectedStyle.Render(line)
-		}
+		line := p.renderPinLine(pin, width, i)
 		b.WriteString(line + "\n")
 	}
 	b.WriteString(systemMsgStyle.Render(" Enter=jump  u=unpin  Ctrl+p=collapse"))
