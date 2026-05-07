@@ -267,7 +267,11 @@ func (w WizardModel) updateKeySelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			w.step = WizardKeyImport
 			w.importInput.Focus()
 		} else {
-			// Generate new key
+			// Generate new key. Clear any state the user might have
+			// left from a previous visit to this step (typed
+			// passphrase, weak-pass warning mark, stale strength hint)
+			// so re-entry is a fresh slate.
+			w.resetKeyGenState()
 			w.step = WizardKeyGenerate
 			w.genPathInput.Focus()
 			w.genFocused = 0
@@ -338,6 +342,11 @@ func (w WizardModel) updateKeyGenerate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return w.doGenerateKey()
 	case "esc":
+		// Bail back to KeySelect — user changed their mind. Don't
+		// leave a typed passphrase, warned-mark, or stale strength
+		// hint behind; the next visit (whether back here or to a
+		// different keysource) shouldn't see prior in-progress work.
+		w.resetKeyGenState()
 		w.step = WizardKeySelect
 		w.err = ""
 		return w, nil
@@ -424,6 +433,15 @@ func (w WizardModel) doGenerateKey() (tea.Model, tea.Cmd) {
 	w.keyFingerprint = fingerprint
 	w.err = ""
 	w.step = WizardBackup
+	// Passphrase is consumed by generateEd25519KeyFile above and has
+	// no further use — wipe it (along with the warned-mark and live
+	// hint) so it doesn't sit in cleartext memory through the
+	// remaining wizard steps. Most important of the three call sites:
+	// the wizard's lifetime past this point is whatever it takes the
+	// user to read Backup → Export → Share → Server, which can be
+	// minutes. Treating the passphrase as ephemeral matches what an
+	// agent or keyring would do.
+	w.resetKeyGenState()
 	return w, nil
 }
 
@@ -705,6 +723,31 @@ func (w *WizardModel) setGenFocus(idx int) {
 	case 2:
 		w.genConfirm.Focus()
 	}
+}
+
+// resetKeyGenState zeros transient state owned by the keygen step:
+// the two passphrase fields, the weakPassConfirmed warned-mark, and
+// the live strength hint. Called on every transition into / out of /
+// past WizardKeyGenerate so that:
+//
+//   - Entering the step (from KeySelect "Generate new key") is a
+//     fresh slate, even if the user previously visited and Esc'd back.
+//   - Leaving via Esc doesn't strand a typed passphrase in textinput
+//     state, where it'd survive in cleartext for the rest of the
+//     wizard's lifetime if the user later progresses via "Import" or
+//     "Existing key" instead of finishing through generate.
+//   - Completing the step doesn't either — the passphrase has been
+//     consumed by generateEd25519KeyFile and has zero remaining
+//     purpose for the Backup → Export → Share → Server steps.
+//
+// Mirrors the AddServer dialog's Hide()/Show()/Ctrl+G clearing.
+// Same hygiene reasoning, scoped to step transitions instead of
+// dialog open/close cycles.
+func (w *WizardModel) resetKeyGenState() {
+	w.genPassInput.SetValue("")
+	w.genConfirm.SetValue("")
+	w.weakPassConfirmed = ""
+	w.strengthHint = keygen.LiveHint{}
 }
 
 // copyKeyToManagedStoreAndRewriteName copies an existing private/public key
