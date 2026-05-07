@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -135,6 +136,75 @@ func TestSidebarSetPreviewImagePath_ResetsClearOnReSelect(t *testing.T) {
 	s.SetPreviewImagePath("/second.png") // re-select before View consumed the flag
 	if s.pendingRastermClear {
 		t.Error("re-selecting an image should cancel a pending clear")
+	}
+}
+
+// TestApp_UpdateWrapper_PersistsPreviewPathForRastermClear is the
+// regression guard for the rasterm-doesn't-clear-on-deselect bug.
+//
+// Pre-fix, the sidebar preview path was computed in App.View — a
+// value-receiver method whose mutations were discarded on return.
+// SetPreviewImagePath's transition detection reads the previous
+// path; with View's writes lost between frames, the previous path
+// was always "" so the non-empty → empty transition was never
+// detected. The kitty delete escape was never queued, and rasterm
+// placements stayed on screen forever after deselect.
+//
+// Post-fix, the path is written at the end of App.Update via the
+// wrapper. Update returns the modified model to bubbletea, so the
+// mutation persists. This test simulates two Update calls and
+// asserts the second's transition (path → "") flags a clear.
+func TestApp_UpdateWrapper_PersistsPreviewPathForRastermClear(t *testing.T) {
+	withRastermProtocol(t, rastermKitty)
+
+	a, _ := newEditAppHarness(t)
+	a.sidebar = NewSidebar()
+	a.messages.SetContext("room_test", "", "")
+	a.messages.SetFilesDir(t.TempDir())
+
+	// Seed a downloaded image attachment so SelectedImagePath returns
+	// a non-empty path. The file just needs to exist; the helper does
+	// an os.Stat to decide whether to surface the path. Cursor sits on
+	// the message with the attachment.
+	imgFile := a.messages.filesDir + "/file_preview"
+	if err := os.WriteFile(imgFile, []byte("fake-image-bytes"), 0600); err != nil {
+		t.Fatalf("seed image file: %v", err)
+	}
+	a.messages.messages = []DisplayMessage{{
+		ID: "msg_with_image",
+		Attachments: []DisplayAttachment{
+			{FileID: "file_preview", IsImage: true},
+		},
+	}}
+	a.messages.cursor = 0
+	a.focus = FocusMessages
+
+	// Frame 1: focus on messages, cursor on image — Update should
+	// land previewImagePath = the seeded path on the persistent model.
+	model1, _ := a.Update(struct{}{}) // benign no-op msg
+	a1, ok := model1.(App)
+	if !ok {
+		t.Fatal("Update returned non-App model")
+	}
+	if a1.sidebar.previewImagePath == "" {
+		t.Fatal("Update should have populated sidebar.previewImagePath when image is selected")
+	}
+	if a1.sidebar.pendingRastermClear {
+		t.Fatal("frame 1 (path goes empty → non-empty) should not flag a rasterm clear")
+	}
+
+	// Frame 2: cursor moves off the image (simulate by clearing it
+	// from the message). Now SelectedImagePath returns "" and the
+	// computed preview path is "". Update's wrapper detects the
+	// transition and flags the rasterm clear.
+	a1.messages.messages[0].Attachments = nil
+	model2, _ := a1.Update(struct{}{})
+	a2 := model2.(App)
+	if a2.sidebar.previewImagePath != "" {
+		t.Errorf("frame 2: previewImagePath should be empty, got %q", a2.sidebar.previewImagePath)
+	}
+	if !a2.sidebar.pendingRastermClear {
+		t.Error("frame 2 (path goes non-empty → empty under rasterm) should flag a rasterm clear; this is the regression guard for the View-side mutation-loss bug")
 	}
 }
 

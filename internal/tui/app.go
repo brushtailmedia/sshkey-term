@@ -606,7 +606,57 @@ func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChange
 	}
 }
 
+// Update is the bubbletea entry point. It runs the actual message
+// dispatch in updateInner, then applies post-update derived state
+// (currently: the sidebar preview path) on the way out so mutations
+// persist into the next frame.
+//
+// Why the wrapper exists: pre-2026-05-08 the sidebar preview path was
+// derived inside View() each frame. View is value-receiver, so the
+// SetPreviewImagePath mutation only persisted within the single
+// View call — `sidebar.previewImagePath` on the App struct itself
+// was never updated. That broke the rasterm-image-clear path:
+// SetPreviewImagePath's transition detection reads the previous
+// `previewImagePath` to decide whether to flag a kitty delete escape,
+// but the previous value was always "" because View's mutation never
+// landed back on the persistent App. Result: rasterm placements
+// stuck on screen forever after deselect (block-char path was fine
+// because text-cell rendering overwrites cleanly, no out-of-band
+// delete needed).
+//
+// Update IS value-receiver too, but bubbletea takes its return value
+// as the new model — so mutations inside updateInner DO persist via
+// the returned `a`. Centralizing the SetPreviewImagePath call here
+// (after updateInner has finished modifying focus / cursor / modal
+// state) catches every event that could change the derived path,
+// without having to thread the call through every individual
+// `return a, cmd` site inside the dispatch switch.
+//
+// All returns from updateInner that yield an App model flow through
+// this wrapper; non-App returns (rare; if a future refactor swaps in
+// a different model type) pass through untouched.
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	model, cmd := a.updateInner(msg)
+	if app, ok := model.(App); ok {
+		app.sidebar.SetPreviewImagePath(app.computePreviewPath())
+		return app, cmd
+	}
+	return model, cmd
+}
+
+// computePreviewPath returns the image path that should be rendered
+// in the sidebar's preview pane this frame, derived from focus,
+// cursor, and modal-visibility. Empty when no image should preview
+// (no message-pane focus, modal active, cursor not on a downloaded
+// image attachment).
+func (a App) computePreviewPath() string {
+	if a.focus != FocusMessages || a.anyModalVisible() {
+		return ""
+	}
+	return a.messages.SelectedImagePath()
+}
+
+func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -5547,17 +5597,13 @@ func (a App) View() string {
 		mainHeight = 5
 	}
 
-	// Compute the sidebar preview-pane image path each frame. State is
-	// purely derived from focus + cursor + modal-state — no event
-	// hooks, no stored "last viewed" image. Path is set when the
-	// messages pane has focus, no modal is intercepting input, and
-	// the cursor message has a downloaded image attachment. Empty
-	// otherwise (sidebar shows the default sshkey-term placeholder).
-	previewPath := ""
-	if a.focus == FocusMessages && !a.anyModalVisible() {
-		previewPath = a.messages.SelectedImagePath()
-	}
-	a.sidebar.SetPreviewImagePath(previewPath)
+	// Sidebar preview-pane image path is now applied at the end of
+	// Update() (see Update wrapper), not here. View is value-receiver
+	// so a SetPreviewImagePath call here would mutate a discarded copy
+	// and the transition-detection state in SidebarModel would never
+	// persist between frames — breaking the kitty graphics-protocol
+	// delete-on-deselect path. The Update-side write keeps that state
+	// authoritative on the persistent App model.
 
 	// Sync active-context to the sidebar so it can highlight the
 	// room/group/DM currently shown in the messages pane,
