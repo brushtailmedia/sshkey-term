@@ -141,6 +141,7 @@ type App struct {
 	// doc-comment for the full history.
 	contextMenu     ContextMenuModel
 	memberMenu      MemberMenuModel
+	statusPicker    StatusPickerModel
 	passphrase      PassphraseModel
 	passphraseCh    chan []byte
 	passphraseCache map[string][]byte // keyPath -> passphrase
@@ -486,6 +487,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			a.memberMenu, cmd = a.memberMenu.Update(msg)
+			return a, cmd
+		}
+
+		// Status picker intercepts all keys when visible. Esc-at-App-
+		// level for the same reason as memberMenu (terminal/key-routing
+		// quirks made an inner-only Esc handler unreliable).
+		if a.statusPicker.IsVisible() {
+			if msg.Type == tea.KeyEsc {
+				a.statusPicker.Hide()
+				return a, nil
+			}
+			var cmd tea.Cmd
+			a.statusPicker, cmd = a.statusPicker.Update(msg)
 			return a, cmd
 		}
 
@@ -1289,6 +1303,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.client != nil {
 				a.infoPanel.ShowUser(msg.User, a.client, a.sidebar.online, a.sidebar.status, a.messages.dm)
 			}
+		}
+		return a, nil
+
+	case StatusSelectMsg:
+		// User picked a status from the StatusPicker modal. Same
+		// downstream flow as a typed `/setstatus <name>`: send to
+		// server + optimistic local sidebar update so the dot
+		// color flips immediately. Picker already validated the
+		// status against the locked set (it only emits the three
+		// valid values), so no validation needed here.
+		if a.client != nil && msg.Status != "" {
+			a.client.Enc().Encode(protocol.SetStatus{
+				Type: "set_status",
+				Text: msg.Status,
+			})
+			a.sidebar.SetStatus(a.client.UserID(), msg.Status)
+			a.statusBar.SetError("Status set to " + msg.Status)
 		}
 		return a, nil
 
@@ -2428,7 +2459,8 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.auditOverlay.IsVisible() || a.membersOverlay.IsVisible() ||
 		a.lastAdminPicker.IsVisible() ||
 		a.saveAttachment.IsVisible() ||
-		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() {
+		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() ||
+		a.statusPicker.IsVisible() {
 		return a, nil
 	}
 
@@ -3396,10 +3428,11 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		a.settings.Show(a.appConfig, a.configDir, displayName, a.serverIdx)
 	case "/setstatus":
 		// Locked-set status — the only valid arguments are the
-		// constants in sidebar.go (available / away / busy). Empty
-		// arg is invalid; passing nothing means "show usage" rather
-		// than "clear status" since there's no obvious clear gesture
-		// (the user can /setstatus available to go back to default).
+		// constants in sidebar.go (available / away / busy). Bare
+		// /setstatus opens the picker for discoverability + arrow-
+		// key selection; the typed-arg form bypasses the picker and
+		// still works for power users / scripted sessions.
+		//
 		// Sends SetStatus to the server which echoes it back via
 		// the Presence broadcast that other clients (including ours)
 		// pick up; we also optimistically update local state so
@@ -3409,12 +3442,16 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			return
 		}
 		arg := strings.ToLower(strings.TrimSpace(sc.Arg))
+		if arg == "" {
+			// No arg → open the picker. Pre-position cursor on the
+			// current status so a quick Enter is a no-op rather
+			// than a silent reset to Available.
+			a.statusPicker.Show(a.sidebar.status[a.client.UserID()])
+			return
+		}
 		switch arg {
 		case StatusAvailable, StatusAway, StatusBusy:
-			// valid — fall through
-		case "":
-			a.statusBar.SetError("Usage: /setstatus available|away|busy")
-			return
+			// valid — fall through to send
 		default:
 			a.statusBar.SetError("Unknown status: " + arg + " (try: available, away, busy)")
 			return
@@ -5241,7 +5278,8 @@ func (a *App) anyModalVisible() bool {
 		a.newConv.IsVisible() ||
 		a.threadPanel.IsVisible() ||
 		a.search.IsVisible() ||
-		a.quickSwitch.IsVisible()
+		a.quickSwitch.IsVisible() ||
+		a.statusPicker.IsVisible()
 }
 
 func (a App) View() string {
@@ -5485,6 +5523,20 @@ func (a App) View() string {
 	if a.memberMenu.IsVisible() {
 		mx, my := a.memberMenu.AnchorXY()
 		return overlay(screen, a.memberMenu.View(), mx, my+1, a.width, a.height)
+	}
+	if a.statusPicker.IsVisible() {
+		// Anchor: a few cells above the input bar, indented from
+		// the left by the sidebar+gap so the dialog appears in the
+		// messages-pane region where the user typed /setstatus —
+		// rather than centered (which feels disconnected from the
+		// input action) or full-screen (which is heavy for a 3-row
+		// picker). overlay() clamps if the dialog would overflow.
+		col := layout.MessagesX0 + 2
+		row := layout.InputY0 - 5
+		if row < 0 {
+			row = 0
+		}
+		return overlay(screen, a.statusPicker.View(), col, row, a.width, a.height)
 	}
 	if a.passphrase.IsVisible() {
 		return a.passphrase.View(a.width)
