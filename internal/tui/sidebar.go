@@ -105,6 +105,18 @@ type SidebarModel struct {
 	// pane and no modal is open. Empty otherwise (preview shows the
 	// default sshkey-term placeholder).
 	previewImagePath string
+
+	// activeRoom / activeGroup / activeDM — the room, group, or DM
+	// currently shown in the messages pane. Distinct from
+	// selectedRoom/Group/DM (which track cursor position): the user
+	// can cursor through the sidebar without actually switching the
+	// active context. App.View calls SetActiveContext each frame
+	// from messages.room/group/dm so the sidebar can highlight the
+	// active entry — letting the user see which conversation
+	// they're in regardless of which panel currently has focus.
+	activeRoom  string
+	activeGroup string
+	activeDM    string
 }
 
 func NewSidebar() SidebarModel {
@@ -349,6 +361,18 @@ func (s *SidebarModel) SetPreviewImagePath(path string) {
 	s.previewImagePath = path
 }
 
+// SetActiveContext updates the room/group/DM currently shown in the
+// messages pane. The sidebar highlights the matching entry so the
+// user can see which conversation is active regardless of focus.
+// Only one of (room, group, dm) is non-empty at a time — the others
+// are cleared. App.View calls this each frame from
+// messages.room/group/dm.
+func (s *SidebarModel) SetActiveContext(room, group, dm string) {
+	s.activeRoom = room
+	s.activeGroup = group
+	s.activeDM = dm
+}
+
 func (s *SidebarModel) SelectedRoom() string {
 	return s.selectedRoom
 }
@@ -445,7 +469,11 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 		if isLeft || isRetired {
 			line = archivedStyle.Render(line)
 		}
-		if i == s.cursor && focused {
+		// Highlight when this entry is either the active context
+		// (always) or the cursor under sidebar focus (existing nav
+		// feedback). Active highlight persists when focus moves
+		// elsewhere so the user can see which room they're in.
+		if room == s.activeRoom || (i == s.cursor && focused) {
 			line = selectedStyle.Width(contentWidth).Render(line)
 		}
 		add(line, i)
@@ -512,7 +540,9 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 		}
 
 		idx := len(s.rooms) + i
-		if idx == s.cursor && focused {
+		// Active or cursor-under-focus → highlight (see rooms loop
+		// for full rationale).
+		if g.ID == s.activeGroup || (idx == s.cursor && focused) {
 			line = selectedStyle.Width(contentWidth).Render(line)
 		}
 		add(line, idx)
@@ -558,7 +588,9 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 			line := fitSidebarLinePreferName(prefix, name, suffix, contentWidth)
 
 			idx := len(s.rooms) + len(s.groups) + i
-			if idx == s.cursor && focused {
+			// Active or cursor-under-focus → highlight (see rooms
+			// loop for full rationale).
+			if dm.ID == s.activeDM || (idx == s.cursor && focused) {
 				line = selectedStyle.Width(contentWidth).Render(line)
 			}
 			add(line, idx)

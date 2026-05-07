@@ -210,6 +210,15 @@ type MessagesModel struct {
 	// empty string when there are no pins or the model is in collapsed-
 	// state-without-pins.
 	pinnedBar string
+
+	// pendingSelfCursor is set by SnapToOwnSend (called when the
+	// user sends a message) and consumed by the next Add{Room,Group,
+	// DM}Message — that Add advances the cursor to the just-appended
+	// message and clears the flag. Couples "user just sent" with
+	// "cursor follows the echo" so the user can return to the
+	// messages pane and find their cursor on the message they sent.
+	// See SnapToOwnSend's doc-comment for edge cases.
+	pendingSelfCursor bool
 }
 
 // SetFilesDir wires the per-server file cache directory into the render
@@ -309,6 +318,58 @@ func (m *MessagesModel) ScrollToMessage(msgID string) bool {
 		}
 	}
 	return false
+}
+
+// SnapToOwnSend is called when the user just sent a message via the
+// input. Three coupled effects:
+//
+//  1. Viewport scrolls to the bottom (so the new message lands in
+//     view; without this, users reading history would send into
+//     the void).
+//  2. Cursor moves to the current last message so SOMETHING is
+//     highlighted while the user's send is in flight — otherwise
+//     they switch back to the messages pane to find the cursor on
+//     an old off-screen message and lose orientation.
+//  3. pendingSelfCursor is raised so the next Add{Room,Group,DM}
+//     Message advances the cursor to the just-appended index. By
+//     the time the server echoes the user's message back, the
+//     cursor will be sitting on it — same row the user expects
+//     when they re-enter the messages pane.
+//
+// Edge cases:
+//   - First-message-in-thread: len(messages) == 0 at send time. The
+//     pre-echo cursor stays wherever it was; on echo, Add* fires and
+//     the flag advances cursor to index 0. Correct.
+//   - Other-user's message arrives BEFORE the user's echo: the
+//     other message's Add* consumes the flag and advances cursor
+//     to it. Slightly off semantically ("you sent X, cursor is on
+//     someone else's Y") but the user does see the latest message,
+//     which is a reasonable degradation. Self-correcting on next
+//     own-send.
+//   - Send fails / never echoes: flag stays raised until the next
+//     Add* of any kind. Harmless — first message that arrives gets
+//     the cursor.
+func (m *MessagesModel) SnapToOwnSend() {
+	m.viewport.GotoBottom()
+	if len(m.messages) > 0 {
+		m.cursor = len(m.messages) - 1
+	}
+	m.pendingSelfCursor = true
+}
+
+// consumePendingSelfCursor advances the cursor to the just-appended
+// last message and clears the pendingSelfCursor flag — but only if
+// the flag is set. No-op otherwise. Called by each Add{Room,Group,
+// DM}Message after the append, so the cursor follows the user's
+// send through to its server echo.
+func (m *MessagesModel) consumePendingSelfCursor() {
+	if !m.pendingSelfCursor {
+		return
+	}
+	if len(m.messages) > 0 {
+		m.cursor = len(m.messages) - 1
+	}
+	m.pendingSelfCursor = false
 }
 
 // selectedMessageRowSpan returns the inclusive [start,end] content-row span for
@@ -672,6 +733,7 @@ func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
 		Mentions:    mentions,
 		Attachments: attachments,
 	})
+	m.consumePendingSelfCursor()
 }
 
 func (m *MessagesModel) AddGroupMessage(msg protocol.GroupMessage, c *client.Client) {
@@ -730,6 +792,7 @@ func (m *MessagesModel) AddGroupMessage(msg protocol.GroupMessage, c *client.Cli
 		Mentions:    mentions,
 		Attachments: attachments,
 	})
+	m.consumePendingSelfCursor()
 }
 
 // AddDMMessage decrypts a 1:1 DM and appends it to the active conversation.
@@ -800,6 +863,7 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 		Mentions:    mentions,
 		Attachments: attachments,
 	})
+	m.consumePendingSelfCursor()
 }
 
 // buildDisplayMsg creates a DisplayMessage from a room protocol message without appending it.

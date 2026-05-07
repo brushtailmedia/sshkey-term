@@ -964,11 +964,31 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 
 		case "esc":
-			// Esc in input focus cancels compose state (reply/edit/draft)
-			// instead of being swallowed as a no-op. Outside input focus,
-			// Esc returns focus to the input panel.
+			// Esc behavior, in priority order:
+			//
+			//   1. If a reply is active (regardless of which panel
+			//      currently has focus), cancel the compose state
+			//      and refocus the input. This makes Esc-from-the-
+			//      messages-pane-while-replying actually cancel the
+			//      reply instead of just refocusing — the previous
+			//      handler only cancelled when focus was already on
+			//      input, leaving the user replying-but-not-focused
+			//      stuck pressing Esc twice.
+			//
+			//   2. Else if input focus + (editing | non-empty draft),
+			//      ResetComposeState (clears edit + text + completion).
+			//
+			//   3. Else, refocus the input panel — the existing "Esc
+			//      returns focus to input from anywhere" behavior.
+			if a.input.IsReplying() {
+				a.input.ResetComposeState()
+				if a.focus != FocusInput {
+					a.focus = FocusInput
+				}
+				return a, nil
+			}
 			if a.focus == FocusInput {
-				if a.input.IsEditing() || a.input.IsReplying() || !a.input.IsEmpty() {
+				if a.input.IsEditing() || !a.input.IsEmpty() {
 					a.input.ResetComposeState()
 				}
 				return a, nil
@@ -1110,9 +1130,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd != nil {
 				cmds = append(cmds, cmd)
 			}
-			// Clear status bar error on send (not on typing)
+			// On send: clear status bar error, AND snap the messages
+			// pane to "user just sent" state — viewport scrolls to
+			// bottom + cursor advances to the last message + a flag
+			// is raised so when the server echoes the user's message
+			// back, the cursor follows to that new index. Net effect:
+			// switch back to messages pane and find the cursor on
+			// the message you just sent, even if you were reading
+			// history when you decided to compose. See SnapToOwnSend
+			// for the full rationale + edge cases.
 			if a.input.DidSend() {
 				a.statusBar.ClearError()
+				a.messages.SnapToOwnSend()
 			}
 			// Check for pending slash commands
 			if sc := a.input.PendingCommand(); sc != nil {
@@ -5232,6 +5261,13 @@ func (a App) View() string {
 		previewPath = a.messages.SelectedImagePath()
 	}
 	a.sidebar.SetPreviewImagePath(previewPath)
+
+	// Sync active-context to the sidebar so it can highlight the
+	// room/group/DM currently shown in the messages pane,
+	// independent of which panel has focus. Lets the user see
+	// which conversation is active even when cursoring through
+	// the sidebar list or composing in the input.
+	a.sidebar.SetActiveContext(a.messages.room, a.messages.group, a.messages.dm)
 
 	// Render panels
 	// Sidebar inner-content height (style.Height arg). Sidebar's outer
