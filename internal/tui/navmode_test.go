@@ -122,6 +122,9 @@ func TestNavMode_RecognizedKeysFireAndExit(t *testing.T) {
 		if a.navMode {
 			t.Fatal("nav mode should exit after recognized key")
 		}
+		if strings.Contains(a.statusBar.View(80), "navigation mode") {
+			t.Fatal("status bar should clear indicator after recognized-key exit")
+		}
 	})
 
 	t.Run("n new conversation", func(t *testing.T) {
@@ -134,6 +137,9 @@ func TestNavMode_RecognizedKeysFireAndExit(t *testing.T) {
 		if a.navMode {
 			t.Fatal("nav mode should exit after recognized key")
 		}
+		if strings.Contains(a.statusBar.View(80), "navigation mode") {
+			t.Fatal("status bar should clear indicator after recognized-key exit")
+		}
 	})
 
 	t.Run("m toggle members", func(t *testing.T) {
@@ -145,6 +151,9 @@ func TestNavMode_RecognizedKeysFireAndExit(t *testing.T) {
 		}
 		if a.navMode {
 			t.Fatal("nav mode should exit after recognized key")
+		}
+		if strings.Contains(a.statusBar.View(80), "navigation mode") {
+			t.Fatal("status bar should clear indicator after recognized-key exit")
 		}
 	})
 
@@ -159,6 +168,9 @@ func TestNavMode_RecognizedKeysFireAndExit(t *testing.T) {
 		if a.navMode {
 			t.Fatal("nav mode should exit after recognized key")
 		}
+		if strings.Contains(a.statusBar.View(80), "navigation mode") {
+			t.Fatal("status bar should clear indicator after recognized-key exit")
+		}
 	})
 
 	t.Run("s open settings", func(t *testing.T) {
@@ -171,6 +183,9 @@ func TestNavMode_RecognizedKeysFireAndExit(t *testing.T) {
 		if a.navMode {
 			t.Fatal("nav mode should exit after recognized key")
 		}
+		if strings.Contains(a.statusBar.View(80), "navigation mode") {
+			t.Fatal("status bar should clear indicator after recognized-key exit")
+		}
 	})
 
 	t.Run("slash open search", func(t *testing.T) {
@@ -182,6 +197,9 @@ func TestNavMode_RecognizedKeysFireAndExit(t *testing.T) {
 		}
 		if a.navMode {
 			t.Fatal("nav mode should exit after recognized key")
+		}
+		if strings.Contains(a.statusBar.View(80), "navigation mode") {
+			t.Fatal("status bar should clear indicator after recognized-key exit")
 		}
 	})
 
@@ -197,6 +215,9 @@ func TestNavMode_RecognizedKeysFireAndExit(t *testing.T) {
 		}
 		if a.navMode {
 			t.Fatal("nav mode should exit after recognized key")
+		}
+		if strings.Contains(a.statusBar.View(80), "navigation mode") {
+			t.Fatal("status bar should clear indicator after recognized-key exit")
 		}
 	})
 }
@@ -217,6 +238,45 @@ func TestNavMode_NumberOutOfRangeExitsWithoutSwitch(t *testing.T) {
 	}
 }
 
+// TestNavMode_NumberKeysAllSwitch verifies every digit 1..9 routes to
+// the corresponding server tab, not just the lone `2` case in the
+// shared RecognizedKeys table. The default harness only has 2
+// servers; this test builds a 9-server config inline so each digit
+// has a target to land on. Closes a gap from the doc's D13-19 spec
+// which called for full-range coverage.
+func TestNavMode_NumberKeysAllSwitch(t *testing.T) {
+	servers := make([]config.ServerConfig, 9)
+	for i := 0; i < 9; i++ {
+		servers[i] = config.ServerConfig{
+			Name: "Server" + string(rune('0'+i+1)),
+			// IPv4 octets max at 255 — well above 9. Distinct hosts
+			// per server so the post-switch a.cfg.Host check would
+			// have signal if we wanted to extend the assertion.
+			Host: "127.0.0." + string(rune('0'+i+1)),
+			Port: 2222 + i,
+			Key:  "~/.ssh/id_ed25519",
+		}
+	}
+
+	for digit := 1; digit <= 9; digit++ {
+		t.Run("digit "+string(rune('0'+digit)), func(t *testing.T) {
+			a := newNavModeAppHarness(t)
+			a.appConfig.Servers = servers
+			a.serverIdx = 0
+
+			a = updateNavApp(t, a, navCtrlG())
+			a = updateNavApp(t, a, navRune(rune('0'+digit)))
+
+			if a.serverIdx != digit-1 {
+				t.Errorf("Ctrl+g %d: serverIdx = %d, want %d", digit, a.serverIdx, digit-1)
+			}
+			if a.navMode {
+				t.Errorf("Ctrl+g %d: nav mode should exit after switch", digit)
+			}
+		})
+	}
+}
+
 func TestNavMode_UnrecognizedKeyExitsAndFallsThroughInput(t *testing.T) {
 	a := newNavModeAppHarness(t)
 	// Keep this test local-only; no outbound typing side effects.
@@ -231,6 +291,9 @@ func TestNavMode_UnrecognizedKeyExitsAndFallsThroughInput(t *testing.T) {
 	}
 	if got := a.input.Value(); got != "z" {
 		t.Fatalf("unrecognized key should fall through to input, got %q", got)
+	}
+	if strings.Contains(a.statusBar.View(80), "navigation mode") {
+		t.Fatal("status bar should clear indicator after unrecognized-key exit")
 	}
 }
 
@@ -355,6 +418,37 @@ func TestNavMode_ModalPrecedence(t *testing.T) {
 	})
 }
 
+// TestNavMode_LegacyDirectBindingsRemoved asserts the migrated
+// Ctrl+<key> direct handlers are gone — pressing the bare ctrl
+// chord must NOT trigger the action that used to be wired to it.
+//
+// Coverage limitation: bubbletea v1.3.10 only represents `ctrl+`
+// chords as named KeyType values for letters A-Z (KeyCtrlA..KeyCtrlZ)
+// plus a fixed set of punctuation aliases (KeyCtrlAt, KeyCtrlOpenBracket,
+// etc.). There is NO KeyMsg representation for `ctrl+,` or `ctrl+1`
+// through `ctrl+9` — Key.String() requires either a known KeyType or
+// the KeyRunes path, and the latter only renders alt+ as a modifier
+// prefix. So the legacy `case "ctrl+,"` and `case "ctrl+1"`-`case
+// "ctrl+9"` handlers in app.go could never have matched any input
+// the bubbletea reader actually produces (the doc explicitly notes
+// xterm/Linux console produce nothing for `ctrl+1` either). They
+// were dead code — removing them is purely cleanup.
+//
+// What we CAN test directly:
+//   - KeyCtrlK / KeyCtrlN / KeyCtrlF — distinct KeyTypes, real input
+//     path, asserts the switch case is gone.
+//
+// What's untestable here:
+//   - Ctrl+, → settings (no KeyMsg representation).
+//   - Ctrl+1-9 → server switch (no KeyMsg representation in this
+//     bubbletea version).
+//
+// Functional coverage for those paths comes via the nav-mode tests:
+// TestNavMode_NumberKeysAllSwitch proves Ctrl+g 1-9 IS the only path
+// that switches servers (because no other path is testable end-to-
+// end), and TestNavMode_RecognizedKeysFireAndExit / "s open settings"
+// proves Ctrl+g s is the only path to settings. If a bubbletea
+// upgrade later starts representing those chords, extend this table.
 func TestNavMode_LegacyDirectBindingsRemoved(t *testing.T) {
 	a := newNavModeAppHarness(t)
 
