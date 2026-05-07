@@ -1,12 +1,11 @@
 package tui
 
-// Tests for the `/whois <user>` slash command (Phase 21 F30 closure
-// 2026-04-19). The command surfaces full locally-known identity info
-// for a user — display name, user ID, key fingerprint, verified
-// state, and first-seen / last-key-updated timestamps — so operators
-// investigating "did Alice's key actually rotate?" can check
-// immediately without launching the full VerifyModel. Also copies the
-// fingerprint to the clipboard to match `/mykey`'s ergonomic.
+// Tests for the `/whois <user>` slash command. After the 2026-05 UX
+// pass /whois opens the per-user info panel (same panel as the
+// member-panel "view profile" action) instead of dumping a one-line
+// summary to the status bar. So tests assert against the panel's
+// populated state — IsVisible() + the per-user fields — rather than
+// status-bar string contents.
 //
 // Tests cover: happy path, unknown user, nil client, empty arg, live-
 // profile-only fallback (no pinned entry), pinned-only fallback (no
@@ -18,7 +17,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
@@ -64,14 +62,23 @@ func TestWhois_HappyPath(t *testing.T) {
 
 	a.handleWhoisCommand("Alice")
 
-	msg := a.statusBar.errorMsg
-	for _, want := range []string{"Alice", "usr_alice", "SHA256:abcdef123456", "verified", "fingerprint copied"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("status bar missing %q; got %q", want, msg)
-		}
+	if !a.infoPanel.IsVisible() {
+		t.Fatal("info panel should be visible after /whois on a known user")
 	}
-	if strings.Contains(msg, "unverified") {
-		t.Errorf("should show verified, not unverified; got %q", msg)
+	if !a.infoPanel.isUser {
+		t.Fatal("info panel should be in user-profile mode")
+	}
+	if a.infoPanel.userID != "usr_alice" {
+		t.Errorf("userID = %q, want usr_alice", a.infoPanel.userID)
+	}
+	if a.infoPanel.userDisplay != "Alice" {
+		t.Errorf("userDisplay = %q, want Alice", a.infoPanel.userDisplay)
+	}
+	if a.infoPanel.userFingerprint != "SHA256:abcdef123456" {
+		t.Errorf("userFingerprint = %q", a.infoPanel.userFingerprint)
+	}
+	if !a.infoPanel.userVerified {
+		t.Error("userVerified should be true after MarkVerified")
 	}
 }
 
@@ -86,8 +93,11 @@ func TestWhois_UnverifiedRendersUnverified(t *testing.T) {
 
 	a.handleWhoisCommand("Alice")
 
-	if !strings.Contains(a.statusBar.errorMsg, "unverified") {
-		t.Errorf("status bar should contain 'unverified'; got %q", a.statusBar.errorMsg)
+	if !a.infoPanel.IsVisible() {
+		t.Fatal("info panel should be visible")
+	}
+	if a.infoPanel.userVerified {
+		t.Error("userVerified should be false for unpinned-but-not-verified")
 	}
 }
 
@@ -104,8 +114,11 @@ func TestWhois_ResolvesAtPrefix(t *testing.T) {
 
 	a.handleWhoisCommand("@Alice")
 
-	if !strings.Contains(a.statusBar.errorMsg, "usr_alice") {
-		t.Errorf("status bar should show resolved user id; got %q", a.statusBar.errorMsg)
+	if !a.infoPanel.IsVisible() {
+		t.Fatal("info panel should be visible after @-prefixed name resolution")
+	}
+	if a.infoPanel.userID != "usr_alice" {
+		t.Errorf("userID = %q, want usr_alice (resolved from @Alice)", a.infoPanel.userID)
 	}
 }
 
@@ -119,8 +132,11 @@ func TestWhois_ResolvesRawUserID(t *testing.T) {
 
 	a.handleWhoisCommand("usr_alice")
 
-	if !strings.Contains(a.statusBar.errorMsg, "Alice") {
-		t.Errorf("status bar should resolve raw user id to display name; got %q", a.statusBar.errorMsg)
+	if !a.infoPanel.IsVisible() {
+		t.Fatal("info panel should be visible after raw user-ID lookup")
+	}
+	if a.infoPanel.userDisplay != "Alice" {
+		t.Errorf("userDisplay = %q, want Alice (resolved from raw ID)", a.infoPanel.userDisplay)
 	}
 }
 
@@ -129,6 +145,9 @@ func TestWhois_UnknownUser(t *testing.T) {
 	a.handleWhoisCommand("nobody")
 	if !strings.Contains(a.statusBar.errorMsg, "unknown user") {
 		t.Errorf("status bar should say unknown user; got %q", a.statusBar.errorMsg)
+	}
+	if a.infoPanel.IsVisible() {
+		t.Error("info panel should NOT open for an unknown user")
 	}
 }
 
@@ -159,8 +178,8 @@ func TestWhois_NilClient(t *testing.T) {
 func TestWhois_LiveProfileWithoutPinnedEntry(t *testing.T) {
 	// Profile is in the live cache but nothing has been pinned yet
 	// (e.g., brand-new connection, no prior message exchange).
-	// /whois should still work, showing the live fingerprint but
-	// without timestamps.
+	// /whois should still open the panel with the live fingerprint
+	// but a zero first-seen.
 	a, c, _ := newWhoisTestApp(t)
 	client.SetProfileForTesting(c, &protocol.Profile{
 		User:           "usr_bob",
@@ -170,15 +189,14 @@ func TestWhois_LiveProfileWithoutPinnedEntry(t *testing.T) {
 
 	a.handleWhoisCommand("Bob")
 
-	msg := a.statusBar.errorMsg
-	if !strings.Contains(msg, "SHA256:bobkey") {
-		t.Errorf("should show live-profile fingerprint; got %q", msg)
+	if !a.infoPanel.IsVisible() {
+		t.Fatal("panel should open with live-profile-only data")
 	}
-	if strings.Contains(msg, "first seen") {
-		t.Errorf("should omit 'first seen' when no pinned entry; got %q", msg)
+	if a.infoPanel.userFingerprint != "SHA256:bobkey" {
+		t.Errorf("userFingerprint = %q, want SHA256:bobkey", a.infoPanel.userFingerprint)
 	}
-	if strings.Contains(msg, "key updated") {
-		t.Errorf("should omit 'key updated' when no pinned entry; got %q", msg)
+	if a.infoPanel.userFirstSeen != 0 {
+		t.Errorf("userFirstSeen = %d, want 0 (no pinned entry)", a.infoPanel.userFirstSeen)
 	}
 }
 
@@ -194,12 +212,14 @@ func TestWhois_PinnedOnlyFallback(t *testing.T) {
 	// (profile cache is empty); must resolve by user ID.
 	a.handleWhoisCommand("usr_carol")
 
-	msg := a.statusBar.errorMsg
-	if !strings.Contains(msg, "SHA256:carolkey") {
-		t.Errorf("should show pinned-fallback fingerprint; got %q", msg)
+	if !a.infoPanel.IsVisible() {
+		t.Fatal("panel should open from pinned-only data")
 	}
-	if !strings.Contains(msg, "first seen") {
-		t.Errorf("pinned entry should render first-seen timestamp; got %q", msg)
+	if a.infoPanel.userFingerprint != "SHA256:carolkey" {
+		t.Errorf("userFingerprint = %q, want SHA256:carolkey (from pinned)", a.infoPanel.userFingerprint)
+	}
+	if a.infoPanel.userFirstSeen == 0 {
+		t.Error("userFirstSeen should be populated from pinned-keys row")
 	}
 }
 
@@ -214,8 +234,11 @@ func TestWhois_RetiredFlagRendered(t *testing.T) {
 
 	a.handleWhoisCommand("Dave")
 
-	if !strings.Contains(a.statusBar.errorMsg, "retired") {
-		t.Errorf("status bar should include 'retired' marker; got %q", a.statusBar.errorMsg)
+	if !a.infoPanel.IsVisible() {
+		t.Fatal("panel should open for retired user")
+	}
+	if !a.infoPanel.userRetired {
+		t.Error("userRetired should be true")
 	}
 }
 
@@ -230,67 +253,11 @@ func TestWhois_AdminFlagRendered(t *testing.T) {
 
 	a.handleWhoisCommand("Eve")
 
-	if !strings.Contains(a.statusBar.errorMsg, "admin") {
-		t.Errorf("status bar should include 'admin' marker; got %q", a.statusBar.errorMsg)
+	if !a.infoPanel.IsVisible() {
+		t.Fatal("panel should open for admin user")
 	}
-}
-
-func TestWhois_KeyUpdatedOmittedWhenEqualsFirstSeen(t *testing.T) {
-	// When a profile is pinned for the first time, first_seen ==
-	// updated_at. Rendering both would be redundant; the handler
-	// should only render "key updated" when it differs from
-	// "first seen".
-	a, c, _ := newWhoisTestApp(t)
-	client.SetProfileForTesting(c, &protocol.Profile{
-		User:           "usr_fresh",
-		DisplayName:    "Frank",
-		KeyFingerprint: "SHA256:frank1",
-	})
-	// Note: PinKey sets first_seen = updated_at = now, so they're equal.
-	if st := c.Store(); st != nil {
-		st.PinKey("usr_fresh", "SHA256:frank1", "ssh-ed25519 f")
-	}
-
-	a.handleWhoisCommand("Frank")
-
-	msg := a.statusBar.errorMsg
-	if !strings.Contains(msg, "first seen") {
-		t.Errorf("should render first-seen on first pin; got %q", msg)
-	}
-	if strings.Contains(msg, "key updated") {
-		t.Errorf("should NOT render 'key updated' when equal to first-seen; got %q", msg)
-	}
-}
-
-func TestWhois_KeyUpdatedRenderedWhenChanged(t *testing.T) {
-	// After a key change, updated_at advances past first_seen. The
-	// handler should render both timestamps to surface the change
-	// date.
-	a, c, _ := newWhoisTestApp(t)
-	client.SetProfileForTesting(c, &protocol.Profile{
-		User:           "usr_rotated",
-		DisplayName:    "Gina",
-		KeyFingerprint: "SHA256:gina2",
-	})
-
-	st := c.Store()
-	st.PinKey("usr_rotated", "SHA256:gina1", "ssh-ed25519 g1")
-	// Force first_seen and updated_at to diverge. We can't easily
-	// advance time in this test without hook injection, so directly
-	// write a known timestamp via the exposed PinKey path with a
-	// contrived sleep (avoid flakiness: 1.1s is enough for the store
-	// to record distinct Unix-second values).
-	time.Sleep(1100 * time.Millisecond)
-	st.PinKey("usr_rotated", "SHA256:gina2", "ssh-ed25519 g2") // key change
-
-	a.handleWhoisCommand("Gina")
-
-	msg := a.statusBar.errorMsg
-	if !strings.Contains(msg, "first seen") {
-		t.Errorf("should render first-seen; got %q", msg)
-	}
-	if !strings.Contains(msg, "key updated") {
-		t.Errorf("should render 'key updated' when different from first-seen; got %q", msg)
+	if !a.infoPanel.userAdmin {
+		t.Error("userAdmin should be true")
 	}
 }
 
@@ -298,7 +265,7 @@ func TestWhois_NoFingerprintAnywhere(t *testing.T) {
 	// Edge case: the resolved user exists in the profile cache but
 	// the profile has no KeyFingerprint, AND no pinned entry exists.
 	// The handler must surface a clean "no profile or pinned key"
-	// error rather than rendering a malformed status line.
+	// error rather than opening a panel with no identity data.
 	a, c, _ := newWhoisTestApp(t)
 	client.SetProfileForTesting(c, &protocol.Profile{
 		User:        "usr_nokey",
@@ -308,8 +275,10 @@ func TestWhois_NoFingerprintAnywhere(t *testing.T) {
 
 	a.handleWhoisCommand("Helen")
 
-	msg := a.statusBar.errorMsg
-	if !strings.Contains(msg, "no profile or pinned key") {
-		t.Errorf("should surface 'no profile or pinned key'; got %q", msg)
+	if !strings.Contains(a.statusBar.errorMsg, "no profile or pinned key") {
+		t.Errorf("should surface 'no profile or pinned key'; got %q", a.statusBar.errorMsg)
+	}
+	if a.infoPanel.IsVisible() {
+		t.Error("info panel should NOT open without any fingerprint data")
 	}
 }

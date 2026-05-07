@@ -17,7 +17,6 @@ import (
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
-	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
 
 // undoWindowSeconds is the Phase 14 /undo window for reverting a
@@ -1278,12 +1277,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.verify.Show(msg.User, a.client)
 			}
 		case "profile":
-			// Show info panel focused on this user's details
+			// Open the per-user profile panel — full detail (display
+			// name, ID, fingerprint, public key, presence, verified
+			// state, first-seen, role, retirement). Auto-copies the
+			// public key to clipboard. Same panel as /whois opens —
+			// single source of truth for "show me this user."
 			if a.client != nil {
-				p := a.client.Profile(msg.User)
-				if p != nil {
-					a.statusBar.SetError(fmt.Sprintf("%s — %s", p.DisplayName, p.KeyFingerprint))
-				}
+				a.infoPanel.ShowUser(msg.User, a.client, a.sidebar.online, a.messages.dm)
 			}
 		}
 		return a, nil
@@ -3874,58 +3874,32 @@ func (a *App) handleWhoisCommand(rawName string) {
 		}
 	}
 
+	// Sanity check: we need a fingerprint from somewhere — live
+	// profile OR pinned-keys row — for the panel to be meaningful.
+	// A profile with an empty KeyFingerprint is effectively the
+	// same as no profile here, so check both sources for a non-
+	// empty fingerprint before opening the panel.
 	profile := a.client.Profile(targetID)
-	displayName := a.resolveDisplayName(targetID) // falls back to target ID
-
-	var info store.PinnedKeyInfo
-	if st := a.client.Store(); st != nil {
-		// Swallow sql errors — surface as no-pinned-data rather than
-		// a noisy stack. Missing pinned entry is the norm for users
-		// we've never received messages from.
-		info, _ = st.GetPinnedKeyInfo(targetID)
+	hasFingerprint := profile != nil && profile.KeyFingerprint != ""
+	if !hasFingerprint {
+		if st := a.client.Store(); st != nil {
+			if info, err := st.GetPinnedKeyInfo(targetID); err == nil && info.Fingerprint != "" {
+				hasFingerprint = true
+			}
+		}
 	}
-
-	// Prefer the live profile's fingerprint (authoritative, current-
-	// broadcast) over the pinned fingerprint (last-cached). They should
-	// match except during the window between a server push and
-	// StoreProfile updating the pinned row; the live one wins either
-	// way.
-	fingerprint := info.Fingerprint
-	if profile != nil && profile.KeyFingerprint != "" {
-		fingerprint = profile.KeyFingerprint
-	}
-	if fingerprint == "" {
+	if !hasFingerprint {
 		a.statusBar.SetError("unknown user: " + strings.TrimSpace(rawName) + " (no profile or pinned key)")
 		return
 	}
 
-	// Build the status-bar string. Kept compact so it fits on a
-	// single line in typical terminal widths; full data goes to
-	// clipboard and ergonomics follow /mykey.
-	parts := []string{displayName + " (" + targetID + ")", fingerprint}
-
-	verifyTag := "unverified"
-	if info.Verified {
-		verifyTag = "verified"
-	}
-	parts = append(parts, verifyTag)
-
-	if profile != nil && profile.Admin {
-		parts = append(parts, "admin")
-	}
-	if profile != nil && profile.Retired {
-		parts = append(parts, "retired")
-	}
-
-	if info.FirstSeen > 0 {
-		parts = append(parts, "first seen "+time.Unix(info.FirstSeen, 0).UTC().Format("2006-01-02"))
-	}
-	if info.UpdatedAt > 0 && info.UpdatedAt != info.FirstSeen {
-		parts = append(parts, "key updated "+time.Unix(info.UpdatedAt, 0).UTC().Format("2006-01-02"))
-	}
-
-	CopyToClipboard(fingerprint)
-	a.statusBar.SetError(strings.Join(parts, " — ") + " — fingerprint copied to clipboard")
+	// Open the per-user profile panel. Single source of truth for
+	// "show this user's identity" — same panel used by the member-
+	// panel "view profile" action. ShowUser handles auto-copying
+	// the public key to clipboard (matching /mykey ergonomics) and
+	// renders fingerprint, pubkey, presence, verified state,
+	// first-seen, role, retirement.
+	a.infoPanel.ShowUser(targetID, a.client, a.sidebar.online, a.messages.dm)
 }
 
 // lookupGroupName returns the display name of a group, falling back
