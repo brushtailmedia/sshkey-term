@@ -2585,11 +2585,26 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case AttachmentReadyEvent:
-		// Auto-preview image download completed. No model state to
-		// mutate — the render path checks the file cache on disk by
-		// file_id on every View call, so returning from Update is
-		// enough to trigger a re-paint that picks up the newly-cached
-		// file. Continue listening for the next event.
+		// Auto-preview image download completed OR a thumbnail-
+		// generation goroutine just finished. Invalidate cached
+		// render entries for this attachment's path and reset the
+		// sidebar's render key if it matches — the wrapper's
+		// RequestPreviewRender call this Update will then dispatch
+		// a fresh Cmd that picks up whichever encoder's thumbnail
+		// is newly available (typically rasterm replacing a
+		// transient block-char fallback). Without this, the
+		// lookupCachedRenderForKey fast-path keeps returning the
+		// stale render forever — visible as "block-char preview
+		// stuck until app restart" on rasterm-capable terminals
+		// when the rasterm thumbnail finishes after first render.
+		if a.messages.filesDir != "" && msg.FileID != "" {
+			localPath := filepath.Join(a.messages.filesDir, msg.FileID)
+			invalidateImageRenderCacheForPath(localPath)
+			if a.sidebar.previewRenderKey.path == localPath {
+				a.sidebar.previewRenderKey = previewRenderKey{}
+				a.sidebar.previewRenderValue = ""
+			}
+		}
 		if a.client != nil && a.sidebar.msgCh != nil {
 			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.client.Done()))
 		}

@@ -216,10 +216,23 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 					// inflightThumbnailGen so concurrent calls (e.g.
 					// with another upload of the same file_id) don't
 					// race on the temp file.
+					//
+					// Fires OnAttachmentReady on success so the TUI
+					// can invalidate any transient block-char render
+					// cached during the gen window and re-dispatch a
+					// rasterm render. Without this, the sidebar
+					// preview is stuck on block-char fallback until
+					// the next selection change OR app restart.
 					go func() {
-						if terr := GenerateRastermThumbnail(localPath, ThumbnailPathRasterm(localPath)); terr != nil && c.logger != nil {
-							c.logger.Debug("rasterm thumbnail generation failed",
-								"file_id", fileID, "error", terr)
+						if terr := GenerateRastermThumbnail(localPath, ThumbnailPathRasterm(localPath)); terr != nil {
+							if c.logger != nil {
+								c.logger.Debug("rasterm thumbnail generation failed",
+									"file_id", fileID, "error", terr)
+							}
+							return
+						}
+						if c.cfg.OnAttachmentReady != nil {
+							c.cfg.OnAttachmentReady(fileID)
 						}
 					}()
 				}
@@ -426,12 +439,25 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 	// goroutine is what makes the rasterm preview available
 	// without a multi-second decode + multi-MB kitty escape on
 	// first render. Single-flighted via inflightThumbnailGen so
-	// concurrent calls (e.g. with the lazy fallback in
-	// tryRenderRasterm) don't race on the temp file.
+	// concurrent calls don't race on the temp file.
+	//
+	// Fires OnAttachmentReady on success so the TUI can invalidate
+	// any transient block-char render cached during the gen window
+	// (likely populated by the auto-preview cb fire that runs
+	// immediately after DownloadFile returns, before this goroutine
+	// completes) and re-dispatch a rasterm render. Without this,
+	// the preview pane is stuck on block-char fallback until the
+	// next selection change.
 	go func() {
-		if err := GenerateRastermThumbnail(localPath, ThumbnailPathRasterm(localPath)); err != nil && c.logger != nil {
-			c.logger.Debug("rasterm thumbnail generation failed",
-				"file_id", fileID, "error", err)
+		if err := GenerateRastermThumbnail(localPath, ThumbnailPathRasterm(localPath)); err != nil {
+			if c.logger != nil {
+				c.logger.Debug("rasterm thumbnail generation failed",
+					"file_id", fileID, "error", err)
+			}
+			return
+		}
+		if c.cfg.OnAttachmentReady != nil {
+			c.cfg.OnAttachmentReady(fileID)
 		}
 	}()
 

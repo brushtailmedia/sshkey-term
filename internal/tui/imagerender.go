@@ -657,6 +657,28 @@ func lookupCachedRenderForKey(k previewRenderKey) (string, bool) {
 	return getCachedInlineImage(bkey, 0, 0)
 }
 
+// invalidateImageRenderCacheForPath drops every cache entry whose
+// path matches filePath. Called from the AttachmentReadyEvent
+// handler when a thumbnail-generation goroutine completes — the
+// cache may hold a transient block-char render for this path
+// (produced while the rasterm thumbnail was still being generated)
+// that should now be replaced with a rasterm render. Without this
+// invalidation, the lookupCachedRenderForKey fast-path in
+// RequestPreviewRender keeps returning the stale block-char entry
+// forever.
+//
+// Cheap (linear scan over ≤32 entries) and rare (fires once per
+// thumbnail-completion event, not per frame).
+func invalidateImageRenderCacheForPath(filePath string) {
+	imageRenderCacheMu.Lock()
+	defer imageRenderCacheMu.Unlock()
+	for k := range imageRenderCache {
+		if k.path == filePath {
+			delete(imageRenderCache, k)
+		}
+	}
+}
+
 func getCachedInlineImage(key imageRenderCacheKey, modUnixNano, size int64) (string, bool) {
 	imageRenderCacheMu.Lock()
 	defer imageRenderCacheMu.Unlock()
