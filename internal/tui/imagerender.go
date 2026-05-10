@@ -399,15 +399,26 @@ func rasterFitCells(imgW, imgH, maxCols, maxRows int) (cols, rows int) {
 
 // tryRenderRasterm encodes the image at filePath using the detected
 // rasterm protocol, sized to fit (maxCols × maxRows) terminal cells.
-// Returns ("", false) when rasterm isn't capable, the file can't be
-// decoded, or the encoder errors. Callers fall back to the block-
-// char path on the false return.
+// Returns ("", false) when rasterm isn't capable, the rasterm
+// thumbnail file is missing, or the encoder errors. Callers
+// (RenderImageInline) fall through to the block-char path on the
+// false return.
 //
 // Uses the rasterm-specific thumbnail (256×256 max) instead of the
 // block-char thumbnail (80×24) to give the encoder enough source
 // pixels to render crisply at the preview pane's screen-pixel area.
-// Lazy thumbnail generation: if the rasterm thumbnail is missing,
-// decode the original and fire a fire-and-forget write goroutine.
+// Renders exclusively from the on-disk thumbnail — never decodes
+// the original. Earlier behavior decoded the original on thumbnail
+// miss and fired a lazy generation goroutine; that produced a
+// multi-MB kitty escape (thousands of base64 chunks) that stalled
+// the terminal on every replay until the cache cleared, the visible
+// "block every render until restart" pathology. Now: rasterm
+// thumbnail file ownership belongs exclusively to the eager
+// goroutines in uploadEncrypted / DownloadFile (single-flighted via
+// inflightThumbnailGen). Until the eager goroutine completes,
+// RenderImageInline's block-char fall-through provides a transient
+// preview; the next render after the thumbnail lands picks up
+// rasterm.
 //
 // The encoder output starts with the kitty placement header (which
 // includes our image-id) so the sidebar's transition-clear logic can
@@ -418,16 +429,7 @@ func tryRenderRasterm(filePath string, maxCols, maxRows int) (string, bool) {
 	thumbPath := client.ThumbnailPathRasterm(filePath)
 	img, err := decodeImageFile(thumbPath)
 	if err != nil {
-		// Lazy fallback: decode original, fire generation goroutine
-		// for next render. Mirror the block-char path's pattern so
-		// behavior is symmetric across encoders.
-		img, err = decodeImageFile(filePath)
-		if err != nil {
-			return "", false
-		}
-		go func() {
-			_ = client.GenerateRastermThumbnail(filePath, thumbPath)
-		}()
+		return "", false
 	}
 	dstCols, dstRows := rasterFitCells(img.Bounds().Dx(), img.Bounds().Dy(), maxCols, maxRows)
 

@@ -7,9 +7,36 @@ import (
 	_ "image/jpeg" // decoder registration
 	"image/png"
 	"os"
+	"sync"
 
 	"golang.org/x/image/draw"
 )
+
+// inflightThumbnailGen serializes concurrent calls to GenerateThumbnail
+// and GenerateRastermThumbnail for the same destination path.
+//
+// Why: writeThumbnailPNGAtomic uses a shared `<dstPath>.tmp` filename
+// for the temp-file + rename atomic write. Two concurrent callers
+// both open that temp path with O_TRUNC, truncating each other's
+// writes — output PNG ends up corrupt, decoder fails on the next
+// read, callers fall back to decoding the original (multi-second
+// for large images), and on rasterm-capable terminals that fallback
+// produces a multi-MB kitty escape that stalls the terminal on
+// every replay until the cache clears.
+//
+// Concurrent callers arise legitimately:
+//   - Upload's eager goroutine + RenderImageInline's lazy goroutine
+//     both fire after a fresh upload + immediate navigation.
+//   - Two render Cmds (different dims, e.g. window resize during
+//     scroll) both run RenderImageInline → tryRenderRasterm → lazy
+//     thumbnail goroutine for the same path.
+//
+// First caller per dstPath proceeds; subsequent callers see
+// `loaded=true` and return nil immediately (the in-flight first
+// caller will produce the file). Re-checks os.Stat after acquiring
+// the slot to handle the case where the first caller finished
+// between the outer stat-check and the LoadOrStore.
+var inflightThumbnailGen sync.Map
 
 // Inline image thumbnail dimensions, kernel, and format.
 //
@@ -105,6 +132,14 @@ func GenerateThumbnail(srcPath, dstPath string) error {
 	if _, err := os.Stat(dstPath); err == nil {
 		return nil
 	}
+	// Single-flight per dstPath — see inflightThumbnailGen.
+	if _, loaded := inflightThumbnailGen.LoadOrStore(dstPath, struct{}{}); loaded {
+		return nil
+	}
+	defer inflightThumbnailGen.Delete(dstPath)
+	if _, err := os.Stat(dstPath); err == nil {
+		return nil
+	}
 
 	f, err := os.Open(srcPath)
 	if err != nil {
@@ -170,6 +205,20 @@ func GenerateThumbnail(srcPath, dstPath string) error {
 // in goroutines, falling back to the original on next render if the
 // thumbnail isn't yet on disk.
 func GenerateRastermThumbnail(srcPath, dstPath string) error {
+	if _, err := os.Stat(dstPath); err == nil {
+		return nil
+	}
+	// Single-flight per dstPath — see inflightThumbnailGen. Load-
+	// bearing for rasterm specifically: the temp-file race produced
+	// corrupt PNGs which fell through to decode-original on every
+	// render, producing a multi-MB kitty escape that stalled the
+	// terminal on every replay (the "block every render until
+	// restart" pathology before Fix 3 made decode-original
+	// impossible).
+	if _, loaded := inflightThumbnailGen.LoadOrStore(dstPath, struct{}{}); loaded {
+		return nil
+	}
+	defer inflightThumbnailGen.Delete(dstPath)
 	if _, err := os.Stat(dstPath); err == nil {
 		return nil
 	}

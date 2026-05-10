@@ -199,9 +199,26 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 			localPath := filepath.Join(c.cfg.DataDir, "files", fileID)
 			if err := os.MkdirAll(filepath.Dir(localPath), 0700); err == nil {
 				if err := os.WriteFile(localPath, data, 0600); err == nil {
+					// Block-char thumbnail (40×12 cell preview).
 					go func() {
 						if terr := GenerateThumbnail(localPath, ThumbnailPath(localPath)); terr != nil && c.logger != nil {
 							c.logger.Debug("thumbnail generation failed",
+								"file_id", fileID, "error", terr)
+						}
+					}()
+					// Rasterm thumbnail (256×256 source for kitty /
+					// iTerm graphics protocols). tryRenderRasterm
+					// renders exclusively from this thumbnail — never
+					// decodes the original — so this eager goroutine
+					// is what makes the rasterm preview available
+					// without a multi-second decode + multi-MB kitty
+					// escape on first render. Single-flighted via
+					// inflightThumbnailGen so concurrent calls (e.g.
+					// with another upload of the same file_id) don't
+					// race on the temp file.
+					go func() {
+						if terr := GenerateRastermThumbnail(localPath, ThumbnailPathRasterm(localPath)); terr != nil && c.logger != nil {
+							c.logger.Debug("rasterm thumbnail generation failed",
 								"file_id", fileID, "error", terr)
 						}
 					}()
@@ -388,16 +405,32 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 		return "", err
 	}
 
-	// Eager thumbnail generation: spawn a goroutine to decode +
-	// downscale + persist the inline-display thumbnail. By the time
-	// the user scrolls to the message, the thumbnail is usually
-	// ready, and RenderImageInline takes the fast (read-thumbnail)
-	// path. Falls back to its own lazy generation if we get there
-	// first. Non-blocking — fire-and-forget; failure is logged at
-	// Debug and otherwise silent (auto-preview is opportunistic).
+	// Eager thumbnail generation: spawn goroutines to decode +
+	// downscale + persist both inline-display thumbnails (block-
+	// char and rasterm). By the time the user scrolls to the
+	// message, the thumbnails are usually ready, and
+	// RenderImageInline / tryRenderRasterm take the fast path.
+	// Non-blocking — fire-and-forget; failures log at Debug and
+	// are otherwise silent (auto-preview is opportunistic).
+	//
+	// Block-char thumbnail (40×12 cell preview).
 	go func() {
 		if err := GenerateThumbnail(localPath, ThumbnailPath(localPath)); err != nil && c.logger != nil {
 			c.logger.Debug("thumbnail generation failed",
+				"file_id", fileID, "error", err)
+		}
+	}()
+	// Rasterm thumbnail (256×256 source for kitty / iTerm graphics
+	// protocols). tryRenderRasterm renders exclusively from this
+	// thumbnail — never decodes the original — so this eager
+	// goroutine is what makes the rasterm preview available
+	// without a multi-second decode + multi-MB kitty escape on
+	// first render. Single-flighted via inflightThumbnailGen so
+	// concurrent calls (e.g. with the lazy fallback in
+	// tryRenderRasterm) don't race on the temp file.
+	go func() {
+		if err := GenerateRastermThumbnail(localPath, ThumbnailPathRasterm(localPath)); err != nil && c.logger != nil {
+			c.logger.Debug("rasterm thumbnail generation failed",
 				"file_id", fileID, "error", err)
 		}
 	}()
