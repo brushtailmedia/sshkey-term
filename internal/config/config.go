@@ -23,14 +23,21 @@ type Config struct {
 type AttachmentsConfig struct {
 	// ImageAutoPreviewMaxBytes is the upper size cap for auto-downloading
 	// image attachments on receive so they render inline in the chat
-	// stream. Images above this threshold still require an explicit `o`
-	// (open) keypress to download. Zero disables auto-preview entirely —
-	// all images stay as 🖼 placeholders until the user opens them.
+	// stream. Images above this threshold still require an explicit
+	// `p` (preview), `o` (open), or `s` (save) keypress to download.
+	// A NEGATIVE value disables auto-preview entirely — all images
+	// stay as 🖼 placeholders until the user explicitly downloads.
+	// Zero (the toml zero value, what fresh configs serialize to)
+	// gets defaulted by Load, NOT treated as "off."
 	//
-	// Default when unset or zero: 2 MiB. The primary defense against
-	// crafted-image decoder exploits is this cap; anything above it
-	// cannot auto-fire the decoder. Decoder panics are additionally
-	// recovered in RenderImageInline.
+	// Default when unset or zero: 20 MiB. Picked to comfortably cover
+	// typical phone photos (8–12 MB) and DSLR JPGs (4–15 MB) so most
+	// images preview without explicit action. The cap is still the
+	// primary defense against crafted-image decoder exploits —
+	// anything above it cannot auto-fire the decoder; decoder panics
+	// are additionally recovered in RenderImageInline. Operators on
+	// slow links or who want a tighter security posture can lower
+	// this in config.toml.
 	ImageAutoPreviewMaxBytes int64 `toml:"image_auto_preview_max_bytes"`
 }
 
@@ -38,7 +45,7 @@ type AttachmentsConfig struct {
 // either omits the attachments section entirely or sets the cap to
 // zero without being explicit about disabling auto-preview. Operators
 // who want auto-preview fully off should set a negative value.
-const DefaultImageAutoPreviewMaxBytes int64 = 2 * 1024 * 1024
+const DefaultImageAutoPreviewMaxBytes int64 = 20 * 1024 * 1024
 
 type NotificationConfig struct {
 	Desktop          string   `toml:"desktop"`            // "all", "mentions", "off" (default: "all")
@@ -73,16 +80,25 @@ func Load(dir string) (*Config, error) {
 	path := filepath.Join(dir, "config.toml")
 
 	cfg := &Config{}
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return cfg, nil
+	// Decode the config file if present; otherwise fall through with
+	// an empty cfg so the default-apply below still runs. The earlier
+	// early-return-on-not-exists path skipped the default-apply,
+	// leaving fresh-install sessions with
+	// ImageAutoPreviewMaxBytes = 0 (auto-preview disabled) until the
+	// next restart — first-run users would never see auto-preview
+	// on the session where they completed the wizard.
+	if _, err := os.Stat(path); err == nil {
+		if _, err := toml.DecodeFile(path, cfg); err != nil {
+			return nil, fmt.Errorf("parse config: %w", err)
+		}
 	}
 
-	if _, err := toml.DecodeFile(path, cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-
-	// Apply default for image auto-preview cap if the operator didn't set
-	// one. A negative value is the explicit "off" switch.
+	// Apply default for image auto-preview cap if the operator didn't
+	// set one. A negative value is the explicit "off" switch. Runs
+	// for both existing configs (where 0 was written historically
+	// before this default-apply existed) and fresh installs (no file
+	// yet), so first-run sessions get auto-preview immediately
+	// instead of having to wait for a restart.
 	if cfg.Attachments.ImageAutoPreviewMaxBytes == 0 {
 		cfg.Attachments.ImageAutoPreviewMaxBytes = DefaultImageAutoPreviewMaxBytes
 	}
