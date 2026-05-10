@@ -122,33 +122,15 @@ type SidebarModel struct {
 
 	// previewImagePath, when non-empty, points at a locally-cached
 	// image file to render in the bottom preview pane area instead
-	// of the default placeholder. Set by App.View each frame from
+	// of the default placeholder. Set by App.Update each frame from
 	// MessagesModel.SelectedImagePath when focus is on the messages
 	// pane and no modal is open. Empty otherwise (preview shows the
 	// default sshkey-term placeholder).
+	//
+	// Rasterm graphics-layer cleanup: handled stateless-ly inside
+	// buildPreviewContent and App.View — no transition flag on the
+	// model. See those functions' comments for the emission rules.
 	previewImagePath string
-
-	// pendingRastermClear is set by SetPreviewImagePath when the
-	// preview transitions from "showing an image" to "no image" while
-	// rasterm is the active encoder. Consumed and reset on the next
-	// View() render, which prepends the kitty graphics-protocol
-	// delete escape to the rendered output.
-	//
-	// Why this matters: rasterm's kitty branch places images in a
-	// separate compositing layer that bubbletea's text-cell repaints
-	// don't touch. Without an explicit delete escape, an image stays
-	// on screen after deselect / modal-open / context-switch. The
-	// flag-then-emit-on-next-render pattern ties the clear to the
-	// next visual update so the terminal sees "delete escape +
-	// fresh placeholder content" together, avoiding a flash of
-	// "image still there + new placeholder cells overlapping."
-	//
-	// iTerm2 / WezTerm-iterm don't need this — their inline images
-	// are part of the text scrollback and clear automatically when
-	// cells get overwritten — but emitting the kitty escape there is
-	// harmless: non-kitty terminals treat the `\x1b_G` … `\x1b\\`
-	// sequence as an unknown DCS string and silently drop it.
-	pendingRastermClear bool
 
 	// activeRoom / activeGroup / activeDM — the room, group, or DM
 	// currently shown in the messages pane. Distinct from
@@ -496,42 +478,24 @@ func (s SidebarModel) groupPresenceDot(members []string) string {
 	return offlineDot
 }
 
-// SetPreviewImagePathFlagsClear is the transition test that gates
-// pendingRastermClear. Documented as a separate predicate because
-// the conditions are subtle:
-//
-//   - previewImagePath WAS non-empty (we'd been showing an image)
-//   - new path IS empty (we're hiding it)
-//   - rasterm is the active encoder (the only encoder that needs an
-//     explicit clear escape — block-char "clears" naturally because
-//     bubbletea overwrites the text cells)
-//
-// Returning true means the next View() should prepend the kitty
-// delete escape; returning false means no escape is needed.
-func setPreviewNeedsRastermClear(prevPath, newPath string) bool {
-	return prevPath != "" && newPath == "" && rastermCapable()
-}
-
 // SetPreviewImagePath updates the path of the image to render in the
-// preview pane. App.View calls this each frame with the current
+// preview pane. App.Update calls this each frame with the current
 // derived state (cursor-on-image AND focus-on-messages AND no modal),
 // or "" otherwise. Empty path means render the default placeholder.
 //
-// Side effect: when transitioning from a non-empty path to empty
-// while rasterm is the active encoder, set pendingRastermClear so
-// the next View() emits the kitty delete escape. New non-empty
-// paths atomically replace the prior placement (kitty places
-// against the same image-id), so no clear is needed in that
-// direction.
+// No transition tracking: the kitty delete escape is emitted
+// stateless-ly by buildPreviewContent (and App.View for modal
+// frames) on every frame the rendered output doesn't carry a kitty
+// placement. Earlier flag-and-reset design was fragile under fast
+// keypresses — the reset-at-top of Update could wipe a flag set by
+// the previous Update before View consumed it, dropping deletes —
+// AND vulnerable to the bubbletea line-diff renderer skipping the
+// prepended escape on lines whose visible content didn't change
+// (the symptom: arrow-key navigation between images leaves a stale
+// kitty placement on screen, while click navigation works because
+// click flows often involve focus changes that force more lines to
+// re-emit).
 func (s *SidebarModel) SetPreviewImagePath(path string) {
-	if setPreviewNeedsRastermClear(s.previewImagePath, path) {
-		s.pendingRastermClear = true
-	} else if path != "" {
-		// Going to a new image — the upcoming placement will
-		// replace the prior one in-place. Drop any stale clear
-		// flag so we don't accidentally erase the new image.
-		s.pendingRastermClear = false
-	}
 	s.previewImagePath = path
 }
 
@@ -916,10 +880,10 @@ func fitSidebarLinePreferName(prefix, name, suffix string, contentWidth int) str
 // View renders the sidebar.
 //
 // Pointer receiver kept for forward-compatibility with future
-// render-time mutations; the rasterm-clear escape is now emitted
-// at the App.View layer (since full-screen modals bypass this
-// View entirely) so this method no longer mutates the
-// pendingRastermClear flag.
+// render-time mutations; the rasterm clear escape is emitted
+// stateless-ly inside buildPreviewContent (and at App.View for
+// modal frames) so this method doesn't mutate any clear-related
+// state.
 func (s *SidebarModel) View(width, height int, focused bool) string {
 	contentWidth := width - 2
 	if contentWidth < 1 {
@@ -1046,11 +1010,50 @@ func teeBorderEdges(row string) string {
 //
 // Output length is exactly `rows`, matching the area below the
 // divider so that divider + content fills the preview budget.
+//
+// Stateless rasterm clear (kitty terminals only): if this frame's
+// preview content does NOT carry its own kitty placement
+// (placeholder, block-char, or empty render), prepend the kitty
+// delete-by-id escape to the first row. Idempotent — kitty's
+// `a=d,d=I,i=<id>` on a non-existent image is a no-op — so
+// emitting every frame is harmless. Living on the preview-pane
+// row (which differs across frames whenever the preview content
+// transitions between image escape and placeholder text) means
+// bubbletea's line-diff renderer reliably flushes it to the
+// terminal even when the rest of the body is stable.
+//
+// Frames that DO carry a kitty placement (image rendered with
+// thumbnail) skip the delete — kitty's fixed-image-id semantics
+// atomically replace the prior placement.
+//
+// Modal frames bypass this function entirely (App.View early-
+// returns the modal view); App.View carries a parallel stateless
+// emission for that case.
 func (s SidebarModel) buildPreviewContent(width, rows int) []string {
+	var content []string
 	if s.previewImagePath == "" {
-		return buildPreviewPlaceholder(width, rows)
+		content = buildPreviewPlaceholder(width, rows)
+	} else {
+		content = buildPreviewImageRows(s.previewImagePath, width, rows)
 	}
-	return buildPreviewImageRows(s.previewImagePath, width, rows)
+	if rastermProtocolCache == rastermKitty && len(content) > 0 && !containsKittyPlacement(content) {
+		content[0] = rastermDeleteEscape() + content[0]
+	}
+	return content
+}
+
+// containsKittyPlacement reports whether any row contains a kitty
+// image-placement escape (`\x1b_Ga=T,...`). Distinguished from the
+// delete escape (`\x1b_Ga=d,...`) by the action character. Used by
+// buildPreviewContent and App.View to decide whether to inject a
+// delete escape for a prior frame's lingering placement.
+func containsKittyPlacement(rows []string) bool {
+	for _, r := range rows {
+		if strings.Contains(r, "\x1b_Ga=T,") {
+			return true
+		}
+	}
+	return false
 }
 
 // buildPreviewImageRows renders the image at imgPath as cell-aligned

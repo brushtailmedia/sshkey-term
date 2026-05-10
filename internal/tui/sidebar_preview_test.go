@@ -68,93 +68,79 @@ func TestBuildPreviewImageRows_BlockFallbackStillCentered(t *testing.T) {
 	}
 }
 
-// TestSidebarSetPreviewImagePath_NoClearWhenRastermDisabled verifies
-// that the rasterm-clear pending flag stays false when rasterm isn't
-// the active encoder. Block-char "clears" naturally because bubbletea
-// overwrites text cells; emitting the kitty delete escape there is
-// harmless but not needed.
-func TestSidebarSetPreviewImagePath_NoClearWhenRastermDisabled(t *testing.T) {
-	withRastermProtocol(t, rastermNone)
-
-	s := NewSidebar()
-	s.SetPreviewImagePath("/path/to/image.png")
-	s.SetPreviewImagePath("")
-
-	if s.pendingRastermClear {
-		t.Error("pendingRastermClear should be false when rasterm is not capable")
-	}
-}
-
-// TestSidebarSetPreviewImagePath_FlagsClearOnDeselectWhenRasterm
-// verifies that transitioning from "showing image" to "no image"
-// while rasterm is the active encoder sets pendingRastermClear so
-// the next View() emits the kitty delete escape.
-func TestSidebarSetPreviewImagePath_FlagsClearOnDeselectWhenRasterm(t *testing.T) {
+// TestBuildPreviewContent_PrependsDeleteEscapeOnPlaceholder verifies
+// the stateless rasterm-clear emission: when the preview pane has
+// no image (placeholder render) and rasterm-kitty is the active
+// encoder, the first row carries the kitty delete-by-id escape so
+// any prior placement gets removed from the graphics layer.
+func TestBuildPreviewContent_PrependsDeleteEscapeOnPlaceholder(t *testing.T) {
 	withRastermProtocol(t, rastermKitty)
 
 	s := NewSidebar()
-	s.SetPreviewImagePath("/path/to/image.png")
-	if s.pendingRastermClear {
-		t.Error("setting an image path should not flag a clear")
+	rows := s.buildPreviewContent(20, 8)
+	if len(rows) == 0 {
+		t.Fatal("expected non-empty preview rows")
 	}
-	s.SetPreviewImagePath("")
-
-	if !s.pendingRastermClear {
-		t.Error("transitioning non-empty → empty under rasterm should set pendingRastermClear")
+	if !strings.HasPrefix(rows[0], "\x1b_Ga=d,") {
+		t.Errorf("placeholder frame under rasterm-kitty should start with kitty delete escape, got %q", truncateForLog(rows[0], 40))
 	}
 }
 
-// TestSidebarSetPreviewImagePath_NoClearOnNonEmptyToNonEmpty verifies
-// that swapping one image for another doesn't trigger the clear flag.
-// The kitty placement uses a fixed image-id, so a fresh placement
-// atomically replaces the prior one; emitting a delete in between
-// would risk a one-frame "blank preview" flicker.
-func TestSidebarSetPreviewImagePath_NoClearOnNonEmptyToNonEmpty(t *testing.T) {
+// TestBuildPreviewContent_NoDeleteEscapeWhenKittyPlacementPresent
+// verifies the inverse: when the preview pane renders an image with
+// a kitty placement, no extra delete escape is prepended (the new
+// placement atomically replaces the prior via fixed image-id, no
+// delete needed).
+func TestBuildPreviewContent_NoDeleteEscapeWhenKittyPlacementPresent(t *testing.T) {
 	withRastermProtocol(t, rastermKitty)
+	withCleanInlineImageEnv(t)
+	srcPath := writeImageWithThumbs(t, t.TempDir())
 
 	s := NewSidebar()
-	s.SetPreviewImagePath("/path/to/first.png")
-	s.SetPreviewImagePath("/path/to/second.png")
-
-	if s.pendingRastermClear {
-		t.Error("non-empty → non-empty should not flag a clear; new placement replaces prior")
+	s.SetPreviewImagePath(srcPath)
+	rows := s.buildPreviewContent(20, 8)
+	for _, r := range rows {
+		if strings.Contains(r, "\x1b_Ga=d,") {
+			t.Errorf("frame with kitty placement should not also carry a delete escape, got row %q", truncateForLog(r, 40))
+		}
 	}
 }
 
-// TestSidebarSetPreviewImagePath_ResetsClearOnReSelect verifies that
-// re-selecting an image after a stale clear was queued cancels the
-// clear (so we don't accidentally erase the new placement).
-func TestSidebarSetPreviewImagePath_ResetsClearOnReSelect(t *testing.T) {
-	withRastermProtocol(t, rastermKitty)
+// TestBuildPreviewContent_NoDeleteEscapeOnNonKittyTerminals verifies
+// the emission is gated on rastermKitty specifically — iTerm and
+// non-rasterm terminals don't get the kitty escape (iTerm doesn't
+// process it; the bytes would just be wasted in either case).
+func TestBuildPreviewContent_NoDeleteEscapeOnNonKittyTerminals(t *testing.T) {
+	for _, proto := range []rastermProtocol{rastermNone, rastermIterm} {
+		withRastermProtocol(t, proto)
 
-	s := NewSidebar()
-	s.SetPreviewImagePath("/first.png")
-	s.SetPreviewImagePath("") // queue clear
-	if !s.pendingRastermClear {
-		t.Fatal("precondition: clear should be queued")
-	}
-	s.SetPreviewImagePath("/second.png") // re-select before View consumed the flag
-	if s.pendingRastermClear {
-		t.Error("re-selecting an image should cancel a pending clear")
+		s := NewSidebar()
+		rows := s.buildPreviewContent(20, 8)
+		for _, r := range rows {
+			if strings.Contains(r, "\x1b_Ga=d,") {
+				t.Errorf("rasterm protocol %v should not emit kitty delete escape, got row %q", proto, truncateForLog(r, 40))
+			}
+		}
 	}
 }
 
-// TestApp_UpdateWrapper_PersistsPreviewPathForRastermClear is the
-// regression guard for the rasterm-doesn't-clear-on-deselect bug.
+// TestApp_UpdateWrapper_PersistsPreviewPath is the regression guard
+// for the path-mutation-loss bug. Pre-fix, the sidebar preview path
+// was computed in App.View — a value-receiver method whose mutations
+// were discarded on return — so previewImagePath on the persistent
+// App was always "". Post-fix, the path is written at the end of
+// App.Update via the wrapper. Update returns the modified model to
+// bubbletea, so the mutation persists. This test simulates two
+// Update calls and asserts the path correctly tracks selection.
 //
-// Pre-fix, the sidebar preview path was computed in App.View — a
-// value-receiver method whose mutations were discarded on return.
-// SetPreviewImagePath's transition detection reads the previous
-// path; with View's writes lost between frames, the previous path
-// was always "" so the non-empty → empty transition was never
-// detected. The kitty delete escape was never queued, and rasterm
-// placements stayed on screen forever after deselect.
-//
-// Post-fix, the path is written at the end of App.Update via the
-// wrapper. Update returns the modified model to bubbletea, so the
-// mutation persists. This test simulates two Update calls and
-// asserts the second's transition (path → "") flags a clear.
-func TestApp_UpdateWrapper_PersistsPreviewPathForRastermClear(t *testing.T) {
+// Note: pre-2026-05-11 this test also asserted a `pendingRastermClear`
+// flag was set on the empty-transition. That flag was removed when
+// the rasterm clear became stateless (emitted inside
+// buildPreviewContent based on whether the rendered output carries
+// a kitty placement). The path-persistence half of the regression
+// guard remains valid — buildPreviewContent reads previewImagePath
+// to decide what to render.
+func TestApp_UpdateWrapper_PersistsPreviewPath(t *testing.T) {
 	withRastermProtocol(t, rastermKitty)
 
 	a, _ := newEditAppHarness(t)
@@ -189,22 +175,16 @@ func TestApp_UpdateWrapper_PersistsPreviewPathForRastermClear(t *testing.T) {
 	if a1.sidebar.previewImagePath == "" {
 		t.Fatal("Update should have populated sidebar.previewImagePath when image is selected")
 	}
-	if a1.sidebar.pendingRastermClear {
-		t.Fatal("frame 1 (path goes empty → non-empty) should not flag a rasterm clear")
-	}
 
-	// Frame 2: cursor moves off the image (simulate by clearing it
-	// from the message). Now SelectedImagePath returns "" and the
-	// computed preview path is "". Update's wrapper detects the
-	// transition and flags the rasterm clear.
+	// Frame 2: cursor moves off the image (simulate by clearing the
+	// attachment from the message). Now SelectedImagePath returns ""
+	// and the wrapper's SetPreviewImagePath call should clear the
+	// persistent path.
 	a1.messages.messages[0].Attachments = nil
 	model2, _ := a1.Update(struct{}{})
 	a2 := model2.(App)
 	if a2.sidebar.previewImagePath != "" {
 		t.Errorf("frame 2: previewImagePath should be empty, got %q", a2.sidebar.previewImagePath)
-	}
-	if !a2.sidebar.pendingRastermClear {
-		t.Error("frame 2 (path goes non-empty → empty under rasterm) should flag a rasterm clear; this is the regression guard for the View-side mutation-loss bug")
 	}
 }
 
@@ -252,22 +232,19 @@ func TestApp_ComputePreviewPath_PreservedOnFocusShiftToInput(t *testing.T) {
 	a.help.Toggle() // close
 }
 
-// TestAppView_PrependsRastermClearEscape verifies that App.View
-// emits the kitty delete escape when sidebar.pendingRastermClear is
-// set, regardless of which render path App takes.
+// TestAppView_PrependsKittyDeleteWhenBodyLacksPlacement verifies the
+// stateless rasterm clear at App.View level: when the rendered body
+// doesn't carry a kitty placement (default state with no image
+// selected), App.View prepends a delete escape so any prior
+// placement gets cleared from the kitty graphics layer.
 //
-// Pre-2026-05-08, the consume-and-emit lived inside sidebar.View().
-// That worked for normal-render frames but broke when a full-screen
-// modal (settings, infoPanel, addServer, etc.) early-returned the
-// modal's view at the top of App.View — sidebar.View was never
-// called, so the queued escape was never emitted, and the rasterm
-// placement persisted in the kitty graphics layer behind the modal
-// text. Hoisting the emit to App.View covers every render path.
-//
-// The escape stays in the rendered output for the frame that has
-// the flag set; Update clears the flag at the start of the next
-// event so View doesn't re-emit on subsequent frames.
-func TestAppView_PrependsRastermClearEscape(t *testing.T) {
+// Covers the modal-render scope: full-screen modals (settings,
+// infoPanel, addServer, search, etc.) early-return their own view
+// in App.View, bypassing buildPreviewContent's parallel emission.
+// Without the App.View fallback, opening a modal while a kitty
+// image was on-screen would leave the placement persisted behind
+// the modal text.
+func TestAppView_PrependsKittyDeleteWhenBodyLacksPlacement(t *testing.T) {
 	withRastermProtocol(t, rastermKitty)
 
 	a, _ := newEditAppHarness(t)
@@ -275,54 +252,34 @@ func TestAppView_PrependsRastermClearEscape(t *testing.T) {
 	a.height = appMinHeight
 	a.sidebar = NewSidebar()
 	a.sidebar.SetRooms([]string{"general"})
-	a.sidebar.pendingRastermClear = true
 
 	out := a.View()
 	if !strings.HasPrefix(out, "\x1b_Ga=d") {
-		t.Errorf("App.View output should start with kitty delete escape when pendingRastermClear is set, got prefix %q",
+		t.Errorf("App.View output should start with kitty delete escape when body has no kitty placement, got prefix %q",
 			truncateForLog(out, 32))
 	}
 }
 
-// TestAppView_DoesNotPrependEscapeWhenFlagUnset confirms the inverse
-// — when no clear is queued, App.View doesn't emit a stray escape
-// that could disrupt other rendering.
-func TestAppView_DoesNotPrependEscapeWhenFlagUnset(t *testing.T) {
-	withRastermProtocol(t, rastermKitty)
+// TestAppView_NoKittyDeleteOnNonKittyTerminals confirms the gating:
+// the delete escape only goes to kitty-protocol terminals. iTerm
+// doesn't process kitty escapes (they'd be wasted bytes), and
+// non-rasterm terminals don't have a graphics layer to clear in
+// the first place.
+func TestAppView_NoKittyDeleteOnNonKittyTerminals(t *testing.T) {
+	for _, proto := range []rastermProtocol{rastermNone, rastermIterm} {
+		withRastermProtocol(t, proto)
 
-	a, _ := newEditAppHarness(t)
-	a.width = appMinWidth
-	a.height = appMinHeight
-	a.sidebar = NewSidebar()
-	a.sidebar.SetRooms([]string{"general"})
-	a.sidebar.pendingRastermClear = false
+		a, _ := newEditAppHarness(t)
+		a.width = appMinWidth
+		a.height = appMinHeight
+		a.sidebar = NewSidebar()
+		a.sidebar.SetRooms([]string{"general"})
 
-	out := a.View()
-	if strings.HasPrefix(out, "\x1b_Ga=d") {
-		t.Errorf("App.View should NOT prepend escape when pendingRastermClear is false, got prefix %q",
-			truncateForLog(out, 32))
-	}
-}
-
-// TestApp_UpdateClearsPendingRastermClearAtStart verifies the
-// "consume by Update" half of the contract: Update at the start of
-// the next event resets pendingRastermClear so this frame's View
-// (which already emitted the escape) doesn't re-emit on subsequent
-// frames.
-func TestApp_UpdateClearsPendingRastermClearAtStart(t *testing.T) {
-	withRastermProtocol(t, rastermKitty)
-
-	a, _ := newEditAppHarness(t)
-	a.sidebar = NewSidebar()
-	a.sidebar.pendingRastermClear = true
-
-	// A no-op msg should still trigger the clear-at-start logic via
-	// the Update wrapper.
-	model, _ := a.Update(struct{}{})
-	updated := model.(App)
-
-	if updated.sidebar.pendingRastermClear {
-		t.Error("Update should clear pendingRastermClear at start so View doesn't re-emit the escape on subsequent frames")
+		out := a.View()
+		if strings.HasPrefix(out, "\x1b_Ga=d") {
+			t.Errorf("rasterm protocol %v: App.View should NOT prepend kitty delete escape, got prefix %q",
+				proto, truncateForLog(out, 32))
+		}
 	}
 }
 

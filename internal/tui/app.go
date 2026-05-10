@@ -615,22 +615,20 @@ func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChange
 // derived inside View() each frame. View is value-receiver, so the
 // SetPreviewImagePath mutation only persisted within the single
 // View call — `sidebar.previewImagePath` on the App struct itself
-// was never updated. That broke the rasterm-image-clear path:
-// SetPreviewImagePath's transition detection reads the previous
-// `previewImagePath` to decide whether to flag a kitty delete escape,
-// but the previous value was always "" because View's mutation never
-// landed back on the persistent App. Result: rasterm placements
-// stuck on screen forever after deselect (block-char path was fine
-// because text-cell rendering overwrites cleanly, no out-of-band
-// delete needed).
+// was never updated. Update IS value-receiver too, but bubbletea
+// takes its return value as the new model — so mutations inside
+// updateInner DO persist via the returned `a`. Centralizing the
+// SetPreviewImagePath call here (after updateInner has finished
+// modifying focus / cursor / modal state) catches every event that
+// could change the derived path, without having to thread the call
+// through every individual `return a, cmd` site inside the dispatch
+// switch.
 //
-// Update IS value-receiver too, but bubbletea takes its return value
-// as the new model — so mutations inside updateInner DO persist via
-// the returned `a`. Centralizing the SetPreviewImagePath call here
-// (after updateInner has finished modifying focus / cursor / modal
-// state) catches every event that could change the derived path,
-// without having to thread the call through every individual
-// `return a, cmd` site inside the dispatch switch.
+// Rasterm clear flag handling lived here in an earlier design but
+// has been removed — the kitty delete escape is emitted stateless-ly
+// inside buildPreviewContent / App.View based on whether the
+// rendered output carries a kitty placement. See those functions'
+// comments for the rationale.
 //
 // All returns from updateInner that yield an App model flow through
 // this wrapper; non-App returns (rare; if a future refactor swaps in
@@ -640,18 +638,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// scroll logic. View is value-receiver, so render-time size writes do
 	// not persist between events.
 	a.syncMessageViewportState()
-
-	// Consume the previous frame's pendingRastermClear flag, if any.
-	// View is value-receiver — it can read the flag and prepend the
-	// kitty delete escape to its output but can't persist a clear of
-	// the flag. Update is the place where mutations stick (returned
-	// model becomes the new persistent state). Clearing here means
-	// the previous frame's View, if it saw the flag, has already
-	// emitted the escape; this frame's View must not re-emit, and any
-	// fresh transition detected later in this Update (via the
-	// SetPreviewImagePath call below) sets a new flag for THIS
-	// frame's View to consume.
-	a.sidebar.pendingRastermClear = false
 
 	model, cmd := a.updateInner(msg)
 	if app, ok := model.(App); ok {
@@ -5639,19 +5625,29 @@ const (
 
 func (a App) View() string {
 	body := a.viewBody()
-	// Prepend the kitty graphics-protocol delete escape if the
-	// previous Update queued one (sidebar.pendingRastermClear set by
-	// SetPreviewImagePath when the preview transitioned away from
-	// rasterm). Owned at this layer rather than in sidebar.View
-	// because full-screen modals (settings, infoPanel, addServer,
-	// search, etc.) early-return the modal's view directly without
-	// ever calling sidebar.View — so an escape queued here would be
-	// lost, and the rasterm placement would persist in the kitty
-	// graphics layer behind the modal text. Hoisting the emit to
-	// App.View covers every render path. Update clears the flag at
-	// the start of the next event so the emission happens exactly
-	// once per transition.
-	if a.sidebar.pendingRastermClear {
+	// Stateless rasterm clear (kitty terminals only): if this
+	// frame's output doesn't carry a kitty placement, prepend a
+	// delete escape so any prior placement gets removed from the
+	// graphics layer.
+	//
+	// Two emission paths cover different render scopes. The
+	// canonical emission lives inside buildPreviewContent — the
+	// preview-pane row's content already differs frame-to-frame
+	// when the preview transitions between image escape and
+	// placeholder text, so bubbletea's line-diff renderer reliably
+	// flushes the escape. THIS path covers the modal-render case:
+	// full-screen modals (settings, infoPanel, addServer, search,
+	// etc.) early-return their own view here, bypassing
+	// buildPreviewContent entirely. Without this fallback the
+	// kitty placement would persist behind the modal.
+	//
+	// Detection is on `\x1b_Ga=T,` (kitty placement). The delete
+	// escape itself starts with `\x1b_Ga=d,` so it doesn't
+	// false-positive. Idempotent: kitty's `a=d,d=I,i=<id>` on a
+	// non-existent image is a no-op, so double-emission on frames
+	// where buildPreviewContent already prepended a delete adds
+	// ~30 bytes per frame and is harmless.
+	if rastermProtocolCache == rastermKitty && !strings.Contains(body, "\x1b_Ga=T,") {
 		return rastermDeleteEscape() + body
 	}
 	return body
@@ -5715,13 +5711,11 @@ func (a App) viewBody() string {
 		mainHeight = 5
 	}
 
-	// Sidebar preview-pane image path is now applied at the end of
+	// Sidebar preview-pane image path is applied at the end of
 	// Update() (see Update wrapper), not here. View is value-receiver
-	// so a SetPreviewImagePath call here would mutate a discarded copy
-	// and the transition-detection state in SidebarModel would never
-	// persist between frames — breaking the kitty graphics-protocol
-	// delete-on-deselect path. The Update-side write keeps that state
-	// authoritative on the persistent App model.
+	// so a SetPreviewImagePath call here would mutate a discarded
+	// copy. The Update-side write keeps previewImagePath authoritative
+	// on the persistent App model.
 
 	// Sync active-context to the sidebar so it can highlight the
 	// room/group/DM currently shown in the messages pane,
