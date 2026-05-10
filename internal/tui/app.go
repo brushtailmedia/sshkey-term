@@ -2355,6 +2355,41 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					client.OpenFile(path, att.Name)
 				}()
 			}
+		case "preview_attachment":
+			// `p` keypress on an image attachment that isn't yet
+			// cached locally. Triggers DownloadFile (which populates
+			// the local plaintext cache + generates both block-char
+			// and rasterm thumbnails via its eager goroutines). The
+			// existing OnAttachmentReady → AttachmentReadyEvent →
+			// invalidateImageRenderCacheForPath → wrapper-level
+			// RequestPreviewRender re-dispatch chain handles the
+			// preview-pane update — no direct UI state mutation
+			// needed here.
+			//
+			// Picks the FIRST image attachment on the message
+			// (mirrors SelectedImagePath's behavior). The keypress
+			// gate in messages.go already verified at least one
+			// image attachment exists and isn't cached.
+			if a.client != nil && len(msg.Msg.Attachments) > 0 {
+				for _, att := range msg.Msg.Attachments {
+					if !att.IsImage {
+						continue
+					}
+					a.statusBar.SetError("Loading preview of " + att.Name + "...")
+					fileID := att.FileID
+					decryptKey := att.DecryptKey
+					attName := att.Name
+					c := a.client
+					go func() {
+						if _, err := c.DownloadFile(fileID, decryptKey); err != nil {
+							a.statusBar.SetError("Preview failed: " + err.Error())
+							return
+						}
+						a.statusBar.SetError("Preview ready: " + attName)
+					}()
+					break
+				}
+			}
 		case "save_attachment":
 			if a.client != nil && len(msg.Msg.Attachments) > 0 {
 				att := msg.Msg.Attachments[0]

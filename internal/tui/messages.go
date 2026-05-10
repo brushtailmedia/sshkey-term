@@ -1481,10 +1481,33 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 				return MessageAction{Action: "delete", Msg: *sel}
 			}
 		}
-	case "p": // pin
-		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted && m.room != "" {
-			return m, func() tea.Msg {
-				return MessageAction{Action: "pin", Msg: *sel}
+	case "p": // preview image attachment, OR pin (rooms only)
+		// Preview takes priority over pin: if the selected message
+		// has an image attachment that hasn't been downloaded yet,
+		// `p` triggers the download so the preview pane can render
+		// it. This is the explicit-action path for images above the
+		// auto-preview size threshold (see config.AttachmentsConfig).
+		// Once the file is cached, subsequent `p` presses fall
+		// through to the pin handler so the room admin can still
+		// pin a message with a (now-cached) image attachment.
+		//
+		// Preview-first ordering chosen because download is
+		// non-destructive (just populates local cache + thumbnails)
+		// while pin is room-visible state. Surprising the user with
+		// an unintended pin would be worse than surprising them
+		// with an unintended download.
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
+			for _, att := range sel.Attachments {
+				if att.IsImage && m.attachmentLocalPath(att.FileID) == "" {
+					return m, func() tea.Msg {
+						return MessageAction{Action: "preview_attachment", Msg: *sel}
+					}
+				}
+			}
+			if m.room != "" {
+				return m, func() tea.Msg {
+					return MessageAction{Action: "pin", Msg: *sel}
+				}
 			}
 		}
 	case "c": // copy
@@ -1840,7 +1863,17 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 					line += "\n " + fmt.Sprintf("📎 (%s)", formatSize(att.Size))
 				}
 				if i == m.cursor {
-					line += timestampStyle.Render("  o=open  s=save")
+					hint := "  o=open  s=save"
+					// p=preview shown only for images that aren't yet
+					// cached locally. For non-images, preview makes no
+					// sense; for cached images, the auto-preview path
+					// has already populated the sidebar pane and `p`
+					// would be a no-op there (it falls through to the
+					// pin handler — see messages.go case "p").
+					if att.IsImage && m.attachmentLocalPath(att.FileID) == "" {
+						hint += "  p=preview"
+					}
+					line += timestampStyle.Render(hint)
 				}
 			}
 
