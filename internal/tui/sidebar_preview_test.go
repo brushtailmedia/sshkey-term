@@ -16,12 +16,20 @@ func TestSidebarView_RendersFixedPreviewSection(t *testing.T) {
 	}
 }
 
-func TestBuildPreviewImageRows_RastermRowContainsEscapeAndIsCentered(t *testing.T) {
+func TestBuildPreviewImageRowsFromValue_RastermRowContainsEscapeAndIsCentered(t *testing.T) {
 	withRastermProtocol(t, rastermKitty)
 	withCleanInlineImageEnv(t)
 	srcPath := writeImageWithThumbs(t, t.TempDir())
 
-	rows := buildPreviewImageRows(srcPath, 20, 8)
+	// Synthesize the rendered escape via RenderImageInline (the same
+	// path the async render Cmd takes). Then exercise the formatting
+	// helper directly — that's the unit under test now that the file-
+	// reading version of buildPreviewImageRows is gone.
+	rendered := RenderImageInline(srcPath, 20, 8)
+	if rendered == "" {
+		t.Fatal("RenderImageInline returned empty; cannot exercise centering")
+	}
+	rows := buildPreviewImageRowsFromValue(rendered, 20, 8)
 	if len(rows) == 0 {
 		t.Fatal("expected preview rows")
 	}
@@ -46,12 +54,16 @@ func TestBuildPreviewImageRows_RastermRowContainsEscapeAndIsCentered(t *testing.
 	}
 }
 
-func TestBuildPreviewImageRows_BlockFallbackStillCentered(t *testing.T) {
+func TestBuildPreviewImageRowsFromValue_BlockFallbackStillCentered(t *testing.T) {
 	withRastermProtocol(t, rastermNone)
 	withCleanInlineImageEnv(t)
 	srcPath := writeImageWithThumbs(t, t.TempDir())
 
-	rows := buildPreviewImageRows(srcPath, 40, 8)
+	rendered := RenderImageInline(srcPath, 40, 8)
+	if rendered == "" {
+		t.Fatal("RenderImageInline returned empty; cannot exercise centering")
+	}
+	rows := buildPreviewImageRowsFromValue(rendered, 40, 8)
 	found := false
 	for _, r := range rows {
 		if r == "" {
@@ -65,6 +77,22 @@ func TestBuildPreviewImageRows_BlockFallbackStillCentered(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected at least one non-empty fallback image row")
+	}
+}
+
+// TestBuildPreviewImageRowsFromValue_EmptyValueIsBlank documents the
+// async-render-in-flight case: between SetPreviewImagePath setting a
+// non-empty path and the render Cmd's msg landing, previewRenderValue
+// is "". The formatting helper returns blank rows for this state.
+func TestBuildPreviewImageRowsFromValue_EmptyValueIsBlank(t *testing.T) {
+	rows := buildPreviewImageRowsFromValue("", 20, 8)
+	if len(rows) != 8 {
+		t.Fatalf("expected 8 blank rows, got %d", len(rows))
+	}
+	for i, r := range rows {
+		if r != "" {
+			t.Errorf("row %d should be blank, got %q", i, r)
+		}
 	}
 }
 
@@ -87,22 +115,56 @@ func TestBuildPreviewContent_PrependsDeleteEscapeOnPlaceholder(t *testing.T) {
 }
 
 // TestBuildPreviewContent_NoDeleteEscapeWhenKittyPlacementPresent
-// verifies the inverse: when the preview pane renders an image with
-// a kitty placement, no extra delete escape is prepended (the new
-// placement atomically replaces the prior via fixed image-id, no
-// delete needed).
+// verifies the inverse: when the preview pane has a populated
+// previewRenderValue carrying a kitty placement, no extra delete
+// escape is prepended (the new placement atomically replaces the
+// prior via fixed image-id, no delete needed).
+//
+// We pre-render via RenderImageInline and seed previewRenderValue
+// directly — the async dispatch path normally lands the value via
+// previewRenderReadyMsg in updateInner, but for this unit test we
+// just want buildPreviewContent's inspection logic exercised.
 func TestBuildPreviewContent_NoDeleteEscapeWhenKittyPlacementPresent(t *testing.T) {
 	withRastermProtocol(t, rastermKitty)
 	withCleanInlineImageEnv(t)
 	srcPath := writeImageWithThumbs(t, t.TempDir())
 
+	rendered := RenderImageInline(srcPath, 20, 8)
+	if rendered == "" {
+		t.Fatal("RenderImageInline returned empty; cannot exercise placement detection")
+	}
+
 	s := NewSidebar()
 	s.SetPreviewImagePath(srcPath)
+	s.previewRenderValue = rendered
 	rows := s.buildPreviewContent(20, 8)
 	for _, r := range rows {
 		if strings.Contains(r, "\x1b_Ga=d,") {
 			t.Errorf("frame with kitty placement should not also carry a delete escape, got row %q", truncateForLog(r, 40))
 		}
+	}
+}
+
+// TestBuildPreviewContent_DeleteEscapeWhilePreviewRendering verifies
+// the in-flight render case: previewImagePath is set but the Cmd's
+// result hasn't landed yet (previewRenderValue == ""). The pane
+// renders blank rows; the stateless delete escape fires because no
+// kitty placement is present in the body. This is the visual
+// "image clears immediately, replacement appears next frame" UX on
+// the A→B transition with a fresh selection.
+func TestBuildPreviewContent_DeleteEscapeWhilePreviewRendering(t *testing.T) {
+	withRastermProtocol(t, rastermKitty)
+
+	s := NewSidebar()
+	s.SetPreviewImagePath("/path/to/some-image.png")
+	// previewRenderValue intentionally NOT set — simulates Cmd in flight.
+
+	rows := s.buildPreviewContent(20, 8)
+	if len(rows) == 0 {
+		t.Fatal("expected non-empty preview rows")
+	}
+	if !strings.HasPrefix(rows[0], "\x1b_Ga=d,") {
+		t.Errorf("rendering-in-flight frame should start with kitty delete escape (no placement to skip the prepend), got %q", truncateForLog(rows[0], 40))
 	}
 }
 
@@ -121,6 +183,110 @@ func TestBuildPreviewContent_NoDeleteEscapeOnNonKittyTerminals(t *testing.T) {
 				t.Errorf("rasterm protocol %v should not emit kitty delete escape, got row %q", proto, truncateForLog(r, 40))
 			}
 		}
+	}
+}
+
+// TestRequestPreviewRender_ClearsStateWhenNoPreview verifies that
+// passing previewImagePath = "" through RequestPreviewRender resets
+// the render state and returns nil (no Cmd dispatch needed).
+func TestRequestPreviewRender_ClearsStateWhenNoPreview(t *testing.T) {
+	s := NewSidebar()
+	s.previewImagePath = ""
+	s.previewRenderKey = previewRenderKey{path: "/stale.png", maxCols: 10, maxRows: 5}
+	s.previewRenderValue = "stale-value"
+	s.previewRendering = true
+
+	cmd := s.RequestPreviewRender(20, 8)
+	if cmd != nil {
+		t.Error("no preview wanted should return nil Cmd")
+	}
+	if s.previewRenderKey != (previewRenderKey{}) {
+		t.Errorf("expected zero key, got %+v", s.previewRenderKey)
+	}
+	if s.previewRenderValue != "" {
+		t.Errorf("expected empty value, got %q", s.previewRenderValue)
+	}
+	if s.previewRendering {
+		t.Error("expected previewRendering = false")
+	}
+}
+
+// TestRequestPreviewRender_CacheHitSyncPopulates exercises the
+// fast-path: when the in-memory cache already holds a render for
+// the desired key, RequestPreviewRender populates previewRenderValue
+// synchronously and returns nil — no goroutine round-trip, no
+// flicker on common-case scrolling.
+func TestRequestPreviewRender_CacheHitSyncPopulates(t *testing.T) {
+	withRastermProtocol(t, rastermKitty)
+	withCleanInlineImageEnv(t)
+	srcPath := writeImageWithThumbs(t, t.TempDir())
+
+	// Prime the cache by running a render through RenderImageInline
+	// (the same call the Cmd would make).
+	primed := RenderImageInline(srcPath, 20, 8)
+	if primed == "" {
+		t.Fatal("RenderImageInline returned empty; cache not primed")
+	}
+
+	s := NewSidebar()
+	s.SetPreviewImagePath(srcPath)
+	cmd := s.RequestPreviewRender(20, 8)
+	if cmd != nil {
+		t.Error("cache hit should return nil Cmd (sync populate)")
+	}
+	if s.previewRenderValue != primed {
+		t.Errorf("previewRenderValue should equal cached render; got len=%d, want len=%d",
+			len(s.previewRenderValue), len(primed))
+	}
+	if s.previewRendering {
+		t.Error("cache hit should leave previewRendering = false")
+	}
+}
+
+// TestRequestPreviewRender_CacheMissDispatchesCmd exercises the
+// async path: cache miss returns a non-nil Cmd, marks rendering,
+// clears any stale value.
+func TestRequestPreviewRender_CacheMissDispatchesCmd(t *testing.T) {
+	withRastermProtocol(t, rastermKitty)
+
+	s := NewSidebar()
+	s.SetPreviewImagePath("/path/to/uncached.png")
+	s.previewRenderValue = "stale-value-from-prior-key"
+
+	cmd := s.RequestPreviewRender(20, 8)
+	if cmd == nil {
+		t.Fatal("cache miss should return non-nil Cmd")
+	}
+	if !s.previewRendering {
+		t.Error("cache miss should set previewRendering = true")
+	}
+	if s.previewRenderValue != "" {
+		t.Errorf("cache miss should clear stale value, got %q", s.previewRenderValue)
+	}
+	if s.previewRenderKey.path != "/path/to/uncached.png" {
+		t.Errorf("expected key path = /path/to/uncached.png, got %q", s.previewRenderKey.path)
+	}
+}
+
+// TestRequestPreviewRender_SameKeyNoDispatch verifies the no-op
+// case: requesting the same key twice in a row returns nil the
+// second time (no redundant Cmd dispatched, no state churn).
+func TestRequestPreviewRender_SameKeyNoDispatch(t *testing.T) {
+	withRastermProtocol(t, rastermKitty)
+
+	s := NewSidebar()
+	s.SetPreviewImagePath("/path/to/some.png")
+
+	// First call: cache miss, dispatches Cmd.
+	first := s.RequestPreviewRender(20, 8)
+	if first == nil {
+		t.Fatal("first call should return Cmd")
+	}
+
+	// Second call with same path/dims: should no-op.
+	second := s.RequestPreviewRender(20, 8)
+	if second != nil {
+		t.Error("same-key second call should return nil")
 	}
 }
 

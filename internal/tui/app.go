@@ -583,6 +583,36 @@ type AttachmentReadyEvent struct {
 	FileID string
 }
 
+// previewRenderReadyMsg is delivered by renderPreviewCmd when an
+// off-thread preview-pane render completes. updateInner consumes
+// it and, if the carried key still matches the sidebar's current
+// previewRenderKey, stores the rendered escape on the model for
+// the next View to pick up. Stale results (key mismatch — the
+// user navigated away before the Cmd completed) are dropped:
+// single-slot semantics, no queue, no cancellation primitives.
+type previewRenderReadyMsg struct {
+	key   previewRenderKey
+	value string
+}
+
+// renderPreviewCmd dispatches RenderImageInline on a goroutine so
+// View() never blocks on decode/encode work. The Cmd's body does
+// the cache lookup + decode + encode + lazy-thumbnail-goroutine
+// dance that RenderImageInline already encapsulates; we just move
+// that work off the View thread.
+//
+// Result delivered as a previewRenderReadyMsg with the requesting
+// key, so updateInner can verify relevance before landing the
+// value on the model.
+func renderPreviewCmd(key previewRenderKey) tea.Cmd {
+	return func() tea.Msg {
+		return previewRenderReadyMsg{
+			key:   key,
+			value: RenderImageInline(key.path, key.maxCols, key.maxRows),
+		}
+	}
+}
+
 // waitForMsg returns a cmd that waits for the next server message.
 // Selects across four channels: server-message events, errors,
 // client-layer key-change warnings (Phase 21 F3.a), and attachment
@@ -643,9 +673,59 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if app, ok := model.(App); ok {
 		app.syncMessageViewportState()
 		app.sidebar.SetPreviewImagePath(app.computePreviewPath())
+		// Async preview render: dispatch a tea.Cmd if the desired
+		// render key changed and the cache doesn't already have it.
+		// View() never decodes — it reads the pre-rendered escape
+		// from sidebar.previewRenderValue, populated either
+		// synchronously (cache hit) inside RequestPreviewRender or
+		// asynchronously via the Cmd's previewRenderReadyMsg.
+		if w, r := app.sidebarPreviewDims(); w > 0 && r > 0 {
+			if pcmd := app.sidebar.RequestPreviewRender(w, r); pcmd != nil {
+				cmd = tea.Batch(cmd, pcmd)
+			}
+		}
 		return app, cmd
 	}
 	return model, cmd
+}
+
+// sidebarPreviewDims returns the (width, rows) the sidebar preview
+// pane will be rendered at on this frame. Mirrors the dimension
+// math in viewBody → sidebar.View → sidebarSectionHeights so
+// Update-side render-dispatch keys align with the dims the View
+// path actually uses. Pure: same width / height / memberPanel
+// visibility produces the same answer.
+//
+// Layout chain: outer height minus statusBar (1) and sidebar
+// border (2) gives the sidebar's inner content height. Split via
+// sidebarSectionHeights into list + preview sections; preview gets
+// `previewSection - 1` after the divider row. Sidebar inner width
+// is sidebarWidth - 2 (left + right borders).
+//
+// Returns (0, 0) before initial WindowSizeMsg lands — App.Update
+// guards against this with `w > 0 && r > 0` so no Cmd is dispatched
+// for a zero-sized pane.
+func (a App) sidebarPreviewDims() (width, rows int) {
+	if a.width == 0 || a.height == 0 {
+		return 0, 0
+	}
+	layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+	sidebarWidth := layout.SidebarWidth
+	const statusBarHeight = 1
+	sidebarInnerHeight := a.height - statusBarHeight - 2
+	if sidebarInnerHeight < 1 {
+		return 0, 0
+	}
+	contentWidth := sidebarWidth - 2
+	if contentWidth < 1 {
+		return 0, 0
+	}
+	_, previewSection := sidebarSectionHeights(sidebarInnerHeight)
+	previewRows := previewSection - 1 // -1 for the divider row
+	if previewRows < 1 {
+		return 0, 0
+	}
+	return contentWidth, previewRows
 }
 
 // computePreviewPath returns the image path that should be rendered
@@ -2512,6 +2592,16 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// file. Continue listening for the next event.
 		if a.client != nil && a.sidebar.msgCh != nil {
 			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.client.Done()))
+		}
+
+	case previewRenderReadyMsg:
+		// Off-thread preview render completed. Land the value on the
+		// model only if the carried key still matches sidebar's
+		// current desired key — stale results (user navigated away
+		// while the Cmd was running) are dropped.
+		if msg.key == a.sidebar.previewRenderKey {
+			a.sidebar.previewRenderValue = msg.value
+			a.sidebar.previewRendering = false
 		}
 
 	case KeyChangeEvent:

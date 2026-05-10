@@ -83,6 +83,22 @@ func IsValidStatus(s string) bool {
 	return false
 }
 
+// previewRenderKey identifies a specific preview-pane render
+// request: file path plus target dimensions. Used to track in-
+// flight async renders and discard stale results when the user
+// navigates away before a Cmd completes (single-slot semantics).
+//
+// Truecolor support and rasterm-protocol selection are NOT part of
+// the key — both are session-stable (decided at startup from
+// terminal env vars and cached in package-level state), so a key
+// derived from path + dims is sufficient to identify a unique
+// render output.
+type previewRenderKey struct {
+	path    string
+	maxCols int
+	maxRows int
+}
+
 // SidebarModel manages the sidebar panel.
 type SidebarModel struct {
 	rooms           []string
@@ -131,6 +147,29 @@ type SidebarModel struct {
 	// buildPreviewContent and App.View — no transition flag on the
 	// model. See those functions' comments for the emission rules.
 	previewImagePath string
+
+	// previewRenderKey / previewRenderValue / previewRendering form
+	// the async preview-render state. View() never decodes or
+	// encodes — it reads the pre-rendered escape from
+	// previewRenderValue and embeds it. RequestPreviewRender (called
+	// from App.Update after SetPreviewImagePath) compares the
+	// desired key to previewRenderKey, dispatches a tea.Cmd if a
+	// fresh render is needed, and consumes the resulting
+	// previewRenderReadyMsg in updateInner.
+	//
+	// Single-slot semantics: only the latest selection's render
+	// result is kept. Cmds for prior selections may still complete
+	// in the background; their msgs arrive with a stale key and get
+	// dropped on the key-mismatch check in updateInner.
+	//
+	// Cache-hit fast-path: RequestPreviewRender does a synchronous
+	// lookup against imageRenderCache before dispatching. Hits
+	// populate previewRenderValue immediately and skip the goroutine
+	// round-trip, avoiding a one-frame flicker on common-case
+	// scrolling between previously-rendered images.
+	previewRenderKey   previewRenderKey
+	previewRenderValue string
+	previewRendering   bool
 
 	// activeRoom / activeGroup / activeDM — the room, group, or DM
 	// currently shown in the messages pane. Distinct from
@@ -497,6 +536,54 @@ func (s SidebarModel) groupPresenceDot(members []string) string {
 // re-emit).
 func (s *SidebarModel) SetPreviewImagePath(path string) {
 	s.previewImagePath = path
+}
+
+// RequestPreviewRender ensures the sidebar has a render for the
+// current previewImagePath at the given preview-pane dimensions.
+// Returns a tea.Cmd to dispatch when fresh render work is needed;
+// returns nil if no render dispatch is required (no preview wanted,
+// already-aligned key, or synchronous cache hit).
+//
+// Behavior summary:
+//
+//   - previewImagePath == "": clears render state, returns nil.
+//   - desired key matches current key: returns nil. Either we
+//     already have the value or a Cmd is in flight; the in-flight
+//     Cmd's eventual msg will land on the model.
+//   - desired key differs and the cache has a matching entry:
+//     populate previewRenderValue synchronously, return nil. Skips
+//     the goroutine round-trip — avoids one-frame flicker on
+//     common-case scrolling between previously-rendered images.
+//   - desired key differs and cache misses: clear value, mark
+//     rendering, return the render Cmd.
+//
+// Caller (App.Update wrapper) batches the returned Cmd into the
+// outer cmd chain. The Cmd's tea.Msg lands in updateInner, which
+// drops stale results (key mismatch) and stores fresh ones.
+func (s *SidebarModel) RequestPreviewRender(width, rows int) tea.Cmd {
+	if s.previewImagePath == "" {
+		s.previewRenderKey = previewRenderKey{}
+		s.previewRenderValue = ""
+		s.previewRendering = false
+		return nil
+	}
+	desired := previewRenderKey{
+		path:    s.previewImagePath,
+		maxCols: width,
+		maxRows: rows,
+	}
+	if s.previewRenderKey == desired {
+		return nil
+	}
+	s.previewRenderKey = desired
+	if cached, ok := lookupCachedRenderForKey(desired); ok {
+		s.previewRenderValue = cached
+		s.previewRendering = false
+		return nil
+	}
+	s.previewRenderValue = ""
+	s.previewRendering = true
+	return renderPreviewCmd(desired)
 }
 
 // SetActiveContext updates the room/group/DM currently shown in the
@@ -1034,7 +1121,13 @@ func (s SidebarModel) buildPreviewContent(width, rows int) []string {
 	if s.previewImagePath == "" {
 		content = buildPreviewPlaceholder(width, rows)
 	} else {
-		content = buildPreviewImageRows(s.previewImagePath, width, rows)
+		// Read the pre-rendered escape from the model. Population
+		// happens off-thread via renderPreviewCmd → previewRenderReadyMsg
+		// → updateInner; or synchronously inside RequestPreviewRender
+		// when the cache hits. Empty value → blank rows for this
+		// frame; the next frame after the Cmd's msg lands will have
+		// the rendered escape.
+		content = buildPreviewImageRowsFromValue(s.previewRenderValue, width, rows)
 	}
 	if rastermProtocolCache == rastermKitty && len(content) > 0 && !containsKittyPlacement(content) {
 		content[0] = rastermDeleteEscape() + content[0]
@@ -1056,23 +1149,32 @@ func containsKittyPlacement(rows []string) bool {
 	return false
 }
 
-// buildPreviewImageRows renders the image at imgPath as cell-aligned
-// terminal escape sequences sized for the preview pane, centered
-// both horizontally and vertically within the (width × rows) area.
-// On render failure (decode panic recovered, file missing, etc.)
-// the function falls through to a blank fill so the UI doesn't
-// break — the placeholder isn't substituted because the caller
-// already decided "image mode," and a momentary blank pane is less
-// jarring than flashing back to the brand mark.
+// buildPreviewImageRowsFromValue formats an already-rendered preview
+// escape into `rows` cell-aligned strings, centered both
+// horizontally and vertically within `width` × `rows`. Pure: no
+// I/O, no decode, no cache lookups — all of that happens in the
+// async render path (renderPreviewCmd) before this function ever
+// runs.
 //
-// Centering rationale: RenderImageInline preserves source aspect
-// ratio, so the rendered image is rarely exactly width × rows.
-// Landscape sources are width-bound and leave vertical headroom;
-// portrait sources are height-bound and leave horizontal headroom.
-// Without centering, images render top-left-aligned with empty
-// trailing space, which looks unfinished. Centering both axes
-// produces a balanced layout regardless of source aspect.
-func buildPreviewImageRows(imgPath string, width, rows int) []string {
+// Empty rendered string returns blank rows. Two cases produce that:
+//
+//  1. Async render is in flight (Cmd dispatched, msg not yet
+//     landed). Brief — usually one frame on cache miss, zero
+//     frames on cache hit.
+//  2. RenderImageInline returned "" for a real reason (file
+//     missing, decode panic recovered, encoder error). The
+//     placeholder isn't substituted because the caller already
+//     decided "image mode," and a momentary blank pane is less
+//     jarring than flashing back to the brand mark.
+//
+// Centering rationale: rasterm/block-char outputs preserve source
+// aspect ratio, so the rendered image is rarely exactly width ×
+// rows. Landscape sources are width-bound and leave vertical
+// headroom; portrait sources are height-bound and leave horizontal
+// headroom. Without centering, images render top-left-aligned with
+// empty trailing space, which looks unfinished. Centering both
+// axes produces a balanced layout regardless of source aspect.
+func buildPreviewImageRowsFromValue(rendered string, width, rows int) []string {
 	out := make([]string, rows)
 	for i := range out {
 		out[i] = ""
@@ -1080,7 +1182,6 @@ func buildPreviewImageRows(imgPath string, width, rows int) []string {
 	if rows <= 0 || width <= 0 {
 		return out
 	}
-	rendered := RenderImageInline(imgPath, width, rows)
 	if rendered == "" {
 		return out
 	}

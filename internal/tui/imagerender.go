@@ -484,9 +484,9 @@ func tryRenderRasterm(filePath string, maxCols, maxRows int) (string, bool) {
 	// rasterm's encoders don't emit a trailing newline — the encoded
 	// escape sequence sits as a single "logical line" in the output.
 	// The block-char path emits one '\n'-separated row per cell row;
-	// callers (specifically buildPreviewImageRows) split on '\n' to
-	// vertically center. Pad rasterm's output with empty rows so the
-	// caller sees the right row count and centers correctly.
+	// callers (specifically buildPreviewImageRowsFromValue) split on
+	// '\n' to vertically center. Pad rasterm's output with empty rows
+	// so the caller sees the right row count and centers correctly.
 	if dstRows > 1 {
 		out += strings.Repeat("\n", dstRows-1)
 	}
@@ -618,6 +618,41 @@ func decodeImageFromFile(filePath string) (image.Image, error) {
 		return nil, err
 	}
 	return img, nil
+}
+
+// lookupCachedRenderForKey is the synchronous cache-hit fast-path
+// for the async preview-render flow. Mirrors the encoder-selection
+// logic in RenderImageInline — rasterm-keyed entries take priority
+// on rasterm-capable terminals, block-char-keyed otherwise — but
+// only returns hits, never decodes or encodes.
+//
+// Used by SidebarModel.RequestPreviewRender to skip the
+// goroutine round-trip when the requested render is already in
+// the cache. Cache misses fall through to a tea.Cmd dispatch that
+// produces the value off-thread.
+//
+// Returns ("", false) on miss.
+func lookupCachedRenderForKey(k previewRenderKey) (string, bool) {
+	tc := useTrueColor()
+	if rastermCapable() {
+		rkey := imageRenderCacheKey{
+			path:      k.path,
+			maxCols:   k.maxCols,
+			maxRows:   k.maxRows,
+			truecolor: tc,
+			rasterm:   true,
+		}
+		if cached, ok := getCachedInlineImage(rkey, 0, 0); ok {
+			return cached, true
+		}
+	}
+	bkey := imageRenderCacheKey{
+		path:      k.path,
+		maxCols:   k.maxCols,
+		maxRows:   k.maxRows,
+		truecolor: tc,
+	}
+	return getCachedInlineImage(bkey, 0, 0)
 }
 
 func getCachedInlineImage(key imageRenderCacheKey, modUnixNano, size int64) (string, bool) {
