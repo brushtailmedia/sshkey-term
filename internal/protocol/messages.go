@@ -6,33 +6,30 @@ import "encoding/json"
 // Handshake
 
 type ServerHello struct {
-	Type         string   `json:"type"`
-	Protocol     string   `json:"protocol"`
-	Version      int      `json:"version"`
-	ServerID     string   `json:"server_id"`
-	Capabilities []string `json:"capabilities"`
+	Type     string `json:"type"`
+	Protocol string `json:"protocol"`
+	Version  int    `json:"version"`
+	ServerID string `json:"server_id"`
 }
 
 type ClientHello struct {
-	Type          string   `json:"type"`
-	Protocol      string   `json:"protocol"`
-	Version       int      `json:"version"`
-	Client        string   `json:"client"`
-	ClientVersion string   `json:"client_version"`
-	DeviceID      string   `json:"device_id"`
-	LastSyncedAt  string   `json:"last_synced_at"`
-	Capabilities  []string `json:"capabilities"`
+	Type          string `json:"type"`
+	Protocol      string `json:"protocol"`
+	Version       int    `json:"version"`
+	Client        string `json:"client"`
+	ClientVersion string `json:"client_version"`
+	DeviceID      string `json:"device_id"`
+	LastSyncedAt  string `json:"last_synced_at"`
 }
 
 type Welcome struct {
-	Type               string   `json:"type"`
-	User               string   `json:"user"`
-	DisplayName        string   `json:"display_name"`
-	Admin              bool     `json:"admin"`
-	Rooms              []string `json:"rooms"`
-	Groups             []string `json:"groups"`
-	PendingSync        bool     `json:"pending_sync"`
-	ActiveCapabilities []string `json:"active_capabilities"`
+	Type        string   `json:"type"`
+	User        string   `json:"user"`
+	DisplayName string   `json:"display_name"`
+	Admin       bool     `json:"admin"`
+	Rooms       []string `json:"rooms"`
+	Groups      []string `json:"groups"`
+	PendingSync bool     `json:"pending_sync"`
 }
 
 // Sync
@@ -232,7 +229,7 @@ type DeletedGroupsList struct {
 // to an existing group. Multi-target adds are done client-side by
 // sending one AddToGroup per target.
 type AddToGroup struct {
-	Type  string `json:"type"`            // "add_to_group"
+	Type  string `json:"type"` // "add_to_group"
 	Group string `json:"group"`
 	User  string `json:"user"`            // target to add
 	Quiet bool   `json:"quiet,omitempty"` // suppress inline system message
@@ -242,15 +239,15 @@ type AddToGroup struct {
 // member from a group. Passing the caller's own user ID falls through
 // to the self-leave path (handleLeaveGroup).
 type RemoveFromGroup struct {
-	Type  string `json:"type"`  // "remove_from_group"
+	Type  string `json:"type"` // "remove_from_group"
 	Group string `json:"group"`
-	User  string `json:"user"`  // target to remove
+	User  string `json:"user"` // target to remove
 }
 
 // PromoteGroupAdmin is the client's request to promote a member to
 // admin. Unilateral — any admin can promote any non-admin member.
 type PromoteGroupAdmin struct {
-	Type  string `json:"type"`            // "promote_group_admin"
+	Type  string `json:"type"` // "promote_group_admin"
 	Group string `json:"group"`
 	User  string `json:"user"`            // target to promote
 	Quiet bool   `json:"quiet,omitempty"` // suppress inline system message
@@ -260,7 +257,7 @@ type PromoteGroupAdmin struct {
 // the caller themselves) back to regular member. Rejected by the server
 // if the demotion would leave the group with zero admins.
 type DemoteGroupAdmin struct {
-	Type  string `json:"type"`            // "demote_group_admin"
+	Type  string `json:"type"` // "demote_group_admin"
 	Group string `json:"group"`
 	User  string `json:"user"`            // target to demote (may equal caller for self-demote)
 	Quiet bool   `json:"quiet,omitempty"` // suppress inline system message
@@ -268,30 +265,30 @@ type DemoteGroupAdmin struct {
 
 // AddGroupResult echoes a successful add_to_group back to the calling admin.
 type AddGroupResult struct {
-	Type  string `json:"type"`  // "add_group_result"
+	Type  string `json:"type"` // "add_group_result"
 	Group string `json:"group"`
-	User  string `json:"user"`  // added user
+	User  string `json:"user"` // added user
 }
 
 // RemoveGroupResult echoes a successful remove_from_group back to the calling admin.
 type RemoveGroupResult struct {
-	Type  string `json:"type"`  // "remove_group_result"
+	Type  string `json:"type"` // "remove_group_result"
 	Group string `json:"group"`
-	User  string `json:"user"`  // removed user
+	User  string `json:"user"` // removed user
 }
 
 // PromoteAdminResult echoes a successful promote_group_admin back to the calling admin.
 type PromoteAdminResult struct {
-	Type  string `json:"type"`  // "promote_admin_result"
+	Type  string `json:"type"` // "promote_admin_result"
 	Group string `json:"group"`
-	User  string `json:"user"`  // promoted user
+	User  string `json:"user"` // promoted user
 }
 
 // DemoteAdminResult echoes a successful demote_group_admin back to the calling admin.
 type DemoteAdminResult struct {
-	Type  string `json:"type"`  // "demote_admin_result"
+	Type  string `json:"type"` // "demote_admin_result"
 	Group string `json:"group"`
-	User  string `json:"user"`  // demoted user
+	User  string `json:"user"` // demoted user
 }
 
 // GroupAddedTo is a direct notification sent to a user's sessions when
@@ -302,7 +299,7 @@ type DemoteAdminResult struct {
 // The added user receives no pre-join history — their first decryptable
 // message is the next group_message broadcast after the add lands.
 type GroupAddedTo struct {
-	Type    string   `json:"type"`    // "group_added_to"
+	Type    string   `json:"type"` // "group_added_to"
 	Group   string   `json:"group"`
 	Name    string   `json:"name,omitempty"`
 	Members []string `json:"members"`
@@ -349,7 +346,7 @@ type GroupRenamed struct {
 // Reason values for Event="promote":
 //   - ""                        normal admin promote; By required
 //   - "retirement_succession"   auto-promote of oldest member when the last
-//                               admin retires their account; By empty
+//     admin retires their account; By empty
 type GroupEvent struct {
 	Type   string `json:"type"`
 	Group  string `json:"group"`
@@ -369,8 +366,8 @@ type GroupEvent struct {
 // Reason distinguishes self-leave from admin-triggered removal:
 //   - ""           self-leave via /leave
 //   - "removed"    Phase 14: admin-initiated removal via handleRemoveFromGroup.
-//                  By carries the kicking admin's user ID for rendering
-//                  "You were removed from the group by alice".
+//     By carries the kicking admin's user ID for rendering
+//     "You were removed from the group by alice".
 //   - "retirement" the user's account was retired
 //
 // Phase 14 historical note: "admin" was the reason code used by the
@@ -410,7 +407,7 @@ type RoomLeft struct {
 // Also used inside the RetiredRoomsList catchup payload sent during
 // the connect handshake.
 type RoomRetired struct {
-	Type        string `json:"type"`             // "room_retired"
+	Type        string `json:"type"` // "room_retired"
 	Room        string `json:"room"`
 	DisplayName string `json:"display_name"`
 	RetiredAt   string `json:"retired_at"`
@@ -444,30 +441,50 @@ type RoomUpdated struct {
 	Topic       string `json:"topic"`        // post-change topic
 }
 
-// RoomUpdate is the client-initiated request to mutate a room's
-// display name or topic. Server validates that the sender is an
-// admin (server-wide or room-level, depending on the server's
-// authorization model), persists the change, and broadcasts a
-// RoomUpdated event to every member of the room.
-//
-// SERVER STATUS (2026-05): not yet wired on the server side. Today
-// the server only emits RoomUpdated from runRoomUpdatesProcessor
-// in response to `sshkey-ctl update-topic` / `sshkey-ctl rename-
-// room`. Adding the matching client-initiated path is tracked in
-// `topic.md` in the sshkey-chat repo. Until the server lands the
-// handler, sending RoomUpdate from the client is a no-op (server
-// silently ignores or replies with an error).
+// RoomUpdate is the client-initiated request to set a room's topic.
+// Server validates that the sender is a server admin (`users.admin`
+// flag) AND a current member of the target room, persists the topic
+// change, and broadcasts a RoomUpdated event to every connected
+// member of the room.
 //
 // Empty Topic is allowed and clears the topic (sets it back to
-// "no topic set" state). Empty DisplayName is reserved for the
-// rename path; clients sending only a Topic should leave
-// DisplayName as the existing value or empty (server treats empty
-// as "no change to that field").
+// "no topic set" state).
+//
+// SERVER STATUS (2026-05): server-side handler is in active
+// implementation per `topic.md` in the sshkey-chat repo. Until
+// that lands, sending RoomUpdate from this client is a no-op —
+// the server has no `room_update` dispatcher case and silently
+// drops the envelope. The /topic slash command's optimistic
+// "Topic update sent — pending server confirmation" status-bar
+// message remains accurate (the request did go out); the lack of
+// a returning RoomUpdated broadcast is the visible symptom.
+//
+// Scope: topic only. Room rename is intentionally NOT in this wire
+// surface — renames are operator-only via `sshkey-ctl rename-room`,
+// not a client request. Earlier drafts of this struct carried a
+// DisplayName field for the rename path; it was removed alongside
+// the server-side spec finalization because rooms have no
+// client-initiated rename in the current phase, and the server
+// silently dropped the field anyway. Future re-introduction would
+// be a coordinated cross-repo change.
+//
+// CorrID is present for forward-compat with the server's typed-
+// error correlation (the server-side handler echoes req.CorrID on
+// `forbidden` / `rate_limited` / `unknown_room` / `room_retired`
+// responses for send-queue correlation parity with other corr_id
+// verbs). SendRoomUpdate doesn't populate it today — there's no
+// send-queue integration for `room_update` yet, so the
+// optimistic-status-bar UX is the only feedback path. When/if
+// queue integration lands (mirroring SendDelete's
+// GenerateCorrID + EnqueueWithID + MarkSending pattern), no
+// struct change is needed. The `omitempty` tag means empty
+// CorrID is stripped from outgoing JSON, so today's wire bytes
+// are byte-identical to the pre-CorrID version of this struct.
 type RoomUpdate struct {
-	Type        string `json:"type"`                   // "room_update"
-	Room        string `json:"room"`                   // room nanoid
-	DisplayName string `json:"display_name,omitempty"` // omit to leave name unchanged
-	Topic       string `json:"topic"`                  // new topic; empty string clears
+	Type   string `json:"type"`              // "room_update"
+	Room   string `json:"room"`              // room nanoid (NOT display name)
+	Topic  string `json:"topic"`             // new topic; empty string clears
+	CorrID string `json:"corr_id,omitempty"` // optional correlation tag (not populated by SendRoomUpdate today)
 }
 
 // DeleteRoom is the client-initiated request to remove a room from
@@ -540,7 +557,7 @@ type CreateDM struct {
 }
 
 type DMCreated struct {
-	Type    string   `json:"type"`    // "dm_created"
+	Type    string   `json:"type"` // "dm_created"
 	DM      string   `json:"dm"`
 	Members []string `json:"members"` // always [user_a, user_b]
 }
@@ -815,7 +832,7 @@ type RoomInfo struct {
 type RoomEvent struct {
 	Type   string `json:"type"`
 	Room   string `json:"room"`
-	Event  string `json:"event"`            // "join" | "leave" | "topic" | "rename" | "retire"
+	Event  string `json:"event"` // "join" | "leave" | "topic" | "rename" | "retire"
 	User   string `json:"user"`
 	By     string `json:"by,omitempty"`     // Phase 20: acting admin/operator
 	Reason string `json:"reason,omitempty"` // "" | "removed" | "user_retired"
@@ -951,8 +968,8 @@ type DownloadStart struct {
 	Type        string `json:"type"`
 	FileID      string `json:"file_id"`
 	Size        int64  `json:"size"`
-	ContentHash string `json:"content_hash"`       // "blake2b-256:<hex>" of encrypted bytes
-	CorrID      string `json:"corr_id,omitempty"`  // Phase 17c
+	ContentHash string `json:"content_hash"`      // "blake2b-256:<hex>" of encrypted bytes
+	CorrID      string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 type DownloadComplete struct {
@@ -1115,7 +1132,7 @@ type RoomMembers struct {
 }
 
 type RoomMembersList struct {
-	Type    string   `json:"type"`              // "room_members_list"
+	Type    string   `json:"type"` // "room_members_list"
 	Room    string   `json:"room"`
 	Members []string `json:"members"`
 	CorrID  string   `json:"corr_id,omitempty"` // Phase 17c

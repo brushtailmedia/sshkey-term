@@ -216,6 +216,8 @@ const pendingFocusCreatedTTL = 30 * time.Second
 // existing dialog flow don't trigger it.
 const doubleQuitWindow = 500 * time.Millisecond
 
+const topicUpdatePendingStatus = "Topic update sent — pending server confirmation"
+
 // refreshingMinVisibleMs is the minimum duration the "refreshing…"
 // keypress-ack indicator stays visible after a refresh keypress
 // (Phase 17c Step 6). Server responses arriving faster than this
@@ -484,6 +486,10 @@ func (a App) connect() tea.Cmd {
 		// in-flight ceiling expected — user clicks "Save" then
 		// generally waits; 16 is more than ample headroom.
 		saveResultCh := make(chan SaveResultEvent, 16)
+		// Buffered for room_updated callbacks from the client layer.
+		// Mirrors msgCh's buffer size so bursts of room updates (for
+		// example reconnect catchup) don't block readLoop.
+		roomUpdatedCh := make(chan RoomUpdatedEvent, 100)
 
 		cfg := a.cfg
 		cfg.OnMessage = func(msgType string, raw json.RawMessage) {
@@ -514,6 +520,12 @@ func (a App) connect() tea.Cmd {
 			// cache file anyway).
 			select {
 			case attachReadyCh <- AttachmentReadyEvent{FileID: fileID}:
+			default:
+			}
+		}
+		cfg.OnRoomUpdated = func(room string) {
+			select {
+			case roomUpdatedCh <- RoomUpdatedEvent{Room: room}:
 			default:
 			}
 		}
@@ -561,6 +573,7 @@ func (a App) connect() tea.Cmd {
 			uploadResultCh:   uploadResultCh,
 			downloadResultCh: downloadResultCh,
 			saveResultCh:     saveResultCh,
+			roomUpdatedCh:    roomUpdatedCh,
 		}
 	}
 }
@@ -574,6 +587,7 @@ type connectedWithClient struct {
 	uploadResultCh   chan UploadResultEvent
 	downloadResultCh chan DownloadResultEvent
 	saveResultCh     chan SaveResultEvent
+	roomUpdatedCh    chan RoomUpdatedEvent
 }
 
 // saveAttachmentOpenMsg flips the save-as modal open after a
@@ -603,6 +617,13 @@ type saveAttachmentDownloadFailedMsg struct {
 // View pick up the new file.
 type AttachmentReadyEvent struct {
 	FileID string
+}
+
+// RoomUpdatedEvent is the tea.Msg form of a client-layer
+// OnRoomUpdated callback. Carries the room nanoid whose local
+// name/topic row was just updated by a room_updated envelope.
+type RoomUpdatedEvent struct {
+	Room string
 }
 
 // UploadResultEvent is the tea.Msg form of an /upload completion
@@ -695,14 +716,14 @@ func renderPreviewCmd(key previewRenderKey) tea.Cmd {
 }
 
 // waitForMsg returns a cmd that waits for the next server message.
-// Selects across seven channels: server-message events, errors,
+// Selects across eight channels: server-message events, errors,
 // client-layer key-change warnings (Phase 21 F3.a), attachment
 // auto-preview completions, upload-result feedback, download-action
-// result feedback (o / p), and save-as copy result feedback. All
-// seven surface via separate channels rather than riding on the
+// result feedback (o / p), save-as copy result feedback, and
+// room-updated callbacks. All eight surface via separate channels rather than riding on the
 // ServerMsg envelope because they are TUI-synthetic events, not
 // protocol frames.
-func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChangeEvent, attachReadyCh chan AttachmentReadyEvent, uploadResultCh chan UploadResultEvent, downloadResultCh chan DownloadResultEvent, saveResultCh chan SaveResultEvent, done <-chan struct{}) tea.Cmd {
+func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChangeEvent, attachReadyCh chan AttachmentReadyEvent, uploadResultCh chan UploadResultEvent, downloadResultCh chan DownloadResultEvent, saveResultCh chan SaveResultEvent, roomUpdatedCh chan RoomUpdatedEvent, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case msg := <-msgCh:
@@ -719,6 +740,8 @@ func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChange
 			return dr
 		case sr := <-saveResultCh:
 			return sr
+		case ru := <-roomUpdatedCh:
+			return ru
 		case <-done:
 			return ErrMsg{Err: fmt.Errorf("disconnected")}
 		}
@@ -2707,7 +2730,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.updateTitle()
 
 		// Start listening for server messages
-		cmds = append(cmds, waitForMsg(msg.msgCh, msg.errCh, msg.keyWarnCh, msg.attachReadyCh, msg.uploadResultCh, msg.downloadResultCh, msg.saveResultCh, a.client.Done()))
+		cmds = append(cmds, waitForMsg(msg.msgCh, msg.errCh, msg.keyWarnCh, msg.attachReadyCh, msg.uploadResultCh, msg.downloadResultCh, msg.saveResultCh, msg.roomUpdatedCh, a.client.Done()))
 		// Store channels for future waits
 		a.sidebar.msgCh = msg.msgCh
 		a.sidebar.errCh = msg.errCh
@@ -2716,6 +2739,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.sidebar.uploadResultCh = msg.uploadResultCh
 		a.sidebar.downloadResultCh = msg.downloadResultCh
 		a.sidebar.saveResultCh = msg.saveResultCh
+		a.sidebar.roomUpdatedCh = msg.roomUpdatedCh
 
 		// Wire the per-server file cache directory into the messages
 		// model so the inline-image render path can resolve downloaded
@@ -2740,8 +2764,19 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue listening
 		if a.client != nil {
 			if a.sidebar.msgCh != nil {
-				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
+				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 			}
+		}
+
+	case RoomUpdatedEvent:
+		if a.client != nil && msg.Room != "" && msg.Room == a.messages.room {
+			a.messages.SetRoomTopic(a.client.DisplayRoomTopic(msg.Room))
+			if a.statusBar.errorMsg == topicUpdatePendingStatus {
+				a.statusBar.SetError("Topic updated")
+			}
+		}
+		if a.client != nil && a.sidebar.msgCh != nil {
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case AttachmentReadyEvent:
@@ -2766,7 +2801,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case previewRenderReadyMsg:
@@ -2795,7 +2830,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Continue listening for the next event.
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case DownloadResultEvent:
@@ -2818,7 +2853,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case SaveResultEvent:
@@ -2833,7 +2868,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.statusBar.SetError("Saved: " + msg.Dest)
 		}
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case KeyChangeEvent:
@@ -2856,7 +2891,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Continue listening for the next event.
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case passphraseNeededMsg:
@@ -4192,10 +4227,9 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 //
 //   - `/topic <text>` (with arg) — admin-only, sets a new topic for
 //     the current room. Sends a RoomUpdate request to the server.
-//     Server-side handler not yet implemented (see topic.md in
-//     sshkey-chat); until that lands, the request is enqueued but
-//     no broadcast comes back, and the local UI stays on the old
-//     topic. This is intentional scaffolding.
+//     The status bar first shows an optimistic pending message, then
+//     flips to "Topic updated" when the room_updated callback arrives
+//     for the current room.
 //
 // In a group or 1:1 DM context, both modes show
 // "/topic is only available in rooms" — groups have no topics by
@@ -4238,7 +4272,7 @@ func (a *App) handleTopicCommand(sc *SlashCommandMsg) {
 	// server's RoomUpdated broadcast arrives — at that point the
 	// in-memory cache + the messages-pane header refresh
 	// automatically. Until then, the user knows the request was sent.
-	a.statusBar.SetError("Topic update sent — pending server confirmation")
+	a.statusBar.SetError(topicUpdatePendingStatus)
 }
 
 // Phase 14 Chunk 6 command handlers ------------------------------------

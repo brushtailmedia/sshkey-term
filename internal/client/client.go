@@ -57,6 +57,11 @@ type Config struct {
 	// return promptly.
 	OnAttachmentReady func(fileID string)
 
+	// OnRoomUpdated fires when a room_updated envelope is accepted.
+	// Runs on the readLoop goroutine; receivers should push to a
+	// channel and return promptly.
+	OnRoomUpdated func(room string)
+
 	// ImageAutoPreviewMaxBytes is the size cap for auto-downloading
 	// image attachments on message receive. Images at or below this
 	// threshold are fetched in the background so they can render
@@ -87,7 +92,6 @@ type Client struct {
 	admin        bool
 	rooms        []string
 	groups       []string
-	capabilities []string
 	profiles     map[string]*protocol.Profile
 	groupMembers map[string][]string // group DM ID -> member userIDs
 	// Phase 14: in-memory admin set per group. Sourced from the
@@ -316,7 +320,6 @@ func (c *Client) handshake() error {
 	c.logger.Info("server hello",
 		"server", hello.ServerID,
 		"version", hello.Version,
-		"capabilities", hello.Capabilities,
 	)
 
 	// Send client_hello
@@ -328,11 +331,6 @@ func (c *Client) handshake() error {
 		ClientVersion: ClientVersion,
 		DeviceID:      c.cfg.DeviceID,
 		LastSyncedAt:  c.lastSynced,
-		Capabilities: []string{
-			"typing", "reactions", "read_receipts", "file_transfer",
-			"link_previews", "presence", "pins", "mentions",
-			"unread", "status", "signatures",
-		},
 	})
 	if err != nil {
 		return fmt.Errorf("send client_hello: %w", err)
@@ -357,14 +355,12 @@ func (c *Client) handshake() error {
 	c.admin = welcome.Admin
 	c.rooms = welcome.Rooms
 	c.groups = welcome.Groups
-	c.capabilities = welcome.ActiveCapabilities
 	c.mu.Unlock()
 
 	c.logger.Info("connected",
 		"user", welcome.User,
 		"admin", welcome.Admin,
 		"rooms", welcome.Rooms,
-		"capabilities", welcome.ActiveCapabilities,
 	)
 
 	return nil
@@ -881,6 +877,9 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 				if err := c.store.UpdateRoomNameTopic(ru.Room, ru.DisplayName, ru.Topic); err != nil {
 					c.logger.Warn("UpdateRoomNameTopic on room_updated", "room", ru.Room, "error", err)
 				}
+			}
+			if c.cfg.OnRoomUpdated != nil {
+				c.cfg.OnRoomUpdated(ru.Room)
 			}
 			c.logger.Info("room updated", "room", ru.Room, "display_name", ru.DisplayName, "topic", ru.Topic)
 		}

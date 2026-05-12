@@ -131,13 +131,14 @@ type SidebarModel struct {
 	selfUserID          string // the current user's ID (for DM "other party" resolve)
 
 	// For message forwarding (set by App)
-	msgCh         chan ServerMsg
-	errCh         chan error
-	keyWarnCh     chan KeyChangeEvent       // Phase 21 F3.a
+	msgCh            chan ServerMsg
+	errCh            chan error
+	keyWarnCh        chan KeyChangeEvent       // Phase 21 F3.a
 	attachReadyCh    chan AttachmentReadyEvent // auto-preview image downloads
 	uploadResultCh   chan UploadResultEvent    // /upload completion / failure feedback
 	downloadResultCh chan DownloadResultEvent  // o / p action completion / failure feedback
 	saveResultCh     chan SaveResultEvent      // save-as copy completion / failure feedback
+	roomUpdatedCh    chan RoomUpdatedEvent     // room_updated callback bridge
 
 	// previewImagePath, when non-empty, points at a locally-cached
 	// image file to render in the bottom preview pane area instead

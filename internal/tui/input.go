@@ -585,14 +585,25 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg}
 		}
 	case "/topic":
-		// Phase 18: read-only display of the current room's topic.
 		// Rooms only — groups have no topics by design, 1:1 DMs have
-		// neither. The app layer surfaces the topic (or "no topic set"
-		// fallback) via the status bar. Writing a new topic is
-		// deferred to Phase 16 with the CLI audit + room_updated
-		// broadcast work. This is purely a local read; no server
-		// interaction.
-		i.pendingCmd = &SlashCommandMsg{Command: cmd, Room: room, Group: group, DM: dm}
+		// neither. Two modes:
+		//   - `/topic`           (no arg) → read-only display of the
+		//                                   current room's topic via
+		//                                   status bar.
+		//   - `/topic <text>`    (arg)    → admin-only write; sends a
+		//                                   room_update request and
+		//                                   surfaces an optimistic
+		//                                   "pending server
+		//                                   confirmation" message. The
+		//                                   actual topic refresh
+		//                                   arrives via the server's
+		//                                   room_updated broadcast.
+		// Arg MUST be forwarded — handleTopicCommand reads sc.Arg to
+		// decide read vs write. A prior dispatch line omitted it and
+		// silently coerced every `/topic <text>` call back into read
+		// mode (status bar showed the OLD topic, never set the new
+		// one). Test in phase18_test.go locks the forwarding in.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	}
 }
 

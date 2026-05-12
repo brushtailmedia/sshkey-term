@@ -141,3 +141,31 @@ func TestRoomUpdatedEvent_PreservesMembersCount(t *testing.T) {
 		t.Errorf("name after re-upsert = %q, want main", name)
 	}
 }
+
+func TestRoomUpdatedEvent_FiresOnRoomUpdatedCallback(t *testing.T) {
+	c := newClientWithRoomStore(t)
+	c.store.UpsertRoom("rm_general", "general", "old", 5)
+
+	var gotRoom string
+	c.cfg.OnRoomUpdated = func(room string) { gotRoom = room }
+
+	raw := json.RawMessage(`{"type":"room_updated","room":"rm_general","display_name":"main","topic":"new"}`)
+	c.handleInternal("room_updated", raw)
+
+	if gotRoom != "rm_general" {
+		t.Fatalf("OnRoomUpdated room = %q, want rm_general", gotRoom)
+	}
+}
+
+func TestRoomUpdatedEvent_MalformedDoesNotFireCallback(t *testing.T) {
+	c := newClientWithRoomStore(t)
+
+	fired := false
+	c.cfg.OnRoomUpdated = func(room string) { fired = true }
+
+	c.handleInternal("room_updated", json.RawMessage(`{"type":"room_updated","room":`))
+
+	if fired {
+		t.Fatal("OnRoomUpdated should not fire for malformed room_updated payload")
+	}
+}

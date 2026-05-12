@@ -136,3 +136,73 @@ func TestSlashTopic_GroupContext_ShowsNotAvailable(t *testing.T) {
 			a.statusBar.errorMsg)
 	}
 }
+
+// TestInputParser_TopicForwardsArg locks in the arg-forwarding wire
+// on the input parser side. Regression guard: an earlier dispatch
+// line at input.go:595 omitted `Arg: arg` in the `case "/topic":`
+// branch, silently coercing every `/topic <text>` invocation into
+// read mode — the user saw the OLD topic in the status bar and the
+// new topic never reached the server. The bug existed for the
+// entire window between Phase 18 (read-only /topic) and the topic-
+// write landing (this phase); existing tests in this file
+// constructed SlashCommandMsg directly and bypassed the broken
+// dispatch, so the regression went uncaught.
+//
+// This test exercises the parser path end-to-end: text in → parsed
+// arg out → forwarded to SlashCommandMsg. A future drift that drops
+// the Arg field will be caught here.
+//
+// Multi-word topics are the load-bearing case ("set the topic to
+// something" must round-trip as five words, not just one).
+func TestInputParser_TopicForwardsArg(t *testing.T) {
+	cases := []struct {
+		name     string
+		text     string
+		wantArg  string
+		wantRoom string
+	}{
+		{
+			name:     "single-word topic",
+			text:     "/topic standup",
+			wantArg:  "standup",
+			wantRoom: "rm_general",
+		},
+		{
+			name:     "multi-word topic (the bug case)",
+			text:     "/topic something with spaces here",
+			wantArg:  "something with spaces here",
+			wantRoom: "rm_general",
+		},
+		{
+			name:     "topic with trailing whitespace preserved at parser level",
+			text:     "/topic  leading-and-internal  spaces ",
+			wantArg:  " leading-and-internal  spaces ",
+			wantRoom: "rm_general",
+		},
+		{
+			name:     "empty /topic (read mode)",
+			text:     "/topic",
+			wantArg:  "",
+			wantRoom: "rm_general",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			i := &InputModel{}
+			i.handleCommand(tc.text, nil, tc.wantRoom, "", "")
+			sc := i.PendingCommand()
+			if sc == nil {
+				t.Fatalf("%q should route to app via pendingCmd", tc.text)
+			}
+			if sc.Command != "/topic" {
+				t.Errorf("Command = %q, want /topic", sc.Command)
+			}
+			if sc.Room != tc.wantRoom {
+				t.Errorf("Room = %q, want %q", sc.Room, tc.wantRoom)
+			}
+			if sc.Arg != tc.wantArg {
+				t.Errorf("Arg = %q, want %q (the bug was Arg getting dropped on the floor in the dispatch wiring)", sc.Arg, tc.wantArg)
+			}
+		})
+	}
+}
