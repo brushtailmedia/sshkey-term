@@ -71,7 +71,7 @@ type ServerConfig struct {
 
 // Load reads the config file. Returns a default config if the file doesn't exist.
 func Load(dir string) (*Config, error) {
-	path := filepath.Join(dir, "config.toml")
+	path := ConfigFilePath(dir)
 
 	cfg := &Config{}
 	// Decode the config file if present; otherwise fall through with
@@ -106,7 +106,7 @@ func Save(dir string, cfg *Config) error {
 		return err
 	}
 
-	path := filepath.Join(dir, "config.toml")
+	path := ConfigFilePath(dir)
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -138,7 +138,17 @@ func generateDeviceID() string {
 }
 
 // AddServer adds a server to the config. Saves to disk.
+//
+// Phase 2 of the path-centralization refactor: validates
+// `server.Host` via ValidateHost before mutation, so a bad host
+// value (e.g. from a malformed wizard result or a future
+// programmer mistake) never gets persisted to config.toml. See
+// paths.go ValidateHost + path-centralization.md §"Server data
+// dir" validation rule.
 func AddServer(dir string, cfg *Config, server ServerConfig) error {
+	if err := ValidateHost(server.Host); err != nil {
+		return err
+	}
 	// Check for duplicate
 	for _, s := range cfg.Servers {
 		if s.Host == server.Host && s.Port == server.Port {
@@ -151,6 +161,13 @@ func AddServer(dir string, cfg *Config, server ServerConfig) error {
 
 // RemoveServer removes a server from the config by index. Saves to disk.
 // Also removes the server's local data directory.
+//
+// Phase 2 of the path-centralization refactor: validates
+// `cfg.Servers[index].Host` via ValidateHost AFTER the existing
+// index-bounds check and BEFORE deriving `dataDir`. Bad host
+// values from hand-edited config.toml fail closed — both the
+// filesystem removal and the config-entry removal share one
+// validation gate, keeping the two in sync.
 func RemoveServer(dir string, cfg *Config, index int) error {
 	if index < 0 || index >= len(cfg.Servers) {
 		return fmt.Errorf("invalid server index: %d", index)
@@ -158,12 +175,16 @@ func RemoveServer(dir string, cfg *Config, index int) error {
 
 	server := cfg.Servers[index]
 
-	// Remove local data for this server
-	dataDir := filepath.Join(dir, server.Host)
-	os.RemoveAll(dataDir)
+	if err := ValidateHost(server.Host); err != nil {
+		return err
+	}
 
-	// Remove known_host
-	os.Remove(filepath.Join(dataDir, "known_host"))
+	// Remove local data for this server. Under the per-server-
+	// folder layout, this single os.RemoveAll cleans up every-
+	// thing the server owns: messages.db, known_host, keys/,
+	// files/, client.log.
+	dataDir := ServerDataDirForHost(dir, server.Host)
+	os.RemoveAll(dataDir)
 
 	// Remove from config
 	cfg.Servers = append(cfg.Servers[:index], cfg.Servers[index+1:]...)
@@ -171,13 +192,30 @@ func RemoveServer(dir string, cfg *Config, index int) error {
 }
 
 // ServerDataDir returns the local data directory for a server.
+//
+// Phase 1 legacy wrapper — delegates to ServerDataDirForHost so
+// existing call sites in this file and in tests continue to
+// compile during the path-centralization migration. New code
+// should call ServerDataDirForHost(configDir, host string)
+// directly. This wrapper will be removed once all callers have
+// migrated (planned for a follow-up cleanup after Phase 4).
 func ServerDataDir(configDir string, server ServerConfig) string {
-	return filepath.Join(configDir, server.Host)
+	return ServerDataDirForHost(configDir, server.Host)
 }
 
 // ServerDataSize returns the total size of a server's local data in bytes.
+//
+// Phase 2 of the path-centralization refactor: validates
+// `server.Host` before deriving `dataDir`. Read-only walk, but
+// without validation a malformed Host (e.g. from hand-edited
+// config) would walk the WRONG directory and report misleading
+// byte counts to the settings UI. ValidateHost closes that
+// silent-UI-bug surface.
 func ServerDataSize(configDir string, server ServerConfig) (int64, error) {
-	dataDir := filepath.Join(configDir, server.Host)
+	if err := ValidateHost(server.Host); err != nil {
+		return 0, err
+	}
+	dataDir := ServerDataDirForHost(configDir, server.Host)
 	var total int64
 	err := filepath.Walk(dataDir, func(_ string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -191,15 +229,25 @@ func ServerDataSize(configDir string, server ServerConfig) (int64, error) {
 	return total, err
 }
 
-// ClearServerData removes all local data for a server (messages, keys, etc.)
-// but keeps the server in the config.
+// ClearServerData removes the chat history for a server but
+// preserves identity state (known_host TOFU pin + keys/).
+//
+// Phase 2 of the path-centralization refactor: validates
+// `server.Host` as the first action, then routes the join
+// through ServerDataDirForHost and replaces the inline
+// `files/` join with FilesDir. The partial-clear semantics
+// (messages.db* + files/ removed; known_host + keys/ retained)
+// are UNCHANGED.
 func ClearServerData(configDir string, server ServerConfig) error {
-	dataDir := filepath.Join(configDir, server.Host)
-	// Remove messages.db but keep known_host
+	if err := ValidateHost(server.Host); err != nil {
+		return err
+	}
+	dataDir := ServerDataDirForHost(configDir, server.Host)
+	// Remove messages.db but keep known_host and keys/.
 	os.Remove(filepath.Join(dataDir, "messages.db"))
 	os.Remove(filepath.Join(dataDir, "messages.db-wal"))
 	os.Remove(filepath.Join(dataDir, "messages.db-shm"))
-	os.RemoveAll(filepath.Join(dataDir, "files"))
+	os.RemoveAll(FilesDir(dataDir))
 	return nil
 }
 

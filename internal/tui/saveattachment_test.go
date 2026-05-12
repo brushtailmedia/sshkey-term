@@ -312,30 +312,13 @@ func TestUniqueDest_NoExtension(t *testing.T) {
 	}
 }
 
-// TestExpandTilde covers the three interesting inputs: no tilde passes
-// through, bare "~" resolves to home, "~/sub" joins under home.
-func TestExpandTilde(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		t.Skip("no home dir resolvable")
-	}
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"/absolute/path", "/absolute/path"},
-		{"relative/path", "relative/path"},
-		{"", ""},
-		{"~", home},
-		{"~/Downloads", filepath.Join(home, "Downloads")},
-		{"~/Downloads/foo.png", filepath.Join(home, "Downloads", "foo.png")},
-	}
-	for _, tc := range cases {
-		if got := expandTilde(tc.in); got != tc.want {
-			t.Errorf("expandTilde(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
+// Note: the prior TestExpandTilde test that lived here covered
+// the local `expandTilde` helper which was deleted in Phase 3 of
+// the path-centralization refactor. Coverage of the equivalent
+// behavior is now provided by `internal/config/paths_test.go`'s
+// TestExpandUserPath_* tests against `config.ExpandUserPath`,
+// which is the canonical implementation that save flows here
+// now route through.
 
 // TestSanitizeAttachmentName is the path-traversal guard. Sender-
 // supplied filenames containing path separators or the dot/dot-dot

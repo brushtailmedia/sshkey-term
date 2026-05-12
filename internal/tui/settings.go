@@ -135,8 +135,19 @@ func (s *SettingsModel) buildItems(displayName string, currentServer int) {
 		// once the slash command is canonical.
 		s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
 		s.items = append(s.items, settingsItem{label: "  Storage", value: "", action: ""})
-		size, _ := config.ServerDataSize(s.configDir, srv)
-		s.items = append(s.items, settingsItem{label: "    Local DB", value: formatBytes(size), action: ""})
+		// Phase 2 of path-centralization: ServerDataSize now
+		// validates srv.Host before walking the filesystem.
+		// Surface the error in the settings panel instead of
+		// silently displaying "0 B" for a malformed Host (which
+		// would walk the wrong directory).
+		size, sizeErr := config.ServerDataSize(s.configDir, srv)
+		var dbValue string
+		if sizeErr != nil {
+			dbValue = "invalid host"
+		} else {
+			dbValue = formatBytes(size)
+		}
+		s.items = append(s.items, settingsItem{label: "    Local DB", value: dbValue, action: ""})
 		s.items = append(s.items, settingsItem{label: "    [Clear local history]", value: "", action: "clear_history"})
 		s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
 		s.items = append(s.items, settingsItem{label: "  Keys", value: "", action: ""})

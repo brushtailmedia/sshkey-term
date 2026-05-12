@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 )
 
 // hostKeyCallback returns an ssh.HostKeyCallback that implements TOFU.
@@ -22,7 +24,7 @@ func hostKeyCallback(dataDir, host string) ssh.HostKeyCallback {
 			return nil
 		}
 
-		knownHostsPath := filepath.Join(dataDir, "known_host")
+		knownHostsPath := config.KnownHostPath(dataDir)
 
 		// Try to read stored fingerprint
 		stored, err := os.ReadFile(knownHostsPath)

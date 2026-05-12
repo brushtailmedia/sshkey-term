@@ -9,6 +9,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 )
 
 // SaveAttachmentModel is the save-as dialog for attachment files. Replaces
@@ -161,7 +163,7 @@ func (m SaveAttachmentModel) updateEdit(msg tea.KeyMsg) (SaveAttachmentModel, te
 		return m, func() tea.Msg { return SaveAttachmentCancelledMsg{} }
 
 	case "enter":
-		dest := expandTilde(strings.TrimSpace(m.input.Value()))
+		dest := config.ExpandUserPath(strings.TrimSpace(m.input.Value()))
 		if dest == "" {
 			m.errMsg = "destination path cannot be empty"
 			return m, nil
@@ -212,7 +214,7 @@ func (m SaveAttachmentModel) updateEdit(msg tea.KeyMsg) (SaveAttachmentModel, te
 func (m SaveAttachmentModel) updateExists(msg tea.KeyMsg) (SaveAttachmentModel, tea.Cmd) {
 	switch strings.ToLower(msg.String()) {
 	case "o":
-		dest := expandTilde(strings.TrimSpace(m.input.Value()))
+		dest := config.ExpandUserPath(strings.TrimSpace(m.input.Value()))
 		src := m.sourcePath
 		m.Hide()
 		return m, func() tea.Msg {
@@ -299,28 +301,6 @@ func uniqueDest(path string) string {
 		if _, err := os.Stat(candidate); err != nil {
 			return candidate
 		}
-	}
-	return path
-}
-
-// expandTilde handles `~/...` and `~` expansion in user-typed paths.
-// Non-expandable inputs (a path that doesn't start with `~` or a home
-// directory that can't be resolved) pass through unchanged — errors
-// surface later when the save itself tries to write.
-func expandTilde(path string) string {
-	if path == "" || path[0] != '~' {
-		return path
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return path
-	}
-	if path == "~" {
-		return home
-	}
-	// Only expand "~/..." (tilde followed by separator), not "~user".
-	if len(path) >= 2 && (path[1] == '/' || path[1] == filepath.Separator) {
-		return filepath.Join(home, path[2:])
 	}
 	return path
 }

@@ -5,9 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"sync"
 
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/crypto"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 	"github.com/brushtailmedia/sshkey-term/internal/store"
@@ -261,7 +261,7 @@ func (c *Client) maybeAutoPreviewAttachments(attachments []store.StoredAttachmen
 		if a.Size <= 0 || a.Size > c.cfg.ImageAutoPreviewMaxBytes {
 			continue
 		}
-		cachedPath := filepath.Join(dataDir, "files", a.FileID)
+		cachedPath := config.AttachmentPath(dataDir, a.FileID)
 		if _, err := os.Stat(cachedPath); err == nil {
 			// Already cached from a previous session or manual open — no
 			// download needed, but still nudge the TUI to re-render in

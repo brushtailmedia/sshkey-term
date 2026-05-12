@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/keygen"
 )
 
@@ -115,11 +116,7 @@ var keyCopyFn = copyKeyForServer
 // path). Destination-already-exists is an error rather than a
 // silent overwrite.
 func copyKeyForServer(srcKeyPath, host string) (string, error) {
-	src := srcKeyPath
-	if strings.HasPrefix(src, "~/") {
-		home, _ := os.UserHomeDir()
-		src = filepath.Join(home, src[2:])
-	}
+	src := config.ExpandUserPath(srcKeyPath)
 
 	privData, err := os.ReadFile(src)
 	if err != nil {
@@ -628,11 +625,7 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 		a.weakPassConfirmed = ""
 
 		// Don't silently overwrite an existing file
-		expanded := path
-		if strings.HasPrefix(expanded, "~/") {
-			home, _ := os.UserHomeDir()
-			expanded = filepath.Join(home, expanded[2:])
-		}
+		expanded := config.ExpandUserPath(path)
 		if _, err := os.Stat(expanded); err == nil {
 			a.genErr = "File already exists: " + expanded
 			return a, nil

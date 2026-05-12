@@ -360,6 +360,15 @@ func (a *App) switchServerByIndex(idx int) tea.Cmd {
 
 	// Switch to new server.
 	srv := a.appConfig.Servers[idx]
+
+	// Validate host before any path derivation — defense against
+	// hand-edited config.toml. Refuse the switch with a status-bar
+	// error instead of constructing a malformed dataDir or KeyPath.
+	if err := config.ValidateHost(srv.Host); err != nil {
+		a.statusBar.SetError("Cannot switch to " + srv.Name + ": " + err.Error())
+		return nil
+	}
+
 	a.serverIdx = idx
 	a.connected = false
 	a.reconnectAttempt = 0
@@ -367,8 +376,13 @@ func (a *App) switchServerByIndex(idx int) tea.Cmd {
 	// Update config for new server.
 	a.cfg.Host = srv.Host
 	a.cfg.Port = srv.Port
+	// Phase 2 transition note: srv.Key still wired here while the
+	// `Key` field exists on ServerConfig. Phase 3 swaps this for
+	// `config.ServerKeyPath(a.configDir, srv.Host)` after the field
+	// is deleted and the wizard's copy destination is rewritten to
+	// land keys at the per-server managed location.
 	a.cfg.KeyPath = srv.Key
-	a.cfg.DataDir = filepath.Join(a.configDir, srv.Host)
+	a.cfg.DataDir = config.ServerDataDirForHost(a.configDir, srv.Host)
 
 	// Clear UI state.
 	a.messages.SetContext("", "", "")
@@ -1763,15 +1777,44 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SettingsActionMsg:
 		switch msg.Action {
 		case "clear_history":
-			if a.client != nil && a.appConfig != nil && msg.ServerIdx < len(a.appConfig.Servers) {
-				config.ClearServerData(a.configDir, a.appConfig.Servers[a.serverIdx])
-				a.statusBar.SetError("Local history cleared")
+			// Ephemeral-sentinel guard: a.serverIdx < 0 means we're
+			// running against an unconfigured ephemeral host (CLI
+			// bypass with existing cfg.Servers). Refuse destructive
+			// actions — there's no genuine "active configured
+			// server" to clear data for; without this guard the
+			// fallback would target cfg.Servers[0] which the user
+			// did not intend.
+			if a.serverIdx < 0 {
+				a.statusBar.SetError("Cannot clear history in ephemeral mode (no configured server)")
+				break
+			}
+			if a.client != nil && a.appConfig != nil && a.serverIdx < len(a.appConfig.Servers) {
+				if err := config.ClearServerData(a.configDir, a.appConfig.Servers[a.serverIdx]); err != nil {
+					a.statusBar.SetError("Failed to clear history: " + err.Error())
+				} else {
+					a.statusBar.SetError("Local history cleared")
+				}
 			}
 		case "remove_server":
+			// Ephemeral-sentinel guard: see clear_history above.
+			if a.serverIdx < 0 {
+				a.statusBar.SetError("Cannot remove server in ephemeral mode (no configured server)")
+				break
+			}
 			if a.appConfig != nil {
-				config.RemoveServer(a.configDir, a.appConfig, msg.ServerIdx)
+				if err := config.RemoveServer(a.configDir, a.appConfig, msg.ServerIdx); err != nil {
+					a.statusBar.SetError("Failed to remove server: " + err.Error())
+					// Side-effects (close + quit) intentionally
+					// NOT run on error — server removal aborted,
+					// leave the app + client running so the user
+					// can recover.
+					break
+				}
 				a.statusBar.SetError("Server removed")
-				// If we removed the active server, close
+				// If we removed the active server, close. Only
+				// runs on the success path (after the nil-error
+				// branch above) so an aborted RemoveServer never
+				// quits the app behind the user's back.
 				if msg.ServerIdx == a.serverIdx {
 					if a.client != nil {
 						a.client.Close()
@@ -2194,10 +2237,20 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Name: msg.Name,
 				Host: msg.Host,
 				Port: msg.Port,
-				Key:  msg.Key,
+				// Key field still wired during Phase 2 transition;
+				// Phase 3 deletes the field + the corresponding
+				// AddServerMsg.Key field + this assignment.
+				Key: msg.Key,
 			}
-			config.AddServer(a.configDir, a.appConfig, srv)
-			a.statusBar.SetError("Server added: " + msg.Name)
+			// AddServer validates srv.Host (Phase 2 addition); the
+			// error path surfaces a clear status-bar message
+			// instead of the prior unconditional "Server added"
+			// false-success.
+			if err := config.AddServer(a.configDir, a.appConfig, srv); err != nil {
+				a.statusBar.SetError("Failed to add server: " + err.Error())
+			} else {
+				a.statusBar.SetError("Server added: " + msg.Name)
+			}
 		}
 		return a, nil
 
@@ -2545,7 +2598,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// the chosen destination directory.
 				safeName := sanitizeAttachmentName(att.Name)
 				defaultPath := filepath.Join(defaultSaveDir(), safeName)
-				cachePath := filepath.Join(a.cfg.DataDir, "files", att.FileID)
+				cachePath := config.AttachmentPath(a.cfg.DataDir, att.FileID)
 
 				// If auto-preview already cached the file (small image)
 				// or the user previously opened it, skip the network
@@ -2744,7 +2797,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Wire the per-server file cache directory into the messages
 		// model so the inline-image render path can resolve downloaded
 		// attachments by file_id at paint time. See MessagesModel.SetFilesDir.
-		a.messages.SetFilesDir(filepath.Join(a.cfg.DataDir, "files"))
+		a.messages.SetFilesDir(config.FilesDir(a.cfg.DataDir))
 
 	case ServerMsg:
 		if cmd := a.handleServerMessage(msg); cmd != nil {
@@ -2974,11 +3027,7 @@ func keyInfoFromPubPath(keyPath string) (string, string) {
 	if path == "" {
 		return "", ""
 	}
-	if strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			path = filepath.Join(home, path[2:])
-		}
-	}
+	path = config.ExpandUserPath(path)
 	pubPath := path + ".pub"
 	pubData, err := os.ReadFile(pubPath)
 	if err != nil {

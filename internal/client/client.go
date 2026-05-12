@@ -8,13 +8,13 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
@@ -224,7 +224,7 @@ func (c *Client) Connect() error {
 
 	// Open encrypted local DB (key derived from SSH private key)
 	if c.cfg.DataDir != "" {
-		dbPath := filepath.Join(c.cfg.DataDir, "messages.db")
+		dbPath := config.MessagesDBPath(c.cfg.DataDir)
 
 		// Derive DB encryption key from the SSH private key seed.
 		// Both derivation and open must succeed — we never store
@@ -1538,16 +1538,15 @@ func (c *Client) Done() <-chan struct{} {
 //
 // Used by every bulk-delete path (room / group / DM purge) to
 // keep <DataDir>/files/<fileID> in sync with the local DB. Phase
-// 2 of the path-centralization refactor swaps the inline
+// 2 of the path-centralization refactor swapped the inline
 // filepath.Join here for config.AttachmentPath; the helper's
 // external interface is unchanged.
 func (c *Client) cleanupAttachmentFiles(fileIDs []string) {
 	if c.cfg.DataDir == "" || len(fileIDs) == 0 {
 		return
 	}
-	filesDir := filepath.Join(c.cfg.DataDir, "files")
 	for _, fid := range fileIDs {
-		if err := os.Remove(filepath.Join(filesDir, fid)); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(config.AttachmentPath(c.cfg.DataDir, fid)); err != nil && !os.IsNotExist(err) {
 			if c.logger != nil {
 				c.logger.Warn("attachment cleanup", "fileID", fid, "error", err)
 			}

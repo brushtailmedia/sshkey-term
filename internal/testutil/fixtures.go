@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
@@ -154,7 +155,7 @@ func CreateTestDB(t testing.TB, keyPath string) string {
 	}
 
 	dbDir := t.TempDir()
-	dbPath := filepath.Join(dbDir, "messages.db")
+	dbPath := config.MessagesDBPath(dbDir)
 
 	dbKey, err := store.DeriveDBKey(privKey.Seed())
 	if err != nil {

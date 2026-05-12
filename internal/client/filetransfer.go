@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/crypto"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
@@ -196,7 +197,7 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 		// Same eager-thumbnail goroutine spawned post-write so the
 		// sender's first inline render of their own upload is fast.
 		if c.cfg.DataDir != "" {
-			localPath := filepath.Join(c.cfg.DataDir, "files", fileID)
+			localPath := config.AttachmentPath(c.cfg.DataDir, fileID)
 			if err := os.MkdirAll(filepath.Dir(localPath), 0700); err == nil {
 				if err := os.WriteFile(localPath, data, 0600); err == nil {
 					// Block-char thumbnail (40×12 cell preview).
@@ -337,7 +338,7 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 	if dataDir == "" {
 		dataDir = os.TempDir()
 	}
-	filesDir := filepath.Join(dataDir, "files")
+	filesDir := config.FilesDir(dataDir)
 	os.MkdirAll(filesDir, 0700)
 
 	// Register a pending download so Channel 1 can signal download_start

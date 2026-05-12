@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/keygen"
 )
 
@@ -294,10 +295,7 @@ func (w WizardModel) updateKeyImport(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return w, nil
 		}
 		// Expand ~
-		if strings.HasPrefix(path, "~/") {
-			home, _ := os.UserHomeDir()
-			path = filepath.Join(home, path[2:])
-		}
+		path = config.ExpandUserPath(path)
 		// Validate
 		if _, err := os.Stat(path); err != nil {
 			w.err = "File not found: " + path
@@ -417,11 +415,7 @@ func (w WizardModel) doGenerateKey() (tea.Model, tea.Cmd) {
 	w.weakPassConfirmed = ""
 
 	// Expand ~ for storing in result (generateEd25519KeyFile does its own expansion)
-	expandedPath := path
-	if strings.HasPrefix(expandedPath, "~/") {
-		home, _ := os.UserHomeDir()
-		expandedPath = filepath.Join(home, expandedPath[2:])
-	}
+	expandedPath := config.ExpandUserPath(path)
 
 	fingerprint, err := generateEd25519KeyFile(path, pass, w.chosenName)
 	if err != nil {
@@ -468,10 +462,7 @@ func (w WizardModel) updateExport(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if dst == "" {
 			return w, nil
 		}
-		if strings.HasPrefix(dst, "~/") {
-			home, _ := os.UserHomeDir()
-			dst = filepath.Join(home, dst[2:])
-		}
+		dst = config.ExpandUserPath(dst)
 		os.MkdirAll(filepath.Dir(dst), 0700)
 		// Copy key file
 		data, err := os.ReadFile(w.result.KeyPath)
@@ -755,11 +746,7 @@ func (w *WizardModel) resetKeyGenState() {
 // display name. This path is strict: any copy or rewrite failure aborts
 // progression so setup cannot silently continue with mismatched identity data.
 func (w WizardModel) copyKeyToManagedStoreAndRewriteName(srcKeyPath string) (string, string, error) {
-	src := srcKeyPath
-	if strings.HasPrefix(src, "~/") {
-		home, _ := os.UserHomeDir()
-		src = filepath.Join(home, src[2:])
-	}
+	src := config.ExpandUserPath(srcKeyPath)
 
 	pubPath := src + ".pub"
 	pubData, err := os.ReadFile(pubPath)

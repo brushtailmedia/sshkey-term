@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 )
 
 // generateEd25519KeyFile creates a new Ed25519 SSH keypair and writes the
@@ -24,10 +26,7 @@ import (
 // any server state — callers are responsible for backup prompts and for
 // wiring the returned key into config.toml.
 func generateEd25519KeyFile(path, passphrase string, comment ...string) (fingerprint string, err error) {
-	if strings.HasPrefix(path, "~/") {
-		home, _ := os.UserHomeDir()
-		path = filepath.Join(home, path[2:])
-	}
+	path = config.ExpandUserPath(path)
 
 	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
