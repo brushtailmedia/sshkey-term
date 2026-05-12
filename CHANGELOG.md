@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-05-12
+
 ### Added
 - **rasterm re-added for the sidebar preview pane (2026-05-08).** When the active terminal advertises kitty / iTerm2 / WezTerm / Ghostty graphics-protocol support (env-var probe at startup via `rasterm.IsKittyCapable` / `IsItermCapable` — no terminal-attribute query, which would conflict with bubbletea's stdin reader), the sidebar preview pane renders the selected message's image attachment at native protocol resolution via [BourgeoisBear/rasterm](https://github.com/BourgeoisBear/rasterm). Block-cell remains the universal fallback for unsupported terminals (Apple Terminal, Windows Terminal, plain xterm) and for the sixel-only family (foot, Contour) since sixel detection requires a DA1 probe that's unsafe in the bubbletea I/O loop.
 
