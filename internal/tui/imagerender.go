@@ -262,10 +262,7 @@ const maxImageRenderCacheEntries = 32
 // image-render path or elsewhere; also a clean opt-out for users
 // who prefer text-only display.
 func CanRenderImages() bool {
-	if os.Getenv("SSHKEY_NO_INLINE_IMAGES") != "" {
-		return false
-	}
-	return true
+	return os.Getenv("SSHKEY_NO_INLINE_IMAGES") == ""
 }
 
 // useTrueColor returns true if the active terminal advertises
