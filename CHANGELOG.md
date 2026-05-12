@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Attachment files orphaned on bulk-delete paths (2026-05-13).** Pre-fix, bulk-delete paths (room / group / DM `/delete` plus the hidden-DM sync push from `dm_list`) dropped the messages and reactions from the local DB but left their attachment files behind in `<dataDir>/files/<fileID>`. Affected **six call sites across four delete contexts** in `internal/client/client.go`:
+  - **`/delete` on a room** (`case "room_deleted"` at line 916) — server confirmed our delete or another device's.
+  - **`/delete` on a group** (`case "group_deleted"` at line 772).
+  - **`/delete` on a 1:1 DM** (`case "dm_left"` at line 1002).
+  - **Hidden-DM sync** (`case "dm_list"` at line 963 when the server marks a DM as `hidden_for_caller`) — same orphan concern with arguably stronger privacy framing: the server explicitly told the client to stop retaining the content. Today the local DB purge ran but the attachment files remained on disk.
+  - **Multi-entry catchup paths** (`deleted_rooms` line 935 + `deleted_groups` line 790) — same bulk purge in a loop on reconnect.
+
+  Privacy implication: a user pressing `/delete` on a room with sensitive images reasonably expected those images to leave their machine — they didn't. Same for the hidden-DM sync case. Disk-leak implication: every deleted or hidden conversation contributed to unbounded `<dataDir>/files/` growth.
+
+  Fix matches the existing single-message `case "deleted"` pattern at `client.go:1066-1071` — the three bulk-purge functions in `internal/store/keys.go` (`PurgeRoomMessages`, `PurgeGroupMessages`, `PurgeDMMessages`) now SELECT the `attachments` column for every in-scope message BEFORE the DELETE statements, parse the JSON-encoded `[]StoredAttachment`, accumulate non-empty `FileID` values, and return them alongside `error`. Each caller in `client.go` invokes a new `Client.cleanupAttachmentFiles(fileIDs)` helper that walks the list and `os.Remove`s each file under `<DataDir>/files/`. File-not-exist is silent (the expected case for messages whose attachments were never downloaded). Common store-layer helper `collectMessageFileIDsByColumn` keeps the SELECT-and-parse logic in one place across the three Purge functions.
+
+  **Secondary improvement: cleanup-failure error logging.** The existing single-message-delete inline loop at `client.go:1066-1071` pre-fix silently swallowed every `os.Remove` error — permission-denied, disk-full, I/O errors — all invisible at runtime. The new `cleanupAttachmentFiles` helper logs non-`IsNotExist` errors at WARN level. File-not-exist remains silent (expected case). The single-message `case "deleted"` block was refactored to use the same helper for consistency, so it also gains the improved error logging. The `RemoveServer` and `ClearServerData` paths are unaffected — they remove `files/` wholesale; only the per-room / per-group / per-DM paths had the leak.
+
+  **Tests.** New `internal/store/purge_attachments_test.go` covers the fileID return contract (`TestPurgeRoomMessages_ReturnsAttachmentFileIDs`, `TestPurgeGroupMessages_ReturnsAttachmentFileIDs`, `TestPurgeDMMessages_ReturnsAttachmentFileIDs`, plus `_NoAttachmentsReturnsEmpty` and `_EmptyScopeReturnsEmpty` for the no-op cases). New `internal/client/cleanup_attachments_test.go` covers the cleanup helper (`TestCleanupAttachmentFiles_RemovesAllListedFiles` happy path, `_MissingFileIsSilent` for the os.IsNotExist case, `_EmptyDataDirNoOp` for the test-context no-op, `_EmptyListNoOp` for the no-attachments case) plus an end-to-end `_IntegrationWithPurgeRoom` test that seeds a DB + files on disk, runs the bulk purge, and asserts the on-disk files match what the DB rows referenced. Existing tests in `internal/store/dm_delete_test.go` and `internal/store/room_retirement_test.go` updated for the new `([]string, error)` return type (no behavior change to those tests — they continue to verify message + reaction + epoch-key cleanup; the new fileID return is just discarded via `_`).
+
+  Pre-work for the path-centralization refactor tracked in `path-centralization.md` — landing this bug-fix first as a self-contained commit keeps the refactor's diff strictly about path concerns. Phase 2 of the refactor will swap the inline `filepath.Join(c.cfg.DataDir, "files")` inside `cleanupAttachmentFiles` for a single `config.AttachmentPath(c.cfg.DataDir, fid)` call once `paths.go` lands.
+
 ### Changed
 - **Handshake capability fields removed from protocol/client wiring (2026-05-12).** The terminal client no longer sends or reads `capabilities` / `active_capabilities` during `server_hello` → `client_hello` → `welcome`, and capability-related handshake logging was removed. This aligns the client with the server-side protocol cleanup and reduces connection log noise with no functional impact to messaging or sync flows.
 

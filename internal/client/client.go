@@ -769,8 +769,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			delete(c.groupMembers, gd.Group)
 			c.mu.Unlock()
 			if c.store != nil {
-				if err := c.store.PurgeGroupMessages(gd.Group); err != nil {
+				fileIDs, err := c.store.PurgeGroupMessages(gd.Group)
+				if err != nil {
 					c.logger.Warn("PurgeGroupMessages on group_deleted", "group", gd.Group, "error", err)
+				} else {
+					c.cleanupAttachmentFiles(fileIDs)
 				}
 				if err := c.store.DeleteGroupRecord(gd.Group); err != nil {
 					c.logger.Warn("DeleteGroupRecord on group_deleted", "group", gd.Group, "error", err)
@@ -787,8 +790,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			// echo had arrived. Idempotent on already-purged entries.
 			if c.store != nil {
 				for _, groupID := range dgl.Groups {
-					if err := c.store.PurgeGroupMessages(groupID); err != nil {
+					fileIDs, err := c.store.PurgeGroupMessages(groupID)
+					if err != nil {
 						c.logger.Warn("PurgeGroupMessages on deleted_groups", "group", groupID, "error", err)
+					} else {
+						c.cleanupAttachmentFiles(fileIDs)
 					}
 					if err := c.store.DeleteGroupRecord(groupID); err != nil {
 						c.logger.Warn("DeleteGroupRecord on deleted_groups", "group", groupID, "error", err)
@@ -913,8 +919,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		var rd protocol.RoomDeleted
 		if err := json.Unmarshal(raw, &rd); err == nil {
 			if c.store != nil {
-				if err := c.store.PurgeRoomMessages(rd.Room); err != nil {
+				fileIDs, err := c.store.PurgeRoomMessages(rd.Room)
+				if err != nil {
 					c.logger.Warn("PurgeRoomMessages on room_deleted", "room", rd.Room, "error", err)
+				} else {
+					c.cleanupAttachmentFiles(fileIDs)
 				}
 				if err := c.store.DeleteRoomRecord(rd.Room); err != nil {
 					c.logger.Warn("DeleteRoomRecord on room_deleted", "room", rd.Room, "error", err)
@@ -932,8 +941,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		if err := json.Unmarshal(raw, &drl); err == nil {
 			if c.store != nil {
 				for _, roomID := range drl.Rooms {
-					if err := c.store.PurgeRoomMessages(roomID); err != nil {
+					fileIDs, err := c.store.PurgeRoomMessages(roomID)
+					if err != nil {
 						c.logger.Warn("PurgeRoomMessages on deleted_rooms", "room", roomID, "error", err)
+					} else {
+						c.cleanupAttachmentFiles(fileIDs)
 					}
 					if err := c.store.DeleteRoomRecord(roomID); err != nil {
 						c.logger.Warn("DeleteRoomRecord on deleted_rooms", "room", roomID, "error", err)
@@ -960,8 +972,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 					}
 					// Hidden DMs should not keep local plaintext history.
 					if dm.HiddenForCaller {
-						if err := c.store.PurgeDMMessages(dm.ID); err != nil {
+						fileIDs, err := c.store.PurgeDMMessages(dm.ID)
+						if err != nil {
 							c.logger.Warn("PurgeDMMessages on sync", "dm", dm.ID, "error", err)
+						} else {
+							c.cleanupAttachmentFiles(fileIDs)
 						}
 					}
 				}
@@ -999,8 +1014,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 				if err := c.store.MarkDMLeft(dl.DM, time.Now().Unix()); err != nil {
 					c.logger.Error("MarkDMLeft", "dm", dl.DM, "error", err)
 				}
-				if err := c.store.PurgeDMMessages(dl.DM); err != nil {
+				fileIDs, err := c.store.PurgeDMMessages(dl.DM)
+				if err != nil {
 					c.logger.Error("PurgeDMMessages", "dm", dl.DM, "error", err)
+				} else {
+					c.cleanupAttachmentFiles(fileIDs)
 				}
 			}
 			c.logger.Info("DM left (silent)", "dm", dl.DM)
@@ -1064,13 +1082,7 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		var d protocol.Deleted
 		if err := json.Unmarshal(raw, &d); err == nil && c.store != nil {
 			fileIDs, _ := c.store.DeleteMessage(d.ID, d.DeletedBy)
-			// Clean up locally cached files
-			if len(fileIDs) > 0 && c.cfg.DataDir != "" {
-				filesDir := filepath.Join(c.cfg.DataDir, "files")
-				for _, fid := range fileIDs {
-					os.Remove(filepath.Join(filesDir, fid))
-				}
-			}
+			c.cleanupAttachmentFiles(fileIDs)
 		}
 	case "sync_batch":
 		c.handleSyncBatchKeys(raw)
@@ -1510,4 +1522,35 @@ func (c *Client) Enc() *protocol.Encoder {
 // Done returns a channel that's closed when the client is disconnected.
 func (c *Client) Done() <-chan struct{} {
 	return c.done
+}
+
+// cleanupAttachmentFiles removes locally-cached attachment files
+// for a set of file IDs. Best-effort: file-not-exist is silent
+// (the expected case for messages whose attachments were never
+// downloaded — the cache file just doesn't exist yet). Other
+// errors (permission denied, I/O, disk full) are logged at WARN
+// but don't fail the caller.
+//
+// Convention: empty DataDir (e.g. test context with no data dir
+// configured) or empty file ID list is a clean no-op so callers
+// can invoke unconditionally after a bulk-purge without
+// pre-checking.
+//
+// Used by every bulk-delete path (room / group / DM purge) to
+// keep <DataDir>/files/<fileID> in sync with the local DB. Phase
+// 2 of the path-centralization refactor swaps the inline
+// filepath.Join here for config.AttachmentPath; the helper's
+// external interface is unchanged.
+func (c *Client) cleanupAttachmentFiles(fileIDs []string) {
+	if c.cfg.DataDir == "" || len(fileIDs) == 0 {
+		return
+	}
+	filesDir := filepath.Join(c.cfg.DataDir, "files")
+	for _, fid := range fileIDs {
+		if err := os.Remove(filepath.Join(filesDir, fid)); err != nil && !os.IsNotExist(err) {
+			if c.logger != nil {
+				c.logger.Warn("attachment cleanup", "fileID", fid, "error", err)
+			}
+		}
+	}
 }

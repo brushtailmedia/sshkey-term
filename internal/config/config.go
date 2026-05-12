@@ -69,12 +69,6 @@ type ServerConfig struct {
 	Key  string `toml:"key"`
 }
 
-// DefaultConfigDir returns the default config directory path.
-func DefaultConfigDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".sshkey-term")
-}
-
 // Load reads the config file. Returns a default config if the file doesn't exist.
 func Load(dir string) (*Config, error) {
 	path := filepath.Join(dir, "config.toml")

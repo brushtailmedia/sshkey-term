@@ -122,7 +122,7 @@ func TestPurgeDMMessages_RemovesMessagesAndReactions(t *testing.T) {
 		t.Fatalf("insert reaction: %v", err)
 	}
 
-	if err := s.PurgeDMMessages("dm_ab"); err != nil {
+	if _, err := s.PurgeDMMessages("dm_ab"); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestPurgeDMMessages_NoMessagesIsNoop(t *testing.T) {
 	if err := s.StoreDM("dm_empty", "alice", "bob"); err != nil {
 		t.Fatalf("store DM: %v", err)
 	}
-	if err := s.PurgeDMMessages("dm_empty"); err != nil {
+	if _, err := s.PurgeDMMessages("dm_empty"); err != nil {
 		t.Errorf("purge of empty DM should succeed, got: %v", err)
 	}
 }
@@ -217,7 +217,7 @@ func TestPurgeGroupMessages_RemovesMessagesAndReactions(t *testing.T) {
 		t.Fatalf("insert reaction: %v", err)
 	}
 
-	if err := s.PurgeGroupMessages("group_a"); err != nil {
+	if _, err := s.PurgeGroupMessages("group_a"); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
 
@@ -244,7 +244,7 @@ func TestPurgeGroupMessages_RemovesMessagesAndReactions(t *testing.T) {
 // TestPurgeGroupMessages_NoMessagesIsNoop verifies the empty case.
 func TestPurgeGroupMessages_NoMessagesIsNoop(t *testing.T) {
 	s := openTestStore(t)
-	if err := s.PurgeGroupMessages("group_empty"); err != nil {
+	if _, err := s.PurgeGroupMessages("group_empty"); err != nil {
 		t.Errorf("purge of empty group should succeed, got: %v", err)
 	}
 }

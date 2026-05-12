@@ -98,7 +98,7 @@ func TestPurgeRoomMessages_DropsMessages(t *testing.T) {
 	s.InsertMessage(StoredMessage{ID: "m2", Sender: "b", Body: "ho", TS: 2, Room: "room_target"})
 	s.InsertMessage(StoredMessage{ID: "m3", Sender: "c", Body: "keep", TS: 3, Room: "room_other"})
 
-	if err := s.PurgeRoomMessages("room_target"); err != nil {
+	if _, err := s.PurgeRoomMessages("room_target"); err != nil {
 		t.Fatalf("PurgeRoomMessages: %v", err)
 	}
 
@@ -129,7 +129,7 @@ func TestPurgeRoomMessages_DropsReactions(t *testing.T) {
 		t.Fatalf("expected 1 reaction before purge, got %d", len(reactions))
 	}
 
-	if err := s.PurgeRoomMessages("room_target"); err != nil {
+	if _, err := s.PurgeRoomMessages("room_target"); err != nil {
 		t.Fatalf("PurgeRoomMessages: %v", err)
 	}
 
@@ -156,7 +156,7 @@ func TestPurgeRoomMessages_DropsEpochKeys(t *testing.T) {
 		t.Fatal("epoch key should exist before purge")
 	}
 
-	if err := s.PurgeRoomMessages("room_target"); err != nil {
+	if _, err := s.PurgeRoomMessages("room_target"); err != nil {
 		t.Fatalf("PurgeRoomMessages: %v", err)
 	}
 
@@ -173,16 +173,16 @@ func TestPurgeRoomMessages_Idempotent(t *testing.T) {
 	s := openTestStore(t)
 
 	// Purge a room that never had any data
-	if err := s.PurgeRoomMessages("room_never_existed"); err != nil {
+	if _, err := s.PurgeRoomMessages("room_never_existed"); err != nil {
 		t.Errorf("purge of never-used room should be no-op, got: %v", err)
 	}
 
 	// Insert, purge, purge again
 	s.InsertMessage(StoredMessage{ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "room_x"})
-	if err := s.PurgeRoomMessages("room_x"); err != nil {
+	if _, err := s.PurgeRoomMessages("room_x"); err != nil {
 		t.Fatalf("first purge: %v", err)
 	}
-	if err := s.PurgeRoomMessages("room_x"); err != nil {
+	if _, err := s.PurgeRoomMessages("room_x"); err != nil {
 		t.Errorf("second purge should be no-op, got: %v", err)
 	}
 }

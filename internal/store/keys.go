@@ -2,9 +2,60 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 )
+
+// collectMessageFileIDsByColumn returns attachment file IDs across
+// every row in `messages` whose given column equals the supplied
+// value. Used by the bulk-purge functions
+// (PurgeRoomMessages/PurgeGroupMessages/PurgeDMMessages) to gather
+// the file IDs that need filesystem cleanup BEFORE the rows are
+// deleted from the DB.
+//
+// Best-effort: errors at any step (query, scan, JSON parse) skip
+// the offending row rather than aborting; callers can still
+// proceed with the DB delete and we just won't clean up the
+// orphaned file. The column name is gated against a fixed allowlist
+// to keep the function safe to use with a string-concatenated WHERE
+// clause without SQL-injection risk.
+func (s *Store) collectMessageFileIDsByColumn(column, value string) []string {
+	switch column {
+	case "room", "group_id", "dm_id":
+		// allowed
+	default:
+		// caller bug — never reached in practice; guard prevents
+		// arbitrary SQL injection via the concatenated WHERE clause.
+		return nil
+	}
+
+	var fileIDs []string
+	rows, err := s.db.Query(`SELECT attachments FROM messages WHERE `+column+` = ?`, value)
+	if err != nil {
+		return fileIDs
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var attachJSON string
+		if err := rows.Scan(&attachJSON); err != nil {
+			continue
+		}
+		if attachJSON == "" {
+			continue
+		}
+		var atts []StoredAttachment
+		if err := json.Unmarshal([]byte(attachJSON), &atts); err != nil {
+			continue
+		}
+		for _, a := range atts {
+			if a.FileID != "" {
+				fileIDs = append(fileIDs, a.FileID)
+			}
+		}
+	}
+	return fileIDs
+}
 
 // StoreEpochKey saves an unwrapped epoch key locally.
 func (s *Store) StoreEpochKey(room string, epoch int64, key []byte) error {
@@ -643,7 +694,12 @@ func (s *Store) IsDMHidden(dmID string) bool {
 // on its next reconnect. Read positions and seq marks are not touched —
 // 1:1 DMs do not currently use read_positions, and seq_marks are scoped
 // to the server-side dm_id which is still valid until both parties leave.
-func (s *Store) PurgeDMMessages(dmID string) error {
+func (s *Store) PurgeDMMessages(dmID string) ([]string, error) {
+	// Collect file IDs from attachments BEFORE the messages are
+	// deleted — caller uses these to clean up the on-disk
+	// attachment cache so deleted-conversation files don't leak.
+	fileIDs := s.collectMessageFileIDsByColumn("dm_id", dmID)
+
 	// Delete reactions first via a subquery on messages, before the
 	// messages themselves are gone. The reactions table is keyed by
 	// message_id so we have to look up which messages belonged to the
@@ -652,12 +708,12 @@ func (s *Store) PurgeDMMessages(dmID string) error {
 		`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE dm_id = ?)`,
 		dmID,
 	); err != nil {
-		return err
+		return fileIDs, err
 	}
 	if _, err := s.db.Exec(`DELETE FROM messages WHERE dm_id = ?`, dmID); err != nil {
-		return err
+		return fileIDs, err
 	}
-	return nil
+	return fileIDs, nil
 }
 
 // PurgeGroupMessages deletes every locally-stored message row for a
@@ -669,17 +725,21 @@ func (s *Store) PurgeDMMessages(dmID string) error {
 // device sync on a different device can recognise the leave state on
 // next reconnect, and so the sidebar's archived rendering can stay if
 // the user later wants to /delete again.
-func (s *Store) PurgeGroupMessages(groupID string) error {
+func (s *Store) PurgeGroupMessages(groupID string) ([]string, error) {
+	// Collect attachment file IDs before the rows go away — see
+	// PurgeDMMessages for the rationale.
+	fileIDs := s.collectMessageFileIDsByColumn("group_id", groupID)
+
 	if _, err := s.db.Exec(
 		`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE group_id = ?)`,
 		groupID,
 	); err != nil {
-		return err
+		return fileIDs, err
 	}
 	if _, err := s.db.Exec(`DELETE FROM messages WHERE group_id = ?`, groupID); err != nil {
-		return err
+		return fileIDs, err
 	}
-	return nil
+	return fileIDs, nil
 }
 
 // PurgeRoomMessages drops all locally-stored messages, reactions, and
@@ -694,25 +754,29 @@ func (s *Store) PurgeGroupMessages(groupID string) error {
 // the TUI app layer can detect the row in its sidebar cleanup. The
 // app-level sidebar entry removal happens separately via
 // sidebar.RemoveRoom.
-func (s *Store) PurgeRoomMessages(roomID string) error {
+func (s *Store) PurgeRoomMessages(roomID string) ([]string, error) {
+	// Collect attachment file IDs before the rows go away — see
+	// PurgeDMMessages for the rationale.
+	fileIDs := s.collectMessageFileIDsByColumn("room", roomID)
+
 	// Drop reactions attached to messages in this room
 	if _, err := s.db.Exec(
 		`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE room = ?)`,
 		roomID,
 	); err != nil {
-		return err
+		return fileIDs, err
 	}
 	// Drop the messages themselves
 	if _, err := s.db.Exec(`DELETE FROM messages WHERE room = ?`, roomID); err != nil {
-		return err
+		return fileIDs, err
 	}
 	// Drop epoch keys — they're unrecoverable without the server's
 	// wrapped keys anyway, and the room is being removed from the
 	// user's view entirely
 	if _, err := s.db.Exec(`DELETE FROM epoch_keys WHERE room = ?`, roomID); err != nil {
-		return err
+		return fileIDs, err
 	}
-	return nil
+	return fileIDs, nil
 }
 
 // SetState stores a client state value.
