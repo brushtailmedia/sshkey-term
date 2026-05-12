@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -2223,14 +2225,55 @@ func (m *MessagesModel) SyncViewportLayoutForPanel(panelWidth, panelHeight int) 
 }
 
 func formatSize(b int64) string {
+	const (
+		kb = 1024
+		mb = kb * 1024
+		gb = mb * 1024
+		tb = gb * 1024
+	)
 	switch {
-	case b < 1024:
+	case b < kb:
 		return fmt.Sprintf("%d B", b)
-	case b < 1024*1024:
-		return fmt.Sprintf("%.1f KB", float64(b)/1024)
+	case b < mb:
+		return fmt.Sprintf("%.1f KB", float64(b)/kb)
+	case b < gb:
+		return fmt.Sprintf("%.1f MB", float64(b)/mb)
+	case b < tb:
+		return fmt.Sprintf("%.1f GB", float64(b)/gb)
 	default:
-		return fmt.Sprintf("%.1f MB", float64(b)/(1024*1024))
+		return fmt.Sprintf("%.1f TB", float64(b)/tb)
 	}
+}
+
+// byteCountInParens matches a "(<digits> bytes)" substring, used by
+// humanizeByteCountsInError to rewrite server-side error messages
+// like "File exceeds maximum size (52428800 bytes)" into friendlier
+// units. Compiled once at package init.
+var byteCountInParens = regexp.MustCompile(`\((\d+) bytes\)`)
+
+// humanizeByteCountsInError rewrites any "(N bytes)" substring in
+// msg to "(humanized size)" — e.g., "File exceeds maximum size
+// (52428800 bytes)" becomes "File exceeds maximum size (50.0 MB)".
+// Used at status-bar display time to make server-side rejection
+// messages readable. Returns the input unchanged when no
+// "(N bytes)" pattern is present.
+//
+// Conservative on parse errors: a match that doesn't ParseInt
+// cleanly (shouldn't happen given the regex is digit-only, but
+// belt-and-suspenders against future regex changes) returns the
+// original match untouched rather than dropping content.
+func humanizeByteCountsInError(msg string) string {
+	return byteCountInParens.ReplaceAllStringFunc(msg, func(match string) string {
+		sub := byteCountInParens.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		n, err := strconv.ParseInt(sub[1], 10, 64)
+		if err != nil {
+			return match
+		}
+		return "(" + formatSize(n) + ")"
+	})
 }
 
 // bodyWithGutter prefixes a single-cell left gutter to each logical

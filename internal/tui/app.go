@@ -2789,7 +2789,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// "upload: file_too_large: File exceeds maximum size
 		// (52428800 bytes)" for oversized uploads).
 		if msg.Err != nil {
-			a.statusBar.SetError("Upload failed: " + msg.Err.Error())
+			a.statusBar.SetError("Upload failed: " + humanizeByteCountsInError(msg.Err.Error()))
 		} else {
 			a.statusBar.SetError("Uploaded: " + msg.Name)
 		}
@@ -2808,11 +2808,11 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Action {
 		case "open":
 			if msg.Err != nil {
-				a.statusBar.SetError("Open failed: " + msg.Err.Error())
+				a.statusBar.SetError("Open failed: " + humanizeByteCountsInError(msg.Err.Error()))
 			}
 		case "preview":
 			if msg.Err != nil {
-				a.statusBar.SetError("Preview failed: " + msg.Err.Error())
+				a.statusBar.SetError("Preview failed: " + humanizeByteCountsInError(msg.Err.Error()))
 			} else {
 				a.statusBar.SetError("Preview ready: " + msg.Name)
 			}
@@ -2828,7 +2828,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// users need an in-app confirmation to know the copy
 		// landed.
 		if msg.Err != nil {
-			a.statusBar.SetError("Save failed: " + msg.Err.Error())
+			a.statusBar.SetError("Save failed: " + humanizeByteCountsInError(msg.Err.Error()))
 		} else {
 			a.statusBar.SetError("Saved: " + msg.Dest)
 		}
