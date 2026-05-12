@@ -474,6 +474,16 @@ func (a App) connect() tea.Cmd {
 		// auto-preview completions in quick succession. 100 matches
 		// msgCh's buffer.
 		attachReadyCh := make(chan AttachmentReadyEvent, 100)
+		// Buffered for upload-result events. A handful at most in flight
+		// (rare concurrent uploads); 16 is comfortably ample.
+		uploadResultCh := make(chan UploadResultEvent, 16)
+		// Buffered for o / p download-action result events. Same low
+		// in-flight ceiling as uploads.
+		downloadResultCh := make(chan DownloadResultEvent, 16)
+		// Buffered for save-as copy result events. Single-digit
+		// in-flight ceiling expected — user clicks "Save" then
+		// generally waits; 16 is more than ample headroom.
+		saveResultCh := make(chan SaveResultEvent, 16)
 
 		cfg := a.cfg
 		cfg.OnMessage = func(msgType string, raw json.RawMessage) {
@@ -542,16 +552,28 @@ func (a App) connect() tea.Cmd {
 		// after the audit caught the race (reproduction in
 		// discarder_race_test.go); see CHANGELOG for the full
 		// user-visible impact.
-		return connectedWithClient{client: c, msgCh: msgCh, errCh: errCh, keyWarnCh: keyWarnCh, attachReadyCh: attachReadyCh}
+		return connectedWithClient{
+			client:           c,
+			msgCh:            msgCh,
+			errCh:            errCh,
+			keyWarnCh:        keyWarnCh,
+			attachReadyCh:    attachReadyCh,
+			uploadResultCh:   uploadResultCh,
+			downloadResultCh: downloadResultCh,
+			saveResultCh:     saveResultCh,
+		}
 	}
 }
 
 type connectedWithClient struct {
-	client        *client.Client
-	msgCh         chan ServerMsg
-	errCh         chan error
-	keyWarnCh     chan KeyChangeEvent
-	attachReadyCh chan AttachmentReadyEvent
+	client           *client.Client
+	msgCh            chan ServerMsg
+	errCh            chan error
+	keyWarnCh        chan KeyChangeEvent
+	attachReadyCh    chan AttachmentReadyEvent
+	uploadResultCh   chan UploadResultEvent
+	downloadResultCh chan DownloadResultEvent
+	saveResultCh     chan SaveResultEvent
 }
 
 // saveAttachmentOpenMsg flips the save-as modal open after a
@@ -581,6 +603,65 @@ type saveAttachmentDownloadFailedMsg struct {
 // View pick up the new file.
 type AttachmentReadyEvent struct {
 	FileID string
+}
+
+// UploadResultEvent is the tea.Msg form of an /upload completion
+// (or failure). Pushed by the upload goroutine via uploadResultCh
+// and consumed in updateInner to surface user-visible status-bar
+// feedback.
+//
+// Why a channel instead of mutating statusBar directly from the
+// goroutine: handleSlashCommand has pointer-receiver semantics, so
+// the goroutine captures `a *App` — a pointer to updateInner's
+// local App copy. Once Update returns, that local copy is no longer
+// the canonical model (bubbletea takes the returned value), and
+// goroutine writes through the stale pointer don't reach the
+// rendered state. Pre-fix symptom: oversized-file uploads (and any
+// other server-side rejection that returns upload_error) failed
+// silently with no status-bar feedback — the goroutine's
+// "Upload failed: ..." SetError call landed on an orphaned App
+// copy. Routing through tea.Msg + updateInner mutates the canonical
+// model in the normal way.
+type UploadResultEvent struct {
+	Name string
+	Err  error
+}
+
+// DownloadResultEvent is the tea.Msg form of an attachment-download
+// action completion (or failure). Covers both `o = open` and `p =
+// preview` paths — Action discriminates between them so updateInner
+// can format the status bar appropriately. Same goroutine-vs-
+// stale-pointer rationale as UploadResultEvent above; pre-fix path
+// mutated statusBar directly from the MessageAction goroutine and
+// the writes landed on the orphaned local App copy.
+//
+// Action values:
+//   - "open":    `o` press → status only on failure (success opens
+//     the file externally; the OS app surfaces success visibly).
+//   - "preview": `p` press → status on both outcomes ("Preview
+//     ready: name" on success, "Preview failed: err" on failure).
+type DownloadResultEvent struct {
+	Action string
+	Name   string
+	Err    error
+}
+
+// SaveResultEvent is the tea.Msg form of the save-as copy step
+// (SaveFileAs) completing. Pushed by the SaveAttachmentDoMsg
+// goroutine after the file copy from local cache to user-chosen
+// destination finishes (or fails). Same goroutine-vs-stale-pointer
+// rationale as the events above — pre-fix path mutated statusBar
+// directly from the goroutine and the writes landed on the
+// orphaned local App copy.
+//
+// Separate from DownloadResultEvent because the work is a local
+// file copy (not a download), the success-string semantics differ
+// ("Saved: <path>" rather than "Preview ready: <name>"), and the
+// timing windows differ enough that mixing them under one Action
+// discriminator would muddy the doc.
+type SaveResultEvent struct {
+	Dest string
+	Err  error
 }
 
 // previewRenderReadyMsg is delivered by renderPreviewCmd when an
@@ -614,12 +695,14 @@ func renderPreviewCmd(key previewRenderKey) tea.Cmd {
 }
 
 // waitForMsg returns a cmd that waits for the next server message.
-// Selects across four channels: server-message events, errors,
-// client-layer key-change warnings (Phase 21 F3.a), and attachment
-// auto-preview completions. All four surface via separate channels
-// rather than riding on the ServerMsg envelope because they are
-// TUI-synthetic events, not protocol frames.
-func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChangeEvent, attachReadyCh chan AttachmentReadyEvent, done <-chan struct{}) tea.Cmd {
+// Selects across seven channels: server-message events, errors,
+// client-layer key-change warnings (Phase 21 F3.a), attachment
+// auto-preview completions, upload-result feedback, download-action
+// result feedback (o / p), and save-as copy result feedback. All
+// seven surface via separate channels rather than riding on the
+// ServerMsg envelope because they are TUI-synthetic events, not
+// protocol frames.
+func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChangeEvent, attachReadyCh chan AttachmentReadyEvent, uploadResultCh chan UploadResultEvent, downloadResultCh chan DownloadResultEvent, saveResultCh chan SaveResultEvent, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case msg := <-msgCh:
@@ -630,6 +713,12 @@ func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChange
 			return kw
 		case ar := <-attachReadyCh:
 			return ar
+		case ur := <-uploadResultCh:
+			return ur
+		case dr := <-downloadResultCh:
+			return dr
+		case sr := <-saveResultCh:
+			return sr
 		case <-done:
 			return ErrMsg{Err: fmt.Errorf("disconnected")}
 		}
@@ -1857,15 +1946,26 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case SaveAttachmentDoMsg:
 		// User confirmed a destination (possibly via overwrite or
 		// rename). Perform the copy in a goroutine so the TUI stays
-		// responsive, and report the outcome via the status bar.
+		// responsive, and report the outcome via the status bar
+		// through SaveResultEvent.
+		//
+		// Capture by value: SaveFileAs is a pure os-level copy that
+		// doesn't need to touch `a`, and the saveResultCh reference
+		// is captured directly. Pre-fix path mutated statusBar
+		// directly from the goroutine on the about-to-go-stale `a`
+		// pointer, so save success/failure feedback was silently
+		// dropped.
 		src := msg.SourcePath
 		dst := msg.DestPath
+		resultCh := a.sidebar.saveResultCh
 		go func() {
-			if err := client.SaveFileAs(src, dst); err != nil {
-				a.statusBar.SetError("Save failed: " + err.Error())
-				return
+			err := client.SaveFileAs(src, dst)
+			if resultCh != nil {
+				select {
+				case resultCh <- SaveResultEvent{Dest: dst, Err: err}:
+				default:
+				}
 			}
-			a.statusBar.SetError("Saved: " + dst)
 		}()
 		return a, nil
 
@@ -2337,22 +2437,40 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			CopyToClipboard(msg.Msg.Body)
 			a.statusBar.SetError("Copied to clipboard")
 		case "open_attachment":
+			// Goroutine-driven download then external open. Capture
+			// reference-typed locals by value so the goroutine never
+			// dereferences the about-to-go-stale `a` pointer (see
+			// UploadResultEvent doc comment for why direct goroutine
+			// writes to a.statusBar from this case were silently
+			// dropped pre-fix). Synchronous "Downloading..." status
+			// works because updateInner is value-receiver and the
+			// returned `a` becomes the new canonical model.
 			if a.client != nil && len(msg.Msg.Attachments) > 0 {
 				att := msg.Msg.Attachments[0]
+				a.statusBar.SetError("Downloading " + att.Name + "...")
+				c := a.client
+				fileID := att.FileID
+				decryptKey := att.DecryptKey
+				attName := att.Name
+				resultCh := a.sidebar.downloadResultCh
 				go func() {
-					a.statusBar.SetError("Downloading " + att.Name + "...")
-					path, err := a.client.DownloadFile(att.FileID, att.DecryptKey)
-					if err != nil {
-						a.statusBar.SetError("Download failed: " + err.Error())
-						return
+					path, err := c.DownloadFile(fileID, decryptKey)
+					if err == nil {
+						// Pass attName as the extension hint — the
+						// cached file lives at .../files/<fileID>
+						// with no extension, which makes macOS `open`
+						// and xdg-open fall back to text editors.
+						// OpenFile uses the hint's extension to
+						// create a sibling symlink (or copy) the OS
+						// can identify by file type.
+						client.OpenFile(path, attName)
 					}
-					// Pass att.Name as the extension hint — the cached
-					// file lives at .../files/<fileID> with no extension,
-					// which makes macOS `open` and xdg-open fall back to
-					// text editors. OpenFile uses the hint's extension to
-					// create a sibling symlink (or copy) the OS can
-					// identify by file type.
-					client.OpenFile(path, att.Name)
+					if resultCh != nil {
+						select {
+						case resultCh <- DownloadResultEvent{Action: "open", Name: attName, Err: err}:
+						default:
+						}
+					}
 				}()
 			}
 		case "preview_attachment":
@@ -2363,8 +2481,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// existing OnAttachmentReady → AttachmentReadyEvent →
 			// invalidateImageRenderCacheForPath → wrapper-level
 			// RequestPreviewRender re-dispatch chain handles the
-			// preview-pane update — no direct UI state mutation
-			// needed here.
+			// preview-pane update; this case just kicks off the
+			// download and surfaces success/failure feedback via the
+			// status bar.
 			//
 			// Picks the FIRST image attachment on the message
 			// (mirrors SelectedImagePath's behavior). The keypress
@@ -2376,16 +2495,19 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 						continue
 					}
 					a.statusBar.SetError("Loading preview of " + att.Name + "...")
+					c := a.client
 					fileID := att.FileID
 					decryptKey := att.DecryptKey
 					attName := att.Name
-					c := a.client
+					resultCh := a.sidebar.downloadResultCh
 					go func() {
-						if _, err := c.DownloadFile(fileID, decryptKey); err != nil {
-							a.statusBar.SetError("Preview failed: " + err.Error())
-							return
+						_, err := c.DownloadFile(fileID, decryptKey)
+						if resultCh != nil {
+							select {
+							case resultCh <- DownloadResultEvent{Action: "preview", Name: attName, Err: err}:
+							default:
+							}
 						}
-						a.statusBar.SetError("Preview ready: " + attName)
 					}()
 					break
 				}
@@ -2585,12 +2707,15 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.updateTitle()
 
 		// Start listening for server messages
-		cmds = append(cmds, waitForMsg(msg.msgCh, msg.errCh, msg.keyWarnCh, msg.attachReadyCh, a.client.Done()))
+		cmds = append(cmds, waitForMsg(msg.msgCh, msg.errCh, msg.keyWarnCh, msg.attachReadyCh, msg.uploadResultCh, msg.downloadResultCh, msg.saveResultCh, a.client.Done()))
 		// Store channels for future waits
 		a.sidebar.msgCh = msg.msgCh
 		a.sidebar.errCh = msg.errCh
 		a.sidebar.keyWarnCh = msg.keyWarnCh
 		a.sidebar.attachReadyCh = msg.attachReadyCh
+		a.sidebar.uploadResultCh = msg.uploadResultCh
+		a.sidebar.downloadResultCh = msg.downloadResultCh
+		a.sidebar.saveResultCh = msg.saveResultCh
 
 		// Wire the per-server file cache directory into the messages
 		// model so the inline-image render path can resolve downloaded
@@ -2615,7 +2740,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue listening
 		if a.client != nil {
 			if a.sidebar.msgCh != nil {
-				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.client.Done()))
+				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
 			}
 		}
 
@@ -2641,7 +2766,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
 		}
 
 	case previewRenderReadyMsg:
@@ -2652,6 +2777,63 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.key == a.sidebar.previewRenderKey {
 			a.sidebar.previewRenderValue = msg.value
 			a.sidebar.previewRendering = false
+		}
+
+	case UploadResultEvent:
+		// `/upload` goroutine finished. Surface user-visible feedback
+		// via the canonical statusBar (mutating it here works because
+		// updateInner is value-receiver and the returned `a` becomes
+		// the new model). On failure, the wrapped error from
+		// SendRoomMessageFile / SendGroupMessageFile / SendDMMessageFile
+		// carries the server-side rejection code+message (e.g.
+		// "upload: file_too_large: File exceeds maximum size
+		// (52428800 bytes)" for oversized uploads).
+		if msg.Err != nil {
+			a.statusBar.SetError("Upload failed: " + msg.Err.Error())
+		} else {
+			a.statusBar.SetError("Uploaded: " + msg.Name)
+		}
+		// Continue listening for the next event.
+		if a.client != nil && a.sidebar.msgCh != nil {
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
+		}
+
+	case DownloadResultEvent:
+		// `o` or `p` goroutine finished. Status messages differ by
+		// action because the success-visibility differs: `o` opens
+		// the file in the OS app on success so the user sees the
+		// result there (no status needed for success), while `p`
+		// fires the rasterm-render chain async after download
+		// completion — a status line confirms the work landed.
+		switch msg.Action {
+		case "open":
+			if msg.Err != nil {
+				a.statusBar.SetError("Open failed: " + msg.Err.Error())
+			}
+		case "preview":
+			if msg.Err != nil {
+				a.statusBar.SetError("Preview failed: " + msg.Err.Error())
+			} else {
+				a.statusBar.SetError("Preview ready: " + msg.Name)
+			}
+		}
+		if a.client != nil && a.sidebar.msgCh != nil {
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
+		}
+
+	case SaveResultEvent:
+		// SaveAttachmentDoMsg's copy goroutine finished. Both
+		// outcomes get explicit feedback because the visible
+		// artifact (the destination file) lives outside the TUI —
+		// users need an in-app confirmation to know the copy
+		// landed.
+		if msg.Err != nil {
+			a.statusBar.SetError("Save failed: " + msg.Err.Error())
+		} else {
+			a.statusBar.SetError("Saved: " + msg.Dest)
+		}
+		if a.client != nil && a.sidebar.msgCh != nil {
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
 		}
 
 	case KeyChangeEvent:
@@ -2674,7 +2856,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Continue listening for the next event.
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.client.Done()))
 		}
 
 	case passphraseNeededMsg:
@@ -3906,30 +4088,55 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			a.statusBar.SetError(msg)
 			return
 		}
-		// Upload + send as a message with attachment. Routes to room,
-		// group DM, or 1:1 DM sender based on the current context.
+		if a.client == nil {
+			a.statusBar.SetError("Not connected")
+			return
+		}
+		if sc.Room == "" && sc.Group == "" && sc.DM == "" {
+			a.statusBar.SetError("No active room or group")
+			return
+		}
+		body := filepath.Base(path)
+		// Synchronous status update — this mutation propagates because
+		// handleSlashCommand is pointer-receiver, so the change persists
+		// via Update's returned model.
+		a.statusBar.SetError("Uploading " + body + "...")
+		// Capture by value: client and the result channel are reference
+		// types, so the goroutine doesn't need to dereference the
+		// (about-to-go-stale) `a *App` pointer after Update returns.
+		// Goroutine pushes a UploadResultEvent through the channel;
+		// waitForMsg picks it up and delivers it as a tea.Msg, which
+		// updateInner's `case UploadResultEvent` handler turns into a
+		// canonical-state SetError call. Pre-fix path mutated statusBar
+		// directly from the goroutine — those writes landed on the
+		// orphaned local-to-updateInner App copy and never reached
+		// the rendered model, so server-side rejections (oversized,
+		// missing_hash, etc.) failed completely silently.
+		c := a.client
+		room := sc.Room
+		group := sc.Group
+		dm := sc.DM
+		resultCh := a.sidebar.uploadResultCh
 		go func() {
-			if a.client == nil {
-				return
-			}
-			a.statusBar.SetError("Uploading " + filepath.Base(path) + "...")
-			body := filepath.Base(path)
 			var err error
-			if sc.Room != "" {
-				err = a.client.SendRoomMessageFile(sc.Room, body, path, "", nil)
-			} else if sc.Group != "" {
-				err = a.client.SendGroupMessageFile(sc.Group, body, path, "", nil)
-			} else if sc.DM != "" {
-				err = a.client.SendDMMessageFile(sc.DM, body, path, "", nil)
-			} else {
-				a.statusBar.SetError("No active room or group")
-				return
+			switch {
+			case room != "":
+				err = c.SendRoomMessageFile(room, body, path, "", nil)
+			case group != "":
+				err = c.SendGroupMessageFile(group, body, path, "", nil)
+			case dm != "":
+				err = c.SendDMMessageFile(dm, body, path, "", nil)
 			}
-			if err != nil {
-				a.statusBar.SetError("Upload failed: " + err.Error())
-				return
+			// Non-blocking send — buffer of 16 plus the rarity of
+			// concurrent uploads makes drops effectively impossible,
+			// but `default` keeps us from stalling the goroutine on
+			// a wedged channel.
+			if resultCh != nil {
+				select {
+				case resultCh <- UploadResultEvent{Name: body, Err: err}:
+				default:
+				}
 			}
-			a.statusBar.SetError("Uploaded: " + filepath.Base(path))
 		}()
 	case "/rename":
 		// Phase 14: client-side admin pre-check. Non-admins get a
