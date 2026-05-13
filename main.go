@@ -118,16 +118,6 @@ func run() error {
 			Name: result.ServerName,
 			Host: result.ServerHost,
 			Port: result.ServerPort,
-			// Key intentionally retained on the ServerConfig struct
-			// during the Phase 2 transition — Phase 3 of the path
-			// centralization will (a) rewrite the wizard's key-copy
-			// destination to `<configDir>/<host>/keys/id_ed25519`
-			// and (b) delete the `Key` field from `ServerConfig`
-			// entirely. Until then the field stays declared and
-			// receives result.KeyPath as a historical record; the
-			// runtime derives cfg.KeyPath via ServerKeyPath below
-			// regardless.
-			Key: result.KeyPath,
 		}
 
 		// Save config (uses AddServer which validates again as
@@ -150,12 +140,10 @@ func run() error {
 	//     only). No copy was performed; runtime reads from wherever
 	//     the user pointed.
 	//   - All other flows: ServerKeyPath under the per-server
-	//     managed location. Phase 3 will retire the wizard branch's
-	//     reliance on `server.Key` once the wizard's copy
-	//     destination is rewritten and the field is dropped from
-	//     ServerConfig; until then the wizard branch still writes
-	//     to the legacy shared keys dir and Phase 2's transition
-	//     window depends on a Phase 3 follow-up commit.
+	//     managed location. The wizard and Add Server flows both
+	//     write the key to <configDir>/<host>/keys/id_ed25519 before
+	//     reaching this code, so deriving the path from server.Host
+	//     gives us the right file without any persisted reference.
 	var keyPath string
 	if ephemeral {
 		keyPath = config.ExpandUserPath(*keyFlag)

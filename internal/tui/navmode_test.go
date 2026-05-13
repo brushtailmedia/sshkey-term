@@ -28,8 +28,8 @@ func newNavModeAppHarness(t *testing.T) App {
 	a.appConfig = &config.Config{
 		Device: config.DeviceConfig{ID: "dev_nav_mode"},
 		Servers: []config.ServerConfig{
-			{Name: "Home", Host: "127.0.0.1", Port: 2222, Key: "~/.ssh/id_ed25519"},
-			{Name: "Work", Host: "127.0.0.2", Port: 2223, Key: "~/.ssh/id_ed25519"},
+			{Name: "Home", Host: "127.0.0.1", Port: 2222},
+			{Name: "Work", Host: "127.0.0.2", Port: 2223},
 		},
 	}
 	a.serverIdx = 0
@@ -254,7 +254,6 @@ func TestNavMode_NumberKeysAllSwitch(t *testing.T) {
 			// have signal if we wanted to extend the assertion.
 			Host: "127.0.0." + string(rune('0'+i+1)),
 			Port: 2222 + i,
-			Key:  "~/.ssh/id_ed25519",
 		}
 	}
 

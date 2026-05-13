@@ -62,11 +62,23 @@ type DeviceConfig struct {
 	ID string `toml:"id"`
 }
 
+// ServerConfig is a single server entry in the user's config.toml.
+//
+// No `Key` field: under per-server folder layout, every server's
+// SSH key lives at <configDir>/<host>/keys/id_ed25519 (canonical,
+// implicit). Runtime derives the key path via ServerKeyPath(configDir,
+// server.Host); persisting an explicit reference would just create a
+// second source of truth that could drift from the layout.
+//
+// The Add Server / Wizard flows always copy the source key into the
+// per-server managed location before saving the server entry, so the
+// canonical file always exists by the time downstream consumers read
+// from it. CLI bypass `-host`/`-key` ephemeral mode is the one
+// exception — it overrides KeyPath at runtime without persisting.
 type ServerConfig struct {
 	Name string `toml:"name"`
 	Host string `toml:"host"`
 	Port int    `toml:"port"`
-	Key  string `toml:"key"`
 }
 
 // Load reads the config file. Returns a default config if the file doesn't exist.

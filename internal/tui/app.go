@@ -391,12 +391,12 @@ func (a *App) switchServerByIndex(idx int) tea.Cmd {
 	// Update config for new server.
 	a.cfg.Host = srv.Host
 	a.cfg.Port = srv.Port
-	// Phase 2 transition note: srv.Key still wired here while the
-	// `Key` field exists on ServerConfig. Phase 3 swaps this for
-	// `config.ServerKeyPath(a.configDir, srv.Host)` after the field
-	// is deleted and the wizard's copy destination is rewritten to
-	// land keys at the per-server managed location.
-	a.cfg.KeyPath = srv.Key
+	// Derive KeyPath from the per-server canonical location.
+	// ServerConfig no longer carries a Key field (Phase 3e
+	// deletion) — every server's key lives at
+	// <configDir>/<host>/keys/id_ed25519, populated by the wizard
+	// or Add Server flow before this code runs.
+	a.cfg.KeyPath = config.ServerKeyPath(a.configDir, srv.Host)
 	a.cfg.DataDir = config.ServerDataDirForHost(a.configDir, srv.Host)
 
 	// Clear UI state.
@@ -2252,10 +2252,6 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Name: msg.Name,
 				Host: msg.Host,
 				Port: msg.Port,
-				// Key field still wired during Phase 2 transition;
-				// Phase 3 deletes the field + the corresponding
-				// AddServerMsg.Key field + this assignment.
-				Key: msg.Key,
 			}
 			// AddServer validates srv.Host (Phase 2 addition); the
 			// error path surfaces a clear status-bar message

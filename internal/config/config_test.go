@@ -38,8 +38,8 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	original := &Config{
 		Device: DeviceConfig{ID: "dev_V1StGXR8_Z5jdHi6B-myT"},
 		Servers: []ServerConfig{
-			{Name: "Personal", Host: "chat.example.com", Port: 2222, Key: "~/.ssh/id_ed25519"},
-			{Name: "Work", Host: "work.example.com", Port: 2223, Key: "~/.ssh/work_key"},
+			{Name: "Personal", Host: "chat.example.com", Port: 2222},
+			{Name: "Work", Host: "work.example.com", Port: 2223},
 		},
 		Notifications: NotificationConfig{
 			Desktop:       "mentions",
@@ -138,7 +138,7 @@ func TestAddServer_FirstServer(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{}
 
-	srv := ServerConfig{Name: "Home", Host: "home.example.com", Port: 2222, Key: "~/.ssh/id_ed25519"}
+	srv := ServerConfig{Name: "Home", Host: "home.example.com", Port: 2222}
 	if err := AddServer(dir, cfg, srv); err != nil {
 		t.Fatalf("add: %v", err)
 	}

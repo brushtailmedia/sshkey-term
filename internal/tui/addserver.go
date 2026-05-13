@@ -81,12 +81,15 @@ type AddServerModel struct {
 	scanDirsFn func() []string
 }
 
-// AddServerMsg is sent when the user confirms adding a server.
+// AddServerMsg is sent when the user confirms adding a server. The
+// key path isn't carried on the message — keyCopyFn has already
+// copied the source key into <configDir>/<host>/keys/id_ed25519 by
+// submit time, and downstream consumers derive the canonical path
+// via config.ServerKeyPath when they need it.
 type AddServerMsg struct {
 	Name string
 	Host string
 	Port int
-	Key  string
 }
 
 // keyCopyFn is the function the submit handler uses to copy keys
@@ -523,12 +526,10 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		// Source-equals-destination is idempotent (no-op). See
 		// copyKeyForServer for the rationale. Indirection via
 		// keyCopyFn is so tests can swap in a passthrough.
-		copied, err := keyCopyFn(key, host)
-		if err != nil {
+		if _, err := keyCopyFn(key, host); err != nil {
 			a.formErr = err.Error()
 			return a, nil
 		}
-		key = copied
 
 		a.Hide()
 		return a, func() tea.Msg {
@@ -536,7 +537,6 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 				Name: name,
 				Host: host,
 				Port: port,
-				Key:  key,
 			}
 		}
 	}

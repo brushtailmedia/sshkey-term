@@ -20,6 +20,25 @@ func withPassthroughKeyCopy(t *testing.T) {
 	t.Cleanup(func() { keyCopyFn = prev })
 }
 
+// withRecordingKeyCopy swaps keyCopyFn for a spy that captures the
+// src argument (the user-typed key path entering the submit flow).
+// Returns a pointer the caller can inspect after submit to assert
+// that the right source path reached the copy step. Replaces the
+// previous addMsg.Key-based assertions, which read the
+// AddServerMsg.Key field that Phase 3e of the path-centralization
+// refactor deletes.
+func withRecordingKeyCopy(t *testing.T) *string {
+	t.Helper()
+	var captured string
+	prev := keyCopyFn
+	keyCopyFn = func(src, host string) (string, error) {
+		captured = src
+		return src, nil
+	}
+	t.Cleanup(func() { keyCopyFn = prev })
+	return &captured
+}
+
 func keyMsg(s string) tea.KeyMsg {
 	switch s {
 	case "tab":
@@ -275,7 +294,7 @@ func TestAddServer_SubmitRequiresHost(t *testing.T) {
 }
 
 func TestAddServer_SubmitValidReturnsMsg(t *testing.T) {
-	withPassthroughKeyCopy(t)
+	gotSrc := withRecordingKeyCopy(t)
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[0].SetValue("Test Server")
@@ -301,8 +320,13 @@ func TestAddServer_SubmitValidReturnsMsg(t *testing.T) {
 	if addMsg.Port != 2222 {
 		t.Errorf("Port = %d, want 2222", addMsg.Port)
 	}
-	if addMsg.Key != "~/.ssh/id_ed25519" {
-		t.Errorf("Key = %q", addMsg.Key)
+	// Phase 3e dropped AddServerMsg.Key; assert via the recording
+	// keyCopyFn spy that the user-typed source path reached the
+	// copy step. Caller-side behavior (config.AddServer writes
+	// without a persisted key reference) is covered by the
+	// per-server canonical-location invariant.
+	if *gotSrc != "~/.ssh/id_ed25519" {
+		t.Errorf("keyCopyFn source = %q, want ~/.ssh/id_ed25519", *gotSrc)
 	}
 	if a.IsVisible() {
 		t.Error("should hide after successful submit")
@@ -327,7 +351,7 @@ func TestAddServer_SubmitDefaultsName(t *testing.T) {
 }
 
 func TestAddServer_SubmitDefaultsKey(t *testing.T) {
-	withPassthroughKeyCopy(t)
+	gotSrc := withRecordingKeyCopy(t)
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
@@ -337,9 +361,11 @@ func TestAddServer_SubmitDefaultsKey(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("should submit")
 	}
-	addMsg := cmd().(AddServerMsg)
-	if addMsg.Key != "~/.ssh/id_ed25519" {
-		t.Errorf("Key should default to ~/.ssh/id_ed25519, got %q", addMsg.Key)
+	// Verify the empty-key-defaults-to-~/.ssh/id_ed25519 path
+	// fires by checking the source that reached keyCopyFn (replaces
+	// the pre-Phase-3e addMsg.Key assertion).
+	if *gotSrc != "~/.ssh/id_ed25519" {
+		t.Errorf("default key source = %q, want ~/.ssh/id_ed25519", *gotSrc)
 	}
 }
 

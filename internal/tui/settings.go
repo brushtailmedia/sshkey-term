@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -151,7 +152,17 @@ func (s *SettingsModel) buildItems(displayName string, currentServer int) {
 		s.items = append(s.items, settingsItem{label: "    [Clear local history]", value: "", action: "clear_history"})
 		s.items = append(s.items, settingsItem{label: "", value: "", action: ""})
 		s.items = append(s.items, settingsItem{label: "  Keys", value: "", action: ""})
-		s.items = append(s.items, settingsItem{label: "    SSH key", value: srv.Key, action: ""})
+		// SSH key path derived from the per-server canonical layout
+		// (Phase 3e: ServerConfig.Key was deleted; every server's key
+		// lives at <configDir>/<host>/keys/id_ed25519). Collapse
+		// $HOME → ~ for display, matching the AddServer dialog's
+		// pattern — full absolute paths under ~ are noisy in the UI
+		// and can wrap on narrow terminals.
+		keyDisp := config.ServerKeyPath(s.configDir, srv.Host)
+		if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(keyDisp, home) {
+			keyDisp = "~" + keyDisp[len(home):]
+		}
+		s.items = append(s.items, settingsItem{label: "    SSH key", value: keyDisp, action: ""})
 		s.items = append(s.items, settingsItem{label: "    [Copy public key]", value: "", action: "copy_pubkey"})
 		s.items = append(s.items, settingsItem{label: "    [Copy fingerprint]", value: "", action: "copy_fingerprint"})
 	}
