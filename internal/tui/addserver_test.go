@@ -42,7 +42,7 @@ func keyMsg(s string) tea.KeyMsg {
 }
 
 func TestAddServer_InitialState(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	if a.IsVisible() {
 		t.Error("fresh model should not be visible")
 	}
@@ -59,7 +59,7 @@ func TestAddServer_InitialState(t *testing.T) {
 }
 
 func TestAddServer_TabCyclesFields(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 
 	for want := 1; want < 4; want++ {
@@ -77,7 +77,7 @@ func TestAddServer_TabCyclesFields(t *testing.T) {
 }
 
 func TestAddServer_EscHides(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a, _ = a.Update(keyMsg("esc"))
 	if a.IsVisible() {
@@ -86,7 +86,7 @@ func TestAddServer_EscHides(t *testing.T) {
 }
 
 func TestAddServer_CtrlGEntersGenerateMode(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
@@ -99,7 +99,7 @@ func TestAddServer_CtrlGEntersGenerateMode(t *testing.T) {
 }
 
 func TestAddServer_CtrlGRequiresHost(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	// Host left empty — Ctrl+G should refuse to enter generate mode.
 	a, _ = a.Update(keyMsg("ctrl+g"))
@@ -118,7 +118,7 @@ func TestAddServer_CtrlGRequiresHost(t *testing.T) {
 }
 
 func TestAddServer_CtrlGRejectsWhitespaceOnlyHost(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	// Whitespace-only host — same treatment as empty.
 	a.inputs[1].SetValue("   ")
@@ -132,7 +132,7 @@ func TestAddServer_CtrlGRejectsWhitespaceOnlyHost(t *testing.T) {
 }
 
 func TestAddServer_GenerateEscReturnsToForm(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
@@ -149,7 +149,7 @@ func TestAddServer_GenerateEscReturnsToForm(t *testing.T) {
 }
 
 func TestAddServer_GenerateTabCyclesFields(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
@@ -167,7 +167,7 @@ func TestAddServer_GenerateTabCyclesFields(t *testing.T) {
 }
 
 func TestAddServer_GenerateEmptyPathRejected(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
@@ -186,7 +186,7 @@ func TestAddServer_GenerateEmptyPathRejected(t *testing.T) {
 }
 
 func TestAddServer_GeneratePassphraseMismatch(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
@@ -203,7 +203,7 @@ func TestAddServer_GeneratePassphraseMismatch(t *testing.T) {
 }
 
 func TestAddServer_GenerateExistingFileRejected(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
@@ -223,7 +223,7 @@ func TestAddServer_GenerateExistingFileRejected(t *testing.T) {
 }
 
 func TestAddServer_GenerateSuccessReturnsToForm(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
@@ -262,7 +262,7 @@ func TestAddServer_GenerateSuccessReturnsToForm(t *testing.T) {
 }
 
 func TestAddServer_SubmitRequiresHost(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	// Leave host empty
 	a, cmd := a.Update(keyMsg("enter"))
@@ -276,7 +276,7 @@ func TestAddServer_SubmitRequiresHost(t *testing.T) {
 
 func TestAddServer_SubmitValidReturnsMsg(t *testing.T) {
 	withPassthroughKeyCopy(t)
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[0].SetValue("Test Server")
 	a.inputs[1].SetValue("chat.example.com")
@@ -311,7 +311,7 @@ func TestAddServer_SubmitValidReturnsMsg(t *testing.T) {
 
 func TestAddServer_SubmitDefaultsName(t *testing.T) {
 	withPassthroughKeyCopy(t)
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 	a.inputs[3].SetValue("~/.ssh/id_ed25519")
@@ -328,7 +328,7 @@ func TestAddServer_SubmitDefaultsName(t *testing.T) {
 
 func TestAddServer_SubmitDefaultsKey(t *testing.T) {
 	withPassthroughKeyCopy(t)
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 	// Leave key blank
@@ -344,7 +344,7 @@ func TestAddServer_SubmitDefaultsKey(t *testing.T) {
 }
 
 func TestAddServer_KeyListStartY_NoNotice(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	// No notice, no keys scanned (depends on environment — use explicit 0)
 	a.scannedKeys = nil
@@ -358,7 +358,7 @@ func TestAddServer_KeyListStartY_NoNotice(t *testing.T) {
 }
 
 func TestAddServer_KeyListStartY_WithKeys(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.scannedKeys = []keyEntry{{Path: "/tmp/k1", Type: "ed25519"}}
 	a.genNotice = ""
@@ -371,7 +371,7 @@ func TestAddServer_KeyListStartY_WithKeys(t *testing.T) {
 }
 
 func TestAddServer_KeyListStartY_WithNoticeAndKeys(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.scannedKeys = []keyEntry{{Path: "/tmp/k1", Type: "ed25519"}}
 	a.genNotice = "✓ Key generated — back it up"
@@ -384,7 +384,7 @@ func TestAddServer_KeyListStartY_WithNoticeAndKeys(t *testing.T) {
 }
 
 func TestAddServer_HandleMouse_ClickOnField(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	if a.focused != 0 {
 		t.Fatalf("precondition: focused=%d", a.focused)
@@ -403,7 +403,7 @@ func TestAddServer_HandleMouse_ClickOnField(t *testing.T) {
 }
 
 func TestAddServer_HandleMouse_ClickOnKeyEntry(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.scannedKeys = []keyEntry{
 		{Path: "/home/me/.ssh/id_ed25519", Type: "ed25519"},
@@ -428,7 +428,7 @@ func TestAddServer_HandleMouse_ClickOnKeyEntry(t *testing.T) {
 }
 
 func TestAddServer_HandleMouse_IgnoresNonLeftClick(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	origFocus := a.focused
 
@@ -445,7 +445,7 @@ func TestAddServer_HandleMouse_IgnoresNonLeftClick(t *testing.T) {
 }
 
 func TestAddServer_HandleMouse_IgnoresInGenerateMode(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
@@ -468,7 +468,7 @@ func TestAddServer_HandleMouse_IgnoresInGenerateMode(t *testing.T) {
 // --- Pass A: state-leak fixes (#1, #2, #6, #7) ---
 
 func TestAddServer_HideClearsPassphraseFields(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 	a, _ = a.Update(keyMsg("ctrl+g"))
@@ -486,7 +486,7 @@ func TestAddServer_HideClearsPassphraseFields(t *testing.T) {
 }
 
 func TestAddServer_ShowClearsPassphraseFields(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	// Pre-populate genInputs to simulate residue from before Show()
 	a.genInputs[1].SetValue("leftover")
 	a.genInputs[2].SetValue("leftover")
@@ -502,7 +502,7 @@ func TestAddServer_ShowClearsPassphraseFields(t *testing.T) {
 }
 
 func TestAddServer_CtrlGClearsPassphraseFields(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 
@@ -526,7 +526,7 @@ func TestAddServer_CtrlGClearsPassphraseFields(t *testing.T) {
 }
 
 func TestAddServer_HideClearsWeakPassConfirmed(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.weakPassConfirmed = "previously-warned"
 
@@ -538,7 +538,7 @@ func TestAddServer_HideClearsWeakPassConfirmed(t *testing.T) {
 }
 
 func TestAddServer_ShowClearsWeakPassConfirmed(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.weakPassConfirmed = "stale"
 
 	a.Show()
@@ -555,11 +555,11 @@ func TestAddServer_ShowClearsWeakPassConfirmed(t *testing.T) {
 // nav-key tests.
 func setupAddServerWithScannedKeys(t *testing.T) AddServerModel {
 	t.Helper()
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.scannedKeys = []keyEntry{
 		{Path: "/home/me/.ssh/id_ed25519", Type: "ed25519"},
-		{Path: "/home/me/.sshkey-term/keys/id_ed25519_alt", Type: "ed25519"},
+		{Path: "/home/me/.ssh/id_ed25519_alt", Type: "ed25519"},
 	}
 	// Position focus on field 3 (the key-path input) — the natural
 	// jumping-off point for entering the list.
@@ -580,7 +580,7 @@ func TestAddServer_DownFromKeyPathEntersKeyList(t *testing.T) {
 }
 
 func TestAddServer_DownFromKeyPathNoListWrapsToFirstField(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.Show()
 	a.scannedKeys = nil // explicit: no keys to enter
 	a.focused = 3
@@ -653,7 +653,7 @@ func TestAddServer_EnterInKeyListSelectsKey(t *testing.T) {
 	if a.focused != 3 {
 		t.Errorf("Enter in list should return focus to field 3, got %d", a.focused)
 	}
-	want := "/home/me/.sshkey-term/keys/id_ed25519_alt"
+	want := "/home/me/.ssh/id_ed25519_alt"
 	if a.inputs[3].Value() != want {
 		t.Errorf("Enter on cursor=1 should fill inputs[3] with %q, got %q", want, a.inputs[3].Value())
 	}
@@ -743,7 +743,7 @@ func TestAddServer_CtrlGFromKeyListClampsFocus(t *testing.T) {
 }
 
 func TestAddServer_ShowResetsKeyCursor(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.keyCursor = 7 // stale leftover
 
 	a.Show()

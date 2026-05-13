@@ -69,6 +69,16 @@ type AddServerModel struct {
 	// MinPassphraseLength. Context includes hostname + display name
 	// (see addServerZxcvbnContext).
 	strengthHint keygen.LiveHint
+
+	// scanDirsFn returns the list of per-server keys folders to walk
+	// when populating the scanned-keys list. Called lazily from
+	// rescanEd25519Keys so the list reflects the LIVE app config
+	// (server added then removed then re-added all show up correctly).
+	// Production wires it to a closure capturing `appCfg.Servers +
+	// configDir` from main.go via tui.New; tests pass nil — when nil
+	// the scanner falls back to scanning ~/.ssh/ only, which is the
+	// natural test default.
+	scanDirsFn func() []string
 }
 
 // AddServerMsg is sent when the user confirms adding a server.
@@ -97,25 +107,31 @@ var keyCopyFn = copyKeyForServer
 //
 // The point of always copying — even when the source is already
 // in the managed folder — is per-server file separation: each
-// server config entry gets its own physical key file under
-// `id_ed25519_<host>`. This way:
-//   - Deleting a server can clean up its key file without affecting
-//     other servers cryptographically reusing the same identity
-//   - The keys folder lists keys by server, not by fingerprint, so
-//     it's grep-able by host
+// server gets its own keys folder at `<configDir>/<host>/keys/`,
+// with a fixed `id_ed25519` filename inside. This way:
+//   - Deleting a server (config.RemoveServer) is a single
+//     `os.RemoveAll(<configDir>/<host>/)` — keys go with the
+//     server's data, no orphan files in a shared keys namespace.
+//   - Each server's folder owns ONE key. The host (folder name)
+//     makes ownership visible at filesystem level — no
+//     fingerprint-derived names, no host-suffixed filenames.
 //   - Future per-server edits (e.g. re-encrypting with a new
 //     passphrase for one server but not another) don't disturb
-//     siblings
+//     siblings.
 //
-// Same physical bytes in two files = same cryptographic identity.
+// Same physical bytes in two folders = same cryptographic identity.
 // Whether you WANT one identity across servers vs separate keys
 // per server is a security choice the user makes by selecting
 // (reuse) vs generating (Ctrl+G).
 //
 // Source-equals-destination is idempotent (no-op, returns the
 // path). Destination-already-exists is an error rather than a
-// silent overwrite.
+// silent overwrite. Host validation runs first — defense in depth
+// against malformed values reaching the filesystem layer.
 func copyKeyForServer(srcKeyPath, host string) (string, error) {
+	if err := config.ValidateHost(host); err != nil {
+		return "", err
+	}
 	src := config.ExpandUserPath(srcKeyPath)
 
 	privData, err := os.ReadFile(src)
@@ -127,20 +143,13 @@ func copyKeyForServer(srcKeyPath, host string) (string, error) {
 		return "", fmt.Errorf("read public key (%s.pub): %w", src, err)
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	keysDir := filepath.Join(home, ".sshkey-term", "keys")
+	configDir := config.DefaultConfigDir()
+	keysDir := config.ServerKeysDir(configDir, host)
 	if err := os.MkdirAll(keysDir, 0700); err != nil {
 		return "", fmt.Errorf("create keys dir (%s): %w", keysDir, err)
 	}
 
-	name := "id_ed25519"
-	if h := sanitizeForFilename(host); h != "" {
-		name = "id_ed25519_" + h
-	}
-	dst := filepath.Join(keysDir, name)
+	dst := config.ServerKeyPath(configDir, host)
 
 	// Idempotent: if user typed the exact target path, no-op.
 	if filepath.Clean(src) == filepath.Clean(dst) {
@@ -166,35 +175,6 @@ func copyKeyForServer(srcKeyPath, host string) (string, error) {
 	return dst, nil
 }
 
-// sanitizeForFilename strips characters that would be ambiguous or
-// problematic in a key-file name, replacing each with `_`. Allowed:
-// ASCII letters, digits, `-`, `_`, `.`. Used to derive a per-server
-// default key filename from the user-typed hostname so add-server
-// generate doesn't collide with the first server's key on disk.
-//
-// Example: "chat.example.com" → "chat.example.com" (unchanged);
-// "ssh+v6@host" → "ssh_v6_host". Hostnames in practice are already
-// filename-safe, but the sanitization is defensive against pasted
-// values with whitespace, slashes, etc.
-func sanitizeForFilename(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '-' || r == '_' || r == '.':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-	}
-	return b.String()
-}
-
 // addServerZxcvbnContext collects form-field values to pass to zxcvbn
 // as context strings, so a passphrase containing the display name or
 // hostname the user just typed gets penalized. Mirrors the wizard's
@@ -214,7 +194,13 @@ func addServerZxcvbnContext(a AddServerModel) []string {
 	return ctx
 }
 
-func NewAddServer() AddServerModel {
+// NewAddServer constructs the Add Server dialog. The scanDirsFn
+// callback returns the list of per-server keys folders to include in
+// the dialog's "Existing Ed25519 keys" list at scan time (called from
+// rescanEd25519Keys). May be nil — the scanner falls back to ~/.ssh/
+// only, which is the natural default for tests and for the first-run
+// case where no servers exist yet.
+func NewAddServer(scanDirsFn func() []string) AddServerModel {
 	labels := []string{"Name", "Host", "Port", "SSH key path"}
 
 	inputs := make([]textinput.Model, 4)
@@ -236,17 +222,22 @@ func NewAddServer() AddServerModel {
 		genInputs[i] = textinput.New()
 		genInputs[i].Prompt = ""
 	}
-	home, _ := os.UserHomeDir()
-	genInputs[0].SetValue(filepath.Join(home, ".sshkey-term", "keys", "id_ed25519"))
+	// genInputs[0] (the key save-path) intentionally starts empty.
+	// The Ctrl+G handler populates it with `config.ServerKeyPath(
+	// configDir, host)` once the user has typed a hostname — there
+	// is no useful host-independent default under the per-server
+	// keys-folder layout, and the only path into the generate view
+	// is Ctrl+G (which always overwrites this value).
 	genInputs[1].Placeholder = "passphrase"
 	genInputs[1].EchoMode = textinput.EchoPassword
 	genInputs[2].Placeholder = "confirm passphrase"
 	genInputs[2].EchoMode = textinput.EchoPassword
 
 	return AddServerModel{
-		inputs:    inputs,
-		labels:    labels,
-		genInputs: genInputs,
+		inputs:     inputs,
+		labels:     labels,
+		genInputs:  genInputs,
+		scanDirsFn: scanDirsFn,
 	}
 }
 
@@ -315,11 +306,19 @@ func (a *AddServerModel) IsVisible() bool {
 // successful key generation (so a freshly-written key shows up in
 // the list if it landed in a scanned directory). The protocol only
 // accepts Ed25519, so unsupported types are filtered out here even
-// though scanSSHKeys returns them — keyselector.go shows them to
-// explain "why isn't my RSA key listed", but add-server only offers
-// usable picks.
+// though scanSSHKeys returns them — the scanner keeps non-Ed25519
+// entries so future UIs could explain "why isn't my RSA key listed",
+// but add-server only offers usable picks.
+//
+// extraDirs come from scanDirsFn (typically per-server keys folders
+// for every configured server). When scanDirsFn is nil (tests, fresh
+// installs with no servers) the scan covers ~/.ssh/ only.
 func (a *AddServerModel) rescanEd25519Keys() {
-	all := scanSSHKeys()
+	var extraDirs []string
+	if a.scanDirsFn != nil {
+		extraDirs = a.scanDirsFn()
+	}
+	all := scanSSHKeys(extraDirs)
 	a.scannedKeys = a.scannedKeys[:0]
 	for _, k := range all {
 		if k.Type == "ed25519" {
@@ -343,14 +342,13 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 
 	case "ctrl+g":
 		// Require a hostname before opening the generate sub-view.
-		// The new key file is named id_ed25519_<host> so every server
-		// gets its own physical file in ~/.sshkey-term/keys/. Without
-		// a host, the only sensible default is bare id_ed25519, which
-		// collides with whatever the wizard or a prior add-server run
-		// already wrote there — and the collision wouldn't surface
-		// until AFTER the user typed a passphrase and we'd already
-		// written the new keypair to disk, leaving an orphan file
-		// when the post-generate copy step refuses to overwrite.
+		// The new key file lives at <configDir>/<host>/keys/id_ed25519,
+		// so without a host we can't even derive the destination
+		// directory — and the host doubles as the per-server folder
+		// name, so any unsafe path segments (slashes, `..`, control
+		// bytes) would corrupt the filesystem layout. Validate before
+		// the user can type a passphrase, so we never write a key
+		// into a directory we'd then refuse to read back.
 		//
 		// Refuse early: don't switch modes, set formErr to explain,
 		// move focus to the host field so the next keystroke lands
@@ -362,9 +360,16 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		if a.focused >= len(a.inputs) {
 			a.focused = 3
 		}
-		host := sanitizeForFilename(strings.TrimSpace(a.inputs[1].Value()))
+		host := strings.TrimSpace(a.inputs[1].Value())
 		if host == "" {
-			a.formErr = "Type a hostname first — used to name the new key file."
+			a.formErr = "Type a hostname first — used as the per-server folder name."
+			a.inputs[a.focused].Blur()
+			a.focused = 1
+			a.inputs[1].Focus()
+			return a, nil
+		}
+		if err := config.ValidateHost(host); err != nil {
+			a.formErr = "Invalid hostname: " + err.Error()
 			a.inputs[a.focused].Blur()
 			a.focused = 1
 			a.inputs[1].Focus()
@@ -375,8 +380,7 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		for i := range a.inputs {
 			a.inputs[i].Blur()
 		}
-		home, _ := os.UserHomeDir()
-		a.genInputs[0].SetValue(filepath.Join(home, ".sshkey-term", "keys", "id_ed25519_"+host))
+		a.genInputs[0].SetValue(config.ServerKeyPath(config.DefaultConfigDir(), host))
 		// Always enter generate with empty passphrase fields and no
 		// stale strength hint — even if the user previously typed a
 		// passphrase in this dialog session and Esc'd back to the
@@ -490,7 +494,13 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		portStr := strings.TrimSpace(a.inputs[2].Value())
 		key := strings.TrimSpace(a.inputs[3].Value())
 
-		if host == "" {
+		// Submit-time host validation: rejects empty/whitespace,
+		// path separators, traversal segments, control bytes. The
+		// underlying copyKeyForServer revalidates as defense in
+		// depth (it's reachable via the keyCopyFn indirection that
+		// tests swap), so this gate is the user-facing one.
+		if err := config.ValidateHost(host); err != nil {
+			a.formErr = err.Error()
 			return a, nil
 		}
 		if name == "" {
@@ -649,8 +659,9 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 		a.genErr = ""
 
 		// Rescan keys so the newly-generated one can appear in the list
-		// (it was written to ~/.sshkey-term/keys/... by default, not ~/.ssh/,
-		// so it typically won't — but rescan covers custom paths under ~/.ssh)
+		// (it was written to <configDir>/<host>/keys/ by default, not ~/.ssh/,
+		// so it typically won't appear in the scan — but rescan covers
+		// custom paths under ~/.ssh)
 		a.rescanEd25519Keys()
 		return a, nil
 	}

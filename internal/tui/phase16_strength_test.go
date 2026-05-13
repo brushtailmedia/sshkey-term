@@ -17,7 +17,7 @@ import (
 // helper returns both the display name and hostname fields as zxcvbn
 // context strings so passphrases containing either get penalized.
 func TestAddServerZxcvbnContext_IncludesNameAndHost(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.inputs[0].SetValue("My Server")
 	a.inputs[1].SetValue("chat.example.com")
 	a.inputs[2].SetValue("2222")
@@ -39,7 +39,7 @@ func TestAddServerZxcvbnContext_IncludesNameAndHost(t *testing.T) {
 // omits blank / whitespace-only fields rather than passing empty
 // strings that zxcvbn would no-op against.
 func TestAddServerZxcvbnContext_SkipsEmptyFields(t *testing.T) {
-	a := NewAddServer()
+	a := NewAddServer(nil)
 	a.inputs[0].SetValue("")
 	a.inputs[1].SetValue("   ")
 

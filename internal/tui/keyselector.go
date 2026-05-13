@@ -33,7 +33,12 @@ func NewKeySelector() KeySelectorModel {
 func (k *KeySelectorModel) Show() {
 	k.visible = true
 	k.cursor = 0
-	k.keys = scanSSHKeys()
+	// KeySelectorModel is not currently wired into any TUI flow; the
+	// live key-listing UIs live inside AddServerModel and WizardModel
+	// directly. Calling scanSSHKeys(nil) here keeps the dead-code
+	// branch building under the new signature without claiming
+	// per-server scan support.
+	k.keys = scanSSHKeys(nil)
 }
 
 func (k *KeySelectorModel) Hide() {
@@ -104,47 +109,52 @@ func (k KeySelectorModel) View(width int) string {
 	return dialogStyle.Width(width - 4).Render(b.String())
 }
 
-// scanSSHKeys returns SSH keys discovered in two locations,
-// concatenated in this order:
+// scanSSHKeys returns SSH keys discovered across two source kinds:
 //
-//  1. ~/.sshkey-term/keys/  — app-managed (listed first; these are
-//     keys generated via the wizard or add-server flow, most likely
-//     candidates for reuse with another sshkey-chat server)
-//  2. ~/.ssh/               — system SSH directory (listed second)
+//  1. extraDirs — typically the per-server keys folders of each
+//     already-configured server (`<configDir>/<host>/keys/`). Listed
+//     first because these are the user's own previously-managed
+//     keys, the most likely candidates for re-use when adding
+//     another server. Caller computes the slice; the scanner just
+//     walks what it's given.
+//  2. ~/.ssh/   — the system SSH directory, listed second. Always
+//     scanned. External input source — not an app-managed path.
 //
 // Within each source ed25519 keys come before other types (the
 // protocol only accepts ed25519, but we surface unsupported types
 // too so users see why a key they expected isn't usable).
 //
-// Missing directories are silently skipped — most users won't have
-// `~/.sshkey-term/keys/` until they've gone through the wizard, and
-// some users won't have `~/.ssh/` at all. Per-file read errors are
-// also silently skipped (the file is omitted from results); a
-// permission error on one key shouldn't hide all the others.
+// Missing directories are silently skipped — a fresh user won't have
+// any per-server keys folders, and some users won't have `~/.ssh/`
+// at all. Per-file read errors are also silently skipped (the file
+// is omitted from results); a permission error on one key shouldn't
+// hide all the others.
 //
-// Paths are deduplicated by absolute string match: if the same path
-// appears in both directories (e.g. via symlink), the managed-folder
-// occurrence wins.
-func scanSSHKeys() []keyEntry {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-
+// Paths are deduplicated by absolute string match. Earlier entries
+// (extraDirs first, then ~/.ssh) win in collisions — i.e. an app-
+// managed copy of a system key reads as the managed entry.
+func scanSSHKeys(extraDirs []string) []keyEntry {
 	seen := make(map[string]bool)
 	var all []keyEntry
 
-	// Managed folder first — app-generated keys.
-	managedDir := filepath.Join(home, ".sshkey-term", "keys")
-	for _, k := range scanKeyDir(managedDir) {
-		if seen[k.Path] {
-			continue
+	// Caller-provided managed dirs first — typically the per-server
+	// keys folders of each already-configured server.
+	for _, dir := range extraDirs {
+		for _, k := range scanKeyDir(dir) {
+			if seen[k.Path] {
+				continue
+			}
+			seen[k.Path] = true
+			all = append(all, k)
 		}
-		seen[k.Path] = true
-		all = append(all, k)
 	}
 
-	// System ~/.ssh second.
+	// System ~/.ssh/ second. External input source (out of scope for
+	// path centralization), so home resolution stays inline here.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return all
+	}
 	sshDir := filepath.Join(home, ".ssh")
 	for _, k := range scanKeyDir(sshDir) {
 		if seen[k.Path] {

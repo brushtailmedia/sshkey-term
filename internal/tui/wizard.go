@@ -100,8 +100,15 @@ func NewWizard() WizardModel {
 
 	// Key generation inputs
 	genPath := textinput.New()
-	home, _ := os.UserHomeDir()
-	genPath.SetValue(filepath.Join(home, ".sshkey-term", "keys", "id_ed25519"))
+	// Default destination is the wizard's transient staging dir; the
+	// final per-server location at <configDir>/<host>/keys/id_ed25519
+	// isn't derivable yet (no host until WizardServer), so we stage
+	// here and the server step moves the key into place. User can
+	// still override this path if they want the bytes elsewhere too
+	// (finalizeStagedKey treats off-staging paths as "copy, don't
+	// move", so the user's chosen location is preserved alongside
+	// the canonical per-server copy).
+	genPath.SetValue(filepath.Join(wizardStagingDir(config.DefaultConfigDir()), "id_ed25519"))
 	genPath.Prompt = ""
 
 	genPass := textinput.New()
@@ -119,7 +126,10 @@ func NewWizard() WizardModel {
 	importIn.Placeholder = "~/path/to/private_key"
 	importIn.Prompt = ""
 
-	// Export input
+	// Export input. Default destination is ~/Documents/sshkey-backup —
+	// a save-destination concern (out of scope for path centralization
+	// per §"Scope — Out"), so home resolution stays inline here.
+	home, _ := os.UserHomeDir()
 	exportIn := textinput.New()
 	exportIn.SetValue(filepath.Join(home, "Documents", "sshkey-backup"))
 	exportIn.Prompt = ""
@@ -219,7 +229,11 @@ func (w WizardModel) updateChooseName(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		w.chosenName = name
 		w.err = ""
 		w.step = WizardKeySelect
-		w.keys = scanSSHKeys()
+		// Wizard runs only on first launch (empty cfg.Servers — see
+		// main.go ~line 99-101), so there are no per-server keys
+		// folders to walk. Pass nil for extraDirs; the scanner falls
+		// back to ~/.ssh/ only.
+		w.keys = scanSSHKeys(nil)
 	case "esc":
 		w.step = WizardWelcome
 		w.nameInput.Blur()
@@ -537,8 +551,13 @@ func (w WizardModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return w, nil
 	case "enter":
 		host := strings.TrimSpace(w.serverInputs[1].Value())
-		if host == "" {
-			w.err = "Host is required"
+		// Host validation gates everything downstream: the
+		// destination path <configDir>/<host>/keys/id_ed25519
+		// is derived from this string, so any unsafe segment
+		// (`/`, `..`, control bytes) would corrupt the per-server
+		// folder layout. Catches the empty case too.
+		if err := config.ValidateHost(host); err != nil {
+			w.err = err.Error()
 			return w, nil
 		}
 		name := strings.TrimSpace(w.serverInputs[0].Value())
@@ -549,6 +568,17 @@ func (w WizardModel) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if p := strings.TrimSpace(w.serverInputs[2].Value()); p != "" {
 			fmt.Sscanf(p, "%d", &port)
 		}
+		// Always-copy finalize: move (or copy, depending on source
+		// location) the wizard-staged key into the per-server
+		// canonical location. This is the last step that can fail
+		// — keep the user on this screen so they can retry without
+		// losing the form values.
+		finalPath, err := w.finalizeStagedKey(config.DefaultConfigDir(), host, w.result.KeyPath)
+		if err != nil {
+			w.err = "Finalize key failed: " + err.Error()
+			return w, nil
+		}
+		w.result.KeyPath = finalPath
 		w.result.ServerName = name
 		w.result.ServerHost = host
 		w.result.ServerPort = port
@@ -742,9 +772,17 @@ func (w *WizardModel) resetKeyGenState() {
 }
 
 // copyKeyToManagedStoreAndRewriteName copies an existing private/public key
-// pair into ~/.sshkey-term/keys and rewrites the .pub comment to the chosen
-// display name. This path is strict: any copy or rewrite failure aborts
-// progression so setup cannot silently continue with mismatched identity data.
+// pair into the wizard staging directory at <configDir>/.staging/id_ed25519
+// and rewrites the .pub comment to the chosen display name. This path is
+// strict: any copy or rewrite failure aborts progression so setup cannot
+// silently continue with mismatched identity data.
+//
+// The destination is staging — not the final per-server location — because
+// the wizard reaches this step before the user has typed a server host
+// (Welcome → ChooseName → KeySelect → here ... Backup → Export → Share →
+// Server). Once the server step settles, finalizeStagedKey moves the
+// staged pair into <configDir>/<host>/keys/id_ed25519. See that helper
+// for the move-vs-copy logic.
 func (w WizardModel) copyKeyToManagedStoreAndRewriteName(srcKeyPath string) (string, string, error) {
 	src := config.ExpandUserPath(srcKeyPath)
 
@@ -766,17 +804,12 @@ func (w WizardModel) copyKeyToManagedStoreAndRewriteName(srcKeyPath string) (str
 		return "", "", fmt.Errorf("read private key failed (%s): %w", src, err)
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	keysDir := filepath.Join(home, ".sshkey-term", "keys")
-	if err := os.MkdirAll(keysDir, 0700); err != nil {
-		return "", "", fmt.Errorf("create key directory failed (%s): %w", keysDir, err)
+	stagingDir := wizardStagingDir(config.DefaultConfigDir())
+	if err := os.MkdirAll(stagingDir, 0700); err != nil {
+		return "", "", fmt.Errorf("create staging directory failed (%s): %w", stagingDir, err)
 	}
 
-	fingerprint := ssh.FingerprintSHA256(pubKey)
-	dstBase := filepath.Join(keysDir, managedKeyFilename(fingerprint))
+	dstBase := filepath.Join(stagingDir, "id_ed25519")
 
 	if err := os.WriteFile(dstBase, privData, 0600); err != nil {
 		return "", "", fmt.Errorf("write private key failed (%s): %w", dstBase, err)
@@ -788,33 +821,97 @@ func (w WizardModel) copyKeyToManagedStoreAndRewriteName(srcKeyPath string) (str
 	}
 	pubLine += "\n"
 	if err := os.WriteFile(dstBase+".pub", []byte(pubLine), 0644); err != nil {
+		// Roll back the private-key write so we don't leave a
+		// private-only orphan in the staging dir. Matches the
+		// addserver.go copyKeyForServer pattern.
+		_ = os.Remove(dstBase)
 		return "", "", fmt.Errorf("write public key failed (%s.pub): %w", dstBase, err)
 	}
 
+	fingerprint := ssh.FingerprintSHA256(pubKey)
 	return dstBase, fingerprint, nil
 }
 
-func managedKeyFilename(fingerprint string) string {
-	token := strings.TrimPrefix(fingerprint, "SHA256:")
-	var b strings.Builder
-	for _, r := range token {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '-' || r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
+// wizardStagingDir returns the transient staging directory used during
+// wizard setup. Keys land here (either via copyKeyToManagedStoreAndRewriteName
+// for the import/select flow, or via the default genPathInput value for
+// the generate flow) before the user has chosen a server host. Once the
+// server step completes, finalizeStagedKey moves them into
+// <configDir>/<host>/keys/.
+//
+// Leading dot keeps the dir hidden so `ls <configDir>` doesn't show
+// transient setup state alongside the user's real server folders.
+// Removed by finalizeStagedKey after a successful wizard run; if the
+// user cancels mid-wizard, the next run overwrites in place.
+func wizardStagingDir(configDir string) string {
+	return filepath.Join(configDir, ".staging")
+}
+
+// finalizeStagedKey moves or copies the wizard-staged key into its
+// final per-server location at <configDir>/<host>/keys/id_ed25519.
+// Called once from the wizard's server step, after host validation.
+//
+// Two source-aware behaviors:
+//
+//   - Source is inside wizardStagingDir(configDir): rename in-place
+//     (no second copy) and remove the staging dir afterward. Cleans
+//     up the transient state once the user commits to a server entry.
+//   - Source is anywhere else (user-customized generate path that
+//     wrote outside staging): copy bytes into the per-server folder,
+//     leave the source alone. The user's chosen location is theirs
+//     to keep; the canonical copy under <configDir>/<host>/ is the
+//     one the app reads from runtime onward.
+//
+// Either way, the per-server destination is populated — always-copy
+// semantics hold regardless of source location. Caller updates
+// result.KeyPath with the returned canonical path.
+func (w WizardModel) finalizeStagedKey(configDir, host, srcKeyPath string) (string, error) {
+	if err := config.ValidateHost(host); err != nil {
+		return "", err
+	}
+	keysDir := config.ServerKeysDir(configDir, host)
+	if err := os.MkdirAll(keysDir, 0700); err != nil {
+		return "", fmt.Errorf("create per-server keys dir (%s): %w", keysDir, err)
+	}
+	dst := config.ServerKeyPath(configDir, host)
+
+	stagingDir := wizardStagingDir(configDir)
+	cleanSrc := filepath.Clean(srcKeyPath)
+	insideStaging := strings.HasPrefix(cleanSrc, filepath.Clean(stagingDir)+string(filepath.Separator))
+
+	if insideStaging {
+		if err := os.Rename(srcKeyPath, dst); err != nil {
+			return "", fmt.Errorf("move staged private key (%s → %s): %w", srcKeyPath, dst, err)
 		}
+		if err := os.Rename(srcKeyPath+".pub", dst+".pub"); err != nil {
+			// Best-effort rollback of the private-key move so we
+			// don't leave a private-only orphan at the destination.
+			_ = os.Rename(dst, srcKeyPath)
+			return "", fmt.Errorf("move staged public key (%s.pub → %s.pub): %w", srcKeyPath, dst, err)
+		}
+		// Best-effort staging cleanup. Failure is fine — the dir is
+		// transient and will be overwritten on the next wizard run.
+		_ = os.RemoveAll(stagingDir)
+		return dst, nil
 	}
-	if b.Len() == 0 {
-		b.WriteString("key")
+
+	// Custom user-chosen generate path. Copy bytes, leave source alone.
+	privData, err := os.ReadFile(srcKeyPath)
+	if err != nil {
+		return "", fmt.Errorf("read source private key (%s): %w", srcKeyPath, err)
 	}
-	return "id_ed25519_" + b.String()
+	pubData, err := os.ReadFile(srcKeyPath + ".pub")
+	if err != nil {
+		return "", fmt.Errorf("read source public key (%s.pub): %w", srcKeyPath, err)
+	}
+	if err := os.WriteFile(dst, privData, 0600); err != nil {
+		return "", fmt.Errorf("write per-server private key (%s): %w", dst, err)
+	}
+	if err := os.WriteFile(dst+".pub", pubData, 0644); err != nil {
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("write per-server public key (%s.pub): %w", dst, err)
+	}
+	return dst, nil
 }
 
 // -- View --

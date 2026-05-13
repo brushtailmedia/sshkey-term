@@ -93,6 +93,14 @@ func TestWizard_ChooseNameValidation(t *testing.T) {
 }
 
 func TestWizard_GenerateAndShare(t *testing.T) {
+	// Override HOME so finalizeStagedKey (which fires at the WizardServer
+	// enter step) writes the canonical per-server copy into a temp dir
+	// rather than the developer's real ~/.sshkey-term/. Without this
+	// the wizard would pollute the dev's home dir under
+	// <home>/.sshkey-term/localhost/keys/.
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
 	w := NewWizard()
 
 	// Fast-forward to KeyGenerate
@@ -102,7 +110,8 @@ func TestWizard_GenerateAndShare(t *testing.T) {
 	}
 	sendSpecial(&w, tea.KeyEnter) // → generate
 
-	// Set key path to temp dir
+	// Set key path to temp dir (outside staging on purpose — exercises
+	// the copy-not-move branch of finalizeStagedKey).
 	tmpDir := t.TempDir()
 	keyPath := filepath.Join(tmpDir, "test_ed25519")
 	w.genPathInput.SetValue(keyPath)
@@ -176,8 +185,19 @@ func TestWizard_GenerateAndShare(t *testing.T) {
 	}
 
 	result := w.Result()
-	if result.KeyPath != keyPath {
-		t.Errorf("result key = %q, want %q", result.KeyPath, keyPath)
+	// Under Phase 3c always-copy: finalizeStagedKey runs at the
+	// WizardServer step and copies the user-typed generate path
+	// into <configDir>/<host>/keys/id_ed25519. result.KeyPath now
+	// points at the canonical per-server location, not the user's
+	// chosen temp dir.
+	wantPath := filepath.Join(homeDir, ".sshkey-term", "localhost", "keys", "id_ed25519")
+	if result.KeyPath != wantPath {
+		t.Errorf("result key = %q, want %q (canonical per-server)", result.KeyPath, wantPath)
+	}
+	// Copy-not-move: the user's typed path keeps its original bytes
+	// because it lived outside the wizard staging dir.
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Errorf("user-typed generated key should remain at %q: %v", keyPath, err)
 	}
 	if result.ServerHost != "localhost" {
 		t.Errorf("result host = %q", result.ServerHost)
@@ -532,9 +552,15 @@ func TestWizard_ExistingKeyCopiedToManagedStoreAndRewritten(t *testing.T) {
 	if w.result.KeyPath == srcKey {
 		t.Fatalf("key path should be managed copy, got original path %q", w.result.KeyPath)
 	}
-	wantDir := filepath.Join(homeDir, ".sshkey-term", "keys")
+	// Under Phase 3c: the wizard reaches the copy step before knowing
+	// the server host, so the key lands in the transient staging dir.
+	// finalizeStagedKey (invoked at the WizardServer step) moves it
+	// into <configDir>/<host>/keys/id_ed25519 once the user types a
+	// host. This test stops at WizardBackup, so result.KeyPath still
+	// points to staging.
+	wantDir := filepath.Join(homeDir, ".sshkey-term", ".staging")
 	if filepath.Dir(w.result.KeyPath) != wantDir {
-		t.Fatalf("managed key dir = %q, want %q", filepath.Dir(w.result.KeyPath), wantDir)
+		t.Fatalf("staged key dir = %q, want %q", filepath.Dir(w.result.KeyPath), wantDir)
 	}
 	if _, err := os.Stat(w.result.KeyPath); err != nil {
 		t.Fatalf("managed private key missing: %v", err)

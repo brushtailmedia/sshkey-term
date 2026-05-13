@@ -21,7 +21,7 @@ func newNavModeAppHarness(t *testing.T) App {
 	a.memberPanel = NewMemberPanel()
 	a.search = NewSearch()
 	a.settings = NewSettings()
-	a.addServer = NewAddServer()
+	a.addServer = NewAddServer(nil)
 	a.statusBar = NewStatusBar()
 	a.navModeTimeout = 2 * time.Second
 	a.configDir = t.TempDir()

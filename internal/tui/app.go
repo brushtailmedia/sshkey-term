@@ -269,8 +269,23 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		quickSwitch:     NewQuickSwitch(),
 		memberPanel:     NewMemberPanel(),
 		settings:        NewSettings(),
-		addServer:       NewAddServer(),
-		retireConfirm:   NewRetireConfirm(),
+		// AddServer's scanDirsFn captures appCfg + configDir so the
+		// "Existing Ed25519 keys" list reflects the LIVE list of
+		// configured servers at scan time — every dialog open / rescan
+		// reads the current `appCfg.Servers`, so servers added or
+		// removed during the session show up correctly without
+		// rebuilding the model.
+		addServer: NewAddServer(func() []string {
+			if appCfg == nil {
+				return nil
+			}
+			dirs := make([]string, 0, len(appCfg.Servers))
+			for _, srv := range appCfg.Servers {
+				dirs = append(dirs, config.ServerKeysDir(configDir, srv.Host))
+			}
+			return dirs
+		}),
+		retireConfirm: NewRetireConfirm(),
 		deviceRevoked:   NewDeviceRevoked(),
 		deviceMgr:       NewDeviceMgr(),
 		saveAttachment:  NewSaveAttachment(),
