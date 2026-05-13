@@ -109,11 +109,21 @@ On first launch, the client prompts to select or generate an Ed25519 SSH key, th
 
 ```
 ~/.sshkey-term/
-└── config.toml              global config, server list, device ID
+├── config.toml              global config, server list, device ID
 ├── chat.example.com/
+│   ├── keys/
+│   │   ├── id_ed25519       this server's private key
+│   │   └── id_ed25519.pub
+│   ├── known_host           pinned SSH host key (TOFU)
+│   ├── client.log
 │   ├── messages.db          encrypted local DB (all rooms + DMs)
 │   └── files/               cached attachments
 └── work.company.com/
+    ├── keys/
+    │   ├── id_ed25519
+    │   └── id_ed25519.pub
+    ├── known_host
+    ├── client.log
     ├── messages.db
     └── files/
 ```
@@ -128,16 +138,20 @@ id = "dev_V1StGXR8_Z5jdHi6B-myT"
 name = "Personal"
 host = "chat.example.com"
 port = 2222
-key = "~/.ssh/id_ed25519"
 
 [[servers]]
 name = "Work"
 host = "work.company.com"
 port = 2222
-key = "~/.ssh/work_key"
 ```
 
-Each server is independent -- different keys, different rooms, different users. Local DB is per-server.
+Each server is independent — different keys, different rooms, different users. Local DB is per-server, and each server owns one SSH key file at `<configDir>/<host>/keys/id_ed25519`. On Add Server / Wizard the source key (from `~/.ssh/...`, another server's keys folder, or freshly generated) is **always copied** into the new server's `keys/` folder — the app never references the original location after copy. Removing a server cleans up its entire `<host>/` folder atomically.
+
+The `config.toml` schema carries only `name`, `host`, and `port`. There is no `key` field — the runtime derives the path from `host` and the per-server layout above.
+
+### Known limitations
+
+- **Same host, different ports collide on the data dir.** Two servers configured with the same `host` (e.g. `example.com`) but different `port` values share `<configDir>/<host>/` and will overwrite each other's keys, DB, and known_host pin. Workaround: give them distinct `host` values (e.g. DNS aliases) until per-port disambiguation lands.
 
 ## Security model
 

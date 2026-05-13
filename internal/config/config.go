@@ -203,18 +203,6 @@ func RemoveServer(dir string, cfg *Config, index int) error {
 	return Save(dir, cfg)
 }
 
-// ServerDataDir returns the local data directory for a server.
-//
-// Phase 1 legacy wrapper — delegates to ServerDataDirForHost so
-// existing call sites in this file and in tests continue to
-// compile during the path-centralization migration. New code
-// should call ServerDataDirForHost(configDir, host string)
-// directly. This wrapper will be removed once all callers have
-// migrated (planned for a follow-up cleanup after Phase 4).
-func ServerDataDir(configDir string, server ServerConfig) string {
-	return ServerDataDirForHost(configDir, server.Host)
-}
-
 // ServerDataSize returns the total size of a server's local data in bytes.
 //
 // Phase 2 of the path-centralization refactor: validates

@@ -49,45 +49,15 @@ func run() error {
 	ephemeral := false
 
 	if *hostFlag != "" && *keyFlag != "" {
-		// CLI bypass — input boundary. Validate host before any
-		// path derivation downstream.
-		if err := config.ValidateHost(*hostFlag); err != nil {
-			return fmt.Errorf("invalid -host: %w", err)
-		}
-		name := *nameFlag
-		if name == "" {
-			name = *hostFlag
-		}
-		server = config.ServerConfig{
-			Name: name,
-			Host: *hostFlag,
-			Port: *portFlag,
-			// Key intentionally omitted — see the two-mode split:
-			// bootstrap-persist copies the key into a managed
-			// location and persists no Key reference (managed-
-			// derived); ephemeral mode uses the literal -key value
-			// at runtime via ExpandUserPath, also no persisted Key.
-		}
-		if len(cfg.Servers) == 0 {
-			// Bootstrap-persist mode: functionally Add Server via
-			// CLI. Copy the source key into the per-server managed
-			// location, save the server entry (no Key field), and
-			// fall through to the standard ServerKeyPath-derived
-			// runtime read.
-			keySrc := config.ExpandUserPath(*keyFlag)
-			if err := copyKeyBytesIntoManaged(configDir, *hostFlag, keySrc); err != nil {
-				return fmt.Errorf("bootstrap-persist copy: %w", err)
-			}
-			if err := config.AddServer(configDir, cfg, server); err != nil {
-				return fmt.Errorf("save bootstrap server: %w", err)
-			}
-		} else {
-			// Ephemeral mode: no persistence, use literal -key for
-			// this run only. The serverIdx sentinel below distin-
-			// guishes "running against a configured server" from
-			// "running against an ephemeral host" so settings/
-			// actions don't accidentally target cfg.Servers[0].
-			ephemeral = true
+		// CLI bypass — runBypassMode handles both bootstrap-persist
+		// (empty config) and ephemeral (existing config) modes per
+		// path-centralization.md §"CLI bypass design decision". Flag
+		// parsing stays in run() (Option B-lite); only the branch
+		// body is extracted for testability.
+		var err error
+		server, ephemeral, err = runBypassMode(configDir, cfg, *hostFlag, *keyFlag, *nameFlag, *portFlag)
+		if err != nil {
+			return err
 		}
 	} else if len(cfg.Servers) > 0 {
 		// Existing config — use first server. Validate the
@@ -167,13 +137,7 @@ func run() error {
 	// cfg.Servers[0] when there's no genuine "active configured
 	// server." See path-centralization.md §"CLI bypass" → "Ephemeral
 	// — literal-path runtime override" for the rationale.
-	serverIdx := -1
-	for i, s := range cfg.Servers {
-		if s.Host == server.Host && s.Port == server.Port {
-			serverIdx = i
-			break
-		}
-	}
+	serverIdx := findServerIndex(cfg, server)
 
 	app := tui.New(clientCfg, cfg, configDir, serverIdx)
 
@@ -253,4 +217,77 @@ func copyKeyBytesIntoManaged(configDir, host, srcKeyPath string) error {
 		}
 	}
 	return nil
+}
+
+// runBypassMode handles the -host / -key CLI bypass branch. Two
+// modes split on whether any servers are already configured:
+//
+//   - len(cfg.Servers) == 0 → bootstrap-persist. Validate host,
+//     copy the source key into <configDir>/<host>/keys/id_ed25519
+//     via copyKeyBytesIntoManaged, persist a server entry via
+//     config.AddServer. Returns ephemeral=false; subsequent runs
+//     pick up the persisted entry naturally.
+//   - len(cfg.Servers) > 0 → ephemeral. Validate host, build the
+//     in-memory ServerConfig, but skip the copy and skip the save.
+//     Returns ephemeral=true; the caller uses the literal -key
+//     value (via ExpandUserPath) for this run only.
+//
+// Both modes share: ValidateHost gate, Name fallback to Host if
+// the -name flag was empty, and Port carried through verbatim.
+//
+// Extracted from run() in Phase 4 (Option B-lite) so the bypass
+// contract is unit-testable without exercising flag parsing,
+// tea.NewProgram wiring, or the wizard branch. See
+// path-centralization.md §"Decision — CLI bypass test strategy
+// (Option B-lite)" for the rationale.
+func runBypassMode(configDir string, cfg *config.Config, host, keyPath, name string, port int) (config.ServerConfig, bool, error) {
+	if err := config.ValidateHost(host); err != nil {
+		return config.ServerConfig{}, false, fmt.Errorf("invalid -host: %w", err)
+	}
+	if name == "" {
+		name = host
+	}
+	server := config.ServerConfig{
+		Name: name,
+		Host: host,
+		Port: port,
+	}
+
+	if len(cfg.Servers) == 0 {
+		// Bootstrap-persist mode: functionally Add Server via CLI.
+		// Copy the source key into the per-server managed location,
+		// save the server entry (no Key field — Phase 3e deleted it).
+		keySrc := config.ExpandUserPath(keyPath)
+		if err := copyKeyBytesIntoManaged(configDir, host, keySrc); err != nil {
+			return config.ServerConfig{}, false, fmt.Errorf("bootstrap-persist copy: %w", err)
+		}
+		if err := config.AddServer(configDir, cfg, server); err != nil {
+			return config.ServerConfig{}, false, fmt.Errorf("save bootstrap server: %w", err)
+		}
+		return server, false, nil
+	}
+
+	// Ephemeral mode: no persistence, use literal -key for this
+	// run only. The serverIdx sentinel computed in run() will
+	// resolve to -1 since the host isn't in cfg.Servers, so
+	// destructive settings actions are correctly gated.
+	return server, true, nil
+}
+
+// findServerIndex returns the index of the cfg.Servers entry
+// matching (Host, Port), or -1 if not found. Sentinel -1 marks
+// "running against an unconfigured ephemeral host" and is used by
+// the TUI to gate destructive settings actions against
+// cfg.Servers[0]. Extracted from run() in Phase 4 (Option B-lite)
+// so the sentinel behavior is unit-testable.
+func findServerIndex(cfg *config.Config, server config.ServerConfig) int {
+	if cfg == nil {
+		return -1
+	}
+	for i, s := range cfg.Servers {
+		if s.Host == server.Host && s.Port == server.Port {
+			return i
+		}
+	}
+	return -1
 }

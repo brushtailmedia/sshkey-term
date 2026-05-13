@@ -275,12 +275,22 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		// reads the current `appCfg.Servers`, so servers added or
 		// removed during the session show up correctly without
 		// rebuilding the model.
+		//
+		// Phase 4 hardening: skip entries where ValidateHost rejects
+		// the Host. A hand-edited bad Host in config.toml (path
+		// separator, traversal segment, control byte) would otherwise
+		// join into a bogus keys dir. ServerKeysDir trusts its input
+		// per the §"Server data dir" contract, so the validation has
+		// to happen here at the closure boundary before derivation.
 		addServer: NewAddServer(func() []string {
 			if appCfg == nil {
 				return nil
 			}
 			dirs := make([]string, 0, len(appCfg.Servers))
 			for _, srv := range appCfg.Servers {
+				if config.ValidateHost(srv.Host) != nil {
+					continue
+				}
 				dirs = append(dirs, config.ServerKeysDir(configDir, srv.Host))
 			}
 			return dirs
@@ -1835,6 +1845,17 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 						a.client.Close()
 					}
 					return a, tea.Quit
+				}
+				// Reindex fix: removing an entry at an index BELOW
+				// the active one shifts cfg.Servers down by one, so
+				// a.serverIdx must decrement to keep pointing at the
+				// SAME logical server. Without this, a.serverIdx
+				// silently slides forward by one (now references a
+				// different server entry) and subsequent settings
+				// actions target the wrong row. Caught in Phase 4
+				// audit.
+				if msg.ServerIdx < a.serverIdx {
+					a.serverIdx--
 				}
 			}
 		case "add_server":

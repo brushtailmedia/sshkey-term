@@ -229,14 +229,13 @@ func TestRemoveServer_RemovesLocalData(t *testing.T) {
 	}
 }
 
-// -- ServerDataDir / Size --
-
-func TestServerDataDir(t *testing.T) {
-	got := ServerDataDir("/cfg", ServerConfig{Host: "chat.example.com"})
-	if got != "/cfg/chat.example.com" {
-		t.Errorf("got %q", got)
-	}
-}
+// -- ServerDataSize --
+//
+// ServerDataDir(configDir, server ServerConfig) — the Phase 1
+// legacy wrapper — was deleted during Phase 4 dead-code cleanup
+// along with the test that lived here. Production callers all
+// moved to ServerDataDirForHost(configDir, host string) directly;
+// see paths_test.go for that helper's coverage.
 
 func TestServerDataSize_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
@@ -371,5 +370,106 @@ func TestMarkHelpShown(t *testing.T) {
 	loaded, _ := Load(dir)
 	if !loaded.Notifications.HelpShown {
 		t.Error("HelpShown should persist to disk")
+	}
+}
+
+// -- Phase 4: ValidateHost-driven rejection tests --
+//
+// Each of the four config functions that consumes a server Host
+// (AddServer, ServerDataSize, ClearServerData, RemoveServer)
+// validates the host before deriving any path. These tests confirm
+// the rejection paths abort cleanly: error returned, no state
+// mutation, no filesystem touch.
+//
+// invalidHostFixtures is a small table of hostnames that ValidateHost
+// rejects, exercising different rejection rules:
+//   - "" (empty)
+//   - "../etc" (path traversal segment)
+//   - "with/slash" (path separator)
+//   - " spaces " (leading/trailing whitespace — TrimSpace happens at
+//     the UI layer; raw whitespace reaching the config layer should
+//     be rejected)
+var invalidHostFixtures = []string{
+	"",
+	"../etc",
+	"with/slash",
+	"   ",
+}
+
+func TestAddServer_RejectsInvalidHost(t *testing.T) {
+	for _, bad := range invalidHostFixtures {
+		t.Run(bad, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := &Config{}
+			err := AddServer(dir, cfg, ServerConfig{Name: "x", Host: bad, Port: 2222})
+			if err == nil {
+				t.Fatalf("AddServer(host=%q) should reject, got nil error", bad)
+			}
+			if len(cfg.Servers) != 0 {
+				t.Errorf("cfg.Servers should be unchanged on reject, got %d entries", len(cfg.Servers))
+			}
+			if _, statErr := os.Stat(ConfigFilePath(dir)); statErr == nil {
+				t.Error("config.toml should not have been written on reject")
+			}
+		})
+	}
+}
+
+func TestServerDataSize_RejectsInvalidHost(t *testing.T) {
+	for _, bad := range invalidHostFixtures {
+		t.Run(bad, func(t *testing.T) {
+			dir := t.TempDir()
+			_, err := ServerDataSize(dir, ServerConfig{Host: bad})
+			if err == nil {
+				t.Fatalf("ServerDataSize(host=%q) should reject, got nil error", bad)
+			}
+		})
+	}
+}
+
+func TestClearServerData_RejectsInvalidHost(t *testing.T) {
+	for _, bad := range invalidHostFixtures {
+		t.Run(bad, func(t *testing.T) {
+			dir := t.TempDir()
+			// Pre-seed a valid-shaped sibling dir to verify it survives
+			// the reject (only the targeted host's data would be
+			// cleared on success — bad host should touch nothing).
+			sibling := filepath.Join(dir, "valid.example.com")
+			if err := os.MkdirAll(sibling, 0700); err != nil {
+				t.Fatalf("seed sibling: %v", err)
+			}
+			err := ClearServerData(dir, ServerConfig{Host: bad})
+			if err == nil {
+				t.Fatalf("ClearServerData(host=%q) should reject, got nil error", bad)
+			}
+			if _, statErr := os.Stat(sibling); statErr != nil {
+				t.Errorf("sibling dir should remain untouched: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRemoveServer_RejectsInvalidHost(t *testing.T) {
+	for _, bad := range invalidHostFixtures {
+		t.Run(bad, func(t *testing.T) {
+			dir := t.TempDir()
+			// Hand-edit a cfg with one bad-host entry plus one good
+			// entry so we can verify the bad entry's removal aborts
+			// cleanly. cfg.Servers is mutated by RemoveServer only on
+			// success; on reject the slice must stay length 2.
+			cfg := &Config{
+				Servers: []ServerConfig{
+					{Name: "Bad", Host: bad, Port: 2222},
+					{Name: "Good", Host: "good.example.com", Port: 2223},
+				},
+			}
+			err := RemoveServer(dir, cfg, 0)
+			if err == nil {
+				t.Fatalf("RemoveServer(host=%q) should reject, got nil error", bad)
+			}
+			if len(cfg.Servers) != 2 {
+				t.Errorf("cfg.Servers should be unchanged on reject, got %d entries", len(cfg.Servers))
+			}
+		})
 	}
 }
