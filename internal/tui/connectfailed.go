@@ -30,36 +30,18 @@ func (c *ConnectFailedModel) Show(errMsg, fingerprint, pubKey string) {
 func (c *ConnectFailedModel) Hide()          { c.visible = false }
 func (c *ConnectFailedModel) IsVisible() bool { return c.visible }
 
-func (c ConnectFailedModel) HandleMouse(msg tea.MouseMsg) (ConnectFailedModel, tea.Cmd) {
-	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionRelease {
-		return c, nil
-	}
-	// Match click target by rendered view content rather than hardcoded Y offsets.
-	// dialogStyle: border(1) + padding(1) = content starts at Y=2.
-	const contentY = 2
-	lineIdx := msg.Y - contentY
-	if lineIdx < 0 {
-		return c, nil
-	}
-
-	view := c.View(80) // width doesn't affect line structure
-	lines := strings.Split(view, "\n")
-	if lineIdx >= len(lines) {
-		return c, nil
-	}
-	line := lines[lineIdx]
-
-	if strings.Contains(line, "[r]") || strings.Contains(line, "Retry") {
-		return c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
-	}
-	if strings.Contains(line, "[c]") || strings.Contains(line, "Copy public key") {
-		return c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
-	}
-	if strings.Contains(line, "[q]") || strings.Contains(line, "Quit") {
-		return c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
-	}
-	return c, nil
-}
+// Mouse clicks on this screen are intentionally NOT routed to
+// the [r]/[c]/[q] buttons. The screen's primary content is the
+// long public-key string the user needs to send out-of-band to
+// the server admin; supporting mouse-drag-select for that string
+// (as a clipboard fallback when OSC 52 fails — see View() comment)
+// requires that mouse-release events on the key text do NOT
+// trigger button actions. The three keyboard shortcuts remain
+// the canonical (and only) action paths on this dialog.
+//
+// Click absorption is enforced one level up in App.handleMouse —
+// when connectFailed.IsVisible() the handler returns without
+// dispatching to any other dialog or panel.
 
 func (c ConnectFailedModel) Update(msg tea.KeyMsg) (ConnectFailedModel, tea.Cmd) {
 	switch msg.String() {

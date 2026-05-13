@@ -611,45 +611,12 @@ func TestWizard_ImportMissingPublicKeyFailsExplicitly(t *testing.T) {
 	}
 }
 
-func TestConnectFailed_Mouse(t *testing.T) {
-	var cf ConnectFailedModel
-	cf.Show("key not authorized", "SHA256:abc123", "ssh-ed25519 AAAA...")
-
-	// Click on [c] Copy line (Y=14 = contentY(2) + ~12 for copy line)
-	cf, _ = cf.HandleMouse(tea.MouseMsg{
-		Button: tea.MouseButtonLeft,
-		Action: tea.MouseActionRelease,
-		X:      10,
-		Y:      14,
-	})
-	if !cf.copied {
-		// Try adjacent Y values — layout may vary
-		cf.copied = false
-		cf, _ = cf.HandleMouse(tea.MouseMsg{
-			Button: tea.MouseButtonLeft,
-			Action: tea.MouseActionRelease,
-			X:      10,
-			Y:      13,
-		})
-	}
-	// Don't fail on exact Y — just verify the handler doesn't crash
-	// and that keyboard path still works
-	cf, _ = cf.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
-	if !cf.copied {
-		t.Error("keyboard [c] should set copied")
-	}
-
-	// Click retry area or use keyboard
-	cf, cmd := cf.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
-	if cf.IsVisible() {
-		t.Error("should hide on retry")
-	}
-	if cmd == nil {
-		t.Error("should emit cmd on retry")
-	}
-
-	t.Log("connect failed mouse: handler wired, keyboard fallback works")
-}
+// TestConnectFailed_Mouse used to live here; deleted along with the
+// ConnectFailedModel.HandleMouse method. Mouse clicks are now
+// absorbed (no-op) at the App.handleMouse level when the dialog is
+// visible — see app.go's handleMouse for the rationale and
+// connectfailed.go's package comment for the design intent.
+// Keyboard input remains exercised by TestConnectFailed_View above.
 
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchContains(s, substr)

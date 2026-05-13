@@ -14,6 +14,38 @@ import (
 // It should prompt the user and return the passphrase bytes.
 type PassphraseFunc func() ([]byte, error)
 
+// KeyNeedsPassphrase reports whether the PEM-encoded SSH key file
+// at path is passphrase-encrypted. Returns (true, nil) for an
+// encrypted key, (false, nil) for an unencrypted key, and
+// (false, err) for any other error (file unreadable, malformed
+// PEM, unsupported format — same allowlist `sniffKeyFileFormat`
+// applies).
+//
+// Used by the TUI's App.connect() to detect encryption BEFORE
+// invoking client.Connect(), so the passphrase dialog can be
+// dispatched via the existing passphraseNeededMsg flow. Calling
+// loadSSHKey directly would block inside the OnPassphrase
+// callback's channel receive without ever surfacing the need-to-
+// prompt to a higher layer — see passphrase-prompt-fix.md
+// for the full deadlock trace and design rationale.
+func KeyNeedsPassphrase(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read key file: %w", err)
+	}
+	if err := sniffKeyFileFormat(path, data); err != nil {
+		return false, err
+	}
+	_, err = ssh.ParsePrivateKey(data)
+	if err == nil {
+		return false, nil
+	}
+	if _, ok := err.(*ssh.PassphraseMissingError); ok {
+		return true, nil
+	}
+	return false, fmt.Errorf("parse key: %w", err)
+}
+
 // sniffKeyFileFormat inspects the first line of a key file and returns a
 // helpful error if the file is not an OpenSSH private key (e.g. public key,
 // SSH certificate, RSA/ECDSA key, or unknown format). Returns nil if the

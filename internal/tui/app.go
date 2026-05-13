@@ -573,6 +573,30 @@ func (a App) connect() tea.Cmd {
 		keyPath := cfg.KeyPath
 		cached := a.passphraseCache[keyPath]
 		passCh := a.passphraseCh
+
+		// Pre-flight encryption check. If the key is passphrase-encrypted
+		// AND we have no cached passphrase, dispatch passphraseNeededMsg
+		// BEFORE attempting Connect(). Without this, loadSSHKey blocks
+		// inside cfg.OnPassphrase's channel receive (parked on <-passCh)
+		// with no one to send a passphrase — because the dialog trigger
+		// (the strings.Contains check below) is only reachable AFTER
+		// Connect() returns, and Connect() never returns because it's
+		// parked in OnPassphrase. Deadlock. See passphrase-prompt-fix.md
+		// for the full trace.
+		//
+		// On the user-typed-passphrase retry, cached is populated, the
+		// pre-flight is skipped, and OnPassphrase returns the cached
+		// bytes synchronously (no channel block).
+		if len(cached) == 0 {
+			needs, err := client.KeyNeedsPassphrase(keyPath)
+			if err != nil {
+				return ErrMsg{Err: err}
+			}
+			if needs {
+				return passphraseNeededMsg{}
+			}
+		}
+
 		cfg.OnPassphrase = func() ([]byte, error) {
 			if len(cached) > 0 {
 				return cached, nil
@@ -582,7 +606,14 @@ func (a App) connect() tea.Cmd {
 
 		c := client.New(cfg)
 		if err := c.Connect(); err != nil {
-			// Check if it's a passphrase error
+			// Defensive fallback. Under the current loadSSHKey contract
+			// this branch is unreachable (the pre-flight above catches
+			// the encrypted-key case first; loadSSHKey then either
+			// succeeds via cached bytes or fails with a non-passphrase
+			// error). Retained as defence-in-depth so a regression in
+			// the pre-flight detection wouldn't silently re-introduce
+			// the original hang — Connect() failing with a passphrase
+			// error here would still surface the dialog.
 			errStr := err.Error()
 			if strings.Contains(errStr, "passphrase") {
 				return passphraseNeededMsg{}
@@ -2987,8 +3018,18 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Cancelled {
 			return a, tea.Quit
 		}
-		// Cache passphrase by key path for reconnects and server switching
+		// Cache passphrase by key path for reconnects and server switching.
 		a.passphraseCache[a.cfg.KeyPath] = msg.Passphrase
+		// Drain any stale buffered value before sending fresh, so a
+		// future OnPassphrase consumer (e.g. a reconnect that cleared
+		// the cache) doesn't pick up a leftover byte slice from a
+		// prior cycle. Buffer capacity is 1; without the drain a full
+		// buffer would BLOCK the send and hang Update. See
+		// passphrase-prompt-fix.md §"Note on passphraseCh buffering".
+		select {
+		case <-a.passphraseCh:
+		default:
+		}
 		a.passphraseCh <- msg.Passphrase
 		return a, a.connect()
 
@@ -3079,12 +3120,16 @@ func keyInfoFromPubPath(keyPath string) (string, string) {
 
 // handleMouse processes mouse events — clicks and scroll wheel.
 func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	// Dialogs with mouse support — route clicks to the dialog.
+	// ConnectFailed deliberately swallows mouse events without
+	// routing them to any handler. The screen's keyboard shortcuts
+	// ([r]/[c]/[q]) are the only valid action paths; absorbing
+	// clicks lets the user mouse-drag-select the public-key text
+	// as a clipboard fallback when OSC 52 isn't available (the
+	// design intent documented at connectfailed.go View()).
 	if a.connectFailed.IsVisible() {
-		var cmd tea.Cmd
-		a.connectFailed, cmd = a.connectFailed.HandleMouse(msg)
-		return a, cmd
+		return a, nil
 	}
+	// Dialogs with mouse support — route clicks to the dialog.
 	if a.addServer.IsVisible() {
 		var cmd tea.Cmd
 		a.addServer, cmd = a.addServer.HandleMouse(msg)
@@ -6141,6 +6186,19 @@ func (a App) viewBody() string {
 	// framing) to render rather than the raw SSH library error.
 	if a.connectFailed.IsVisible() {
 		return a.connectFailed.View(a.width)
+	}
+
+	// Passphrase overlay must also take precedence over the
+	// !connected fallback below. The pre-flight encryption check in
+	// connect() dispatches passphraseNeededMsg BEFORE any actual
+	// connection attempt — at that moment a.connected is still false,
+	// so without this hoist the view would render "Connecting..."
+	// and the dialog (visible at the model level) would be invisible
+	// to the user. Symptom: terminal sits at "Connecting..." forever
+	// because the user can't see the dialog asking them to type the
+	// passphrase. See passphrase-prompt-fix.md.
+	if a.passphrase.IsVisible() {
+		return a.passphrase.View(a.width)
 	}
 
 	if a.err != nil && !a.connected {
