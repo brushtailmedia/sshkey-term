@@ -55,3 +55,4 @@ multi-server-v2.md
 passphrase-prompt-fix.md
 unread-epoch-leak-fix.md
 presence-dot-self-leak-fix.md
+connectfailed-classification-fix.md
