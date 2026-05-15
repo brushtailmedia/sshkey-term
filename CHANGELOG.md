@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-05-14
+
 ### Fixed
 - **Attachment files orphaned on bulk-delete paths (2026-05-13).** Pre-fix, bulk-delete paths (room / group / DM `/delete` plus the hidden-DM sync push from `dm_list`) dropped the messages and reactions from the local DB but left their attachment files behind in `<dataDir>/files/<fileID>`. Affected **six call sites across four delete contexts** in `internal/client/client.go`:
   - **`/delete` on a room** (`case "room_deleted"` at line 916) — server confirmed our delete or another device's.
