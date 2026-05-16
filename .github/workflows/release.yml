@@ -151,12 +151,79 @@ jobs:
           CGO_CFLAGS: "-DSQLITE_ENABLE_FTS5"
         run: |
           go build -ldflags="-s -w" -o sshkey-term .
-          tar czf sshkey-term_${{ github.ref_name }}_darwin_${{ matrix.goarch }}.tar.gz sshkey-term README.md LICENSE CHANGELOG.md
+          echo "MACOS_ZIP=sshkey-term_${{ github.ref_name }}_darwin_${{ matrix.goarch }}.zip" >> "$GITHUB_ENV"
+
+      - name: Import Apple signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import base64, os
+          data = base64.b64decode(os.environ["APPLE_CERTIFICATE"])
+          with open("certificate.p12", "wb") as f:
+              f.write(data)
+          PY
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/sshkey-term-signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import certificate.p12 -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+          rm -f certificate.p12
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '\"' '/Developer ID Application/ {print $2; exit}')"
+          if [ -z "$SIGNING_IDENTITY" ]; then
+            echo "No 'Developer ID Application' identity found in imported certificate."
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Sign macOS binary
+        run: |
+          codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" sshkey-term
+          codesign --verify --verbose=4 sshkey-term
+
+      - name: Build notarization archive
+        run: |
+          ditto -c -k --keepParent sshkey-term "$MACOS_ZIP"
+
+      - name: Notarize macOS archive (API key)
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          # NOTE: GITHUB_ENV only propagates to *subsequent* steps,
+          # not the current shell — so the key path must be a plain
+          # shell variable here. Both the shell var and the python
+          # writer use the same fixed $RUNNER_TEMP/AuthKey.p8 path.
+          APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          python3 - <<'PY'
+          import base64, os
+          data = base64.b64decode(os.environ["APPLE_API_PRIVATE_KEY"])
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "AuthKey.p8"), "wb") as f:
+              f.write(data)
+          PY
+
+          test -s "$APPLE_API_KEY_PATH"
+
+          xcrun notarytool submit "$MACOS_ZIP" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait
+          rm -f "$APPLE_API_KEY_PATH"
 
       - uses: actions/upload-artifact@v4
         with:
           name: darwin-${{ matrix.goarch }}
-          path: "*.tar.gz"
+          path: "*.zip"
 
   publish:
     needs: [release-linux, release-macos]
@@ -169,7 +236,7 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
-        run: sha256sum *.tar.gz > checksums.txt
+        run: sha256sum *.tar.gz *.zip > checksums.txt
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -178,4 +245,5 @@ jobs:
           generate_release_notes: true
           files: |
             *.tar.gz
+            *.zip
             checksums.txt
