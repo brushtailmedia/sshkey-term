@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Sidebar group presence dot leaked the user's own status (2026-05-16).** `groupPresenceDot` is designed to exclude self from the per-group presence aggregation so the dot answers "is someone *else* here to chat with" rather than trivially echoing our own presence — but its self-filter gates on `sidebar.selfUserID`, which was only ever assigned by the `dm_list` message handler. Between connect and `dm_list` arrival the field was empty, so the filter matched no real member and self's own online/away/busy state leaked into the group dot. The wrong dot was transient in the common case but **persisted indefinitely** for solo-self groups (no other members to re-rank the dot) and whenever `dm_list` never arrived (version skew / empty list). Fixed by assigning `selfUserID` at connect time in the `connectedWithClient` handler — the same connect-time point, and the same already-extracted non-empty user ID, as the existing self-online seed — so the self-exclusion is reliable from the first sidebar render. Both writes (connect-time canonical + the retained `dm_list` write, kept as defensive backup this release) now route through a new single-write-path setter `SidebarModel.SetSelfUserID`. No change to the dot's rank-based available/away/busy semantics. Regression tests added in `internal/tui/presence_dot_test.go` (solo-self exclusion, rank-preservation guard, connect-handler wiring, and a `PresenceDot` contract drift-guard).
+
 ## [v0.4.0] - 2026-05-14
 
 ### Fixed

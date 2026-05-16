@@ -2785,6 +2785,19 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// reconnect — fine, the map is idempotent.
 		if uid := a.client.UserID(); uid != "" {
 			a.sidebar.SetOnline(uid, true)
+			// Sidebar self-identity for group-dot self-exclusion.
+			// groupPresenceDot() filters self out of the presence
+			// aggregation so the dot reflects "is someone ELSE
+			// here." Pre-fix, selfUserID was only set by the
+			// dm_list handler, leaving a startup window where
+			// group_list rendered dots with selfUserID="" and self
+			// leaked into the color (persisting for solo-self
+			// groups and when dm_list never arrives). Setting it
+			// here — same non-empty uid, same connect-time point
+			// as the online seed — closes the window. The dm_list
+			// setter stays as defensive backup this phase. See
+			// presence-dot-self-leak-fix.md.
+			a.sidebar.SetSelfUserID(uid)
 		}
 
 		// Populate sidebar and messages
@@ -5715,9 +5728,15 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			}
 		}
 		a.sidebar.SetDMs(active)
-		// Set the sidebar's selfUserID so it knows which party is "other" in each DM
+		// Set the sidebar's selfUserID so it knows which party is
+		// "other" in each DM. Defensive redundancy: selfUserID is
+		// now canonically set at connect time (connectedWithClient
+		// handler) to close the group-dot leak window; this write
+		// is retained as a backup and routed through the setter for
+		// single-write-path consistency. Behavior unchanged. See
+		// presence-dot-self-leak-fix.md.
 		if a.client != nil {
-			a.sidebar.selfUserID = a.client.UserID()
+			a.sidebar.SetSelfUserID(a.client.UserID())
 		}
 	case "dm_created":
 		var m protocol.DMCreated

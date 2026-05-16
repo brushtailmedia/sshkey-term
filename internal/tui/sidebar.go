@@ -440,6 +440,23 @@ func (s *SidebarModel) SetStatus(user, status string) {
 	}
 }
 
+// SetSelfUserID records the current user's ID. It is the single
+// production write path for selfUserID — production code must not
+// assign the field directly (same-package tests may, to build
+// fixtures). selfUserID drives two things: DM "other party"
+// resolution (dmOtherUserID) and, more importantly, the self-
+// exclusion filter in groupPresenceDot so a group's dot reflects
+// "is someone ELSE here" rather than trivially echoing our own
+// presence/status. Wired at connect time (connectedWithClient
+// handler, app.go) so the filter is populated before the first
+// sidebar render; also re-set defensively from the dm_list
+// handler. Pre-fix, only dm_list set it, leaving a startup window
+// where group_list rendered with selfUserID=="" and self leaked
+// into the group dot. See presence-dot-self-leak-fix.md.
+func (s *SidebarModel) SetSelfUserID(id string) {
+	s.selfUserID = id
+}
+
 // presenceDot returns the rendered presence glyph for a user, picking
 // the color by combining online state with locked-set status:
 //   - offline → hollow slate ○
@@ -490,6 +507,10 @@ func presenceLabel(status string) string {
 // trivially being always-green from our own presence. Mirrors the
 // DM-dot logic which already uses dmOtherUserID for the same
 // reason.
+//
+// The self-filter relies on s.selfUserID being populated; it is
+// set at connect time via SetSelfUserID (see that method), so the
+// exclusion is reliable from the first render onward.
 func (s SidebarModel) groupPresenceDot(members []string) string {
 	bestRank := -1 // -1=offline-only, 0=busy, 1=away, 2=available
 	for _, m := range members {
