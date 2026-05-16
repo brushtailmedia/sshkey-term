@@ -459,6 +459,43 @@ func TestConnectFailed_View(t *testing.T) {
 	t.Log("connect failed: view + interactions OK")
 }
 
+// Regression: a server-down / unreachable failure must NOT render
+// the "Pending Approval — send your key to the admin" framing
+// (the key was never sent; the connection never reached the
+// server). See connectfailed-classification-fix.md.
+func TestConnectFailed_View_ServerDown(t *testing.T) {
+	var cf ConnectFailedModel
+	cf.Show(
+		"dial tcp 127.0.0.1:2222: connect: connection refused",
+		"SHA256:xK9mQ2pR7vT3nW8jL5mZ",
+		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOgdoNpun6JCDfucZGBYbIxiMkNOpREmLc4NwA3PUv29 user@test",
+	)
+	view := cf.View(60)
+
+	// Correct framing for an unreachable server.
+	if !contains(view, "Cannot Reach Server") {
+		t.Errorf("server-down view should render 'Cannot Reach Server', got:\n%s", view)
+	}
+	// The underlying error stays visible for diagnostics. Assert on
+	// a single token ("refused") rather than "connection refused":
+	// lipgloss wraps the error line to the dialog width and can
+	// split at the space (same short-fragment convention as
+	// TestConnectFailed_View above).
+	if !contains(view, "refused") {
+		t.Error("server-down view should surface the underlying error")
+	}
+	// MUST NOT show the misleading pending-approval / send-your-key copy.
+	for _, bad := range []string{"Pending Approval", "pending-keys queue", "ask them to approve", "Public key:", "Copy public key"} {
+		if contains(view, bad) {
+			t.Errorf("server-down view must NOT contain %q (misleading for an unreachable server)\n%s", bad, view)
+		}
+	}
+	// Retry + quit remain actionable.
+	if !contains(view, "[r] Retry") || !contains(view, "[q] Quit") {
+		t.Error("server-down view should still offer [r] retry and [q] quit")
+	}
+}
+
 func TestWizard_MouseKeySelect(t *testing.T) {
 	w := NewWizard()
 
