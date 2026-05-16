@@ -57,4 +57,5 @@ unread-epoch-leak-fix.md
 presence-dot-self-leak-fix.md
 connectfailed-classification-fix.md
 fix-server-switching.md
+fix-cross-server-db-isolation.md
 release-notes.md

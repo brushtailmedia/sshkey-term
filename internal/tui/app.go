@@ -415,6 +415,12 @@ func (a *App) switchServerByIndex(idx int) tea.Cmd {
 	a.sidebar.SetRooms(nil)
 	a.sidebar.SetGroups(nil)
 	a.pinnedBar = PinnedBarModel{}
+	// Dismiss the connection-failed overlay if it was up: a switch
+	// initiated FROM that modal (the escape hatch — see
+	// fix-server-switching.md) must not leave the old modal painted
+	// over the new server's connect. No-op when not visible, so the
+	// normal connected→switch path is unaffected.
+	a.connectFailed.Hide()
 	a.statusBar.SetError("Switching to " + srv.Name + "...")
 	a.statusBar.SetConnected(false)
 	a.updateTitle()
@@ -1000,6 +1006,32 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Connection failed overlay (first-run)
 		if a.connectFailed.IsVisible() {
+			// Escape hatch: a failed/unreachable server must not be
+			// a dead end. Let the Ctrl+g nav prefix and a
+			// server-switch digit (or the nav-cancel keys) through
+			// so the user can switch to another configured server
+			// instead of being stuck on retry-or-quit. Mirrors the
+			// Ctrl+C-above-modal escape hatch above. The other nav
+			// actions (k/n/m/i/s//) operate on a connected
+			// session's state and are intentionally NOT honored
+			// here. See fix-server-switching.md.
+			if msg.String() == "ctrl+g" {
+				return a, a.enterNavMode()
+			}
+			if a.navMode {
+				switch msg.String() {
+				case "1", "2", "3", "4", "5", "6", "7", "8", "9",
+					"g", "esc", "ctrl+g":
+					if cmd, handled := a.handleNavModeKey(msg); handled {
+						return a, cmd
+					}
+				default:
+					// Non-server nav key from the failure screen:
+					// cancel the prefix and stay on the modal (no
+					// empty/irrelevant panels).
+					a.exitNavMode()
+				}
+			}
 			var cmd tea.Cmd
 			a.connectFailed, cmd = a.connectFailed.Update(msg)
 			return a, cmd
