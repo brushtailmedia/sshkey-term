@@ -2382,18 +2382,24 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// auto-retry path on server_busy.
 		if a.client != nil {
 			if len(msg.Members) == 1 && msg.Name == "" {
-				if a.membersPanelCreateSource {
-					a.setPendingFocusCreatedDM(msg.Members[0])
-				}
+				// Focus the just-created DM regardless of where the
+				// NewConv dialog was opened from (members panel OR
+				// Ctrl+g n). Explicitly creating a conversation and
+				// then landing on it is the expected UX everywhere;
+				// the intent is TTL-bounded and matched against the
+				// dm_created result, so a failed / never-arriving
+				// create harmlessly expires.
+				a.setPendingFocusCreatedDM(msg.Members[0])
 				a.pendingCreateDM = pendingCreateDMState{
 					other:   msg.Members[0],
 					retries: maxCreateDMAutoRetries,
 				}
 				a.client.CreateDM(msg.Members[0])
 			} else if len(msg.Members) > 0 {
-				if a.membersPanelCreateSource {
-					a.setPendingFocusCreatedGroup(msg.Members, msg.Name)
-				}
+				// Focus the just-created group regardless of where the
+				// NewConv dialog was opened from (members panel OR
+				// Ctrl+g n) — same rationale as the DM branch above.
+				a.setPendingFocusCreatedGroup(msg.Members, msg.Name)
 				// Soft warning at 50+ total members (49+ others + caller).
 				// Per-message wrapped keys scale linearly with member count;
 				// rooms use a shared epoch key and are more efficient for
