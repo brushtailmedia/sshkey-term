@@ -409,6 +409,29 @@ func (c *Client) DecryptRoomMessage(room string, epoch int64, payloadBase64 stri
 	return &payload, nil
 }
 
+// IsGroupMessageRecipient reports whether this user has a wrapped
+// key entry for a group message — i.e. is a designated recipient
+// and could decrypt it. Cheap: a single map lookup, no unwrap and
+// no AES-GCM. This is the group analogue of RoomEpochKey != nil
+// (a key-presence check, not a decrypt) and is used to gate the
+// live unread-increment path so a late-added member's badge does
+// not count pre-join messages they have no wrapped key for.
+//
+// It keys on the same c.userID that DecryptGroupMessage keys on,
+// so the gate and the real decrypt can never disagree about
+// recipiency. Deliberately NOT a DecryptGroupMessage call: that
+// would add a redundant unwrap+decrypt (the notification path
+// already decrypts), and fail closed on key corruption — the
+// wrong direction for a defensive counter. See
+// unread-epoch-leak-fix.md.
+func (c *Client) IsGroupMessageRecipient(wrappedKeys map[string]string) bool {
+	c.mu.RLock()
+	username := c.userID
+	c.mu.RUnlock()
+	_, ok := wrappedKeys[username]
+	return ok
+}
+
 // DecryptGroupMessage decrypts a group DM message payload.
 func (c *Client) DecryptGroupMessage(wrappedKeys map[string]string, payloadBase64 string) (*protocol.DecryptedPayload, error) {
 	c.mu.RLock()

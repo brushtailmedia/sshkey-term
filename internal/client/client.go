@@ -1431,6 +1431,24 @@ func SetEncoderForTesting(c *Client, enc *protocol.Encoder) {
 	c.enc = enc
 }
 
+// SetEpochKeyForTesting seeds the in-memory epoch-key cache for a
+// (room, epoch) pair from an external package. Production code
+// populates this via storeEpochKey during the readLoop epoch_key
+// handler; this helper lets tui-layer tests exercise the
+// RoomEpochKey-gated unread path (a member with/without the key
+// for a message's epoch) without a live SSH session or DB.
+// Passing a non-nil key makes RoomEpochKey(room, epoch) return it;
+// not seeding a pair leaves RoomEpochKey returning nil for it.
+// Do not call from production code.
+func SetEpochKeyForTesting(c *Client, room string, epoch int64, key []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.epochKeys[room] == nil {
+		c.epochKeys[room] = make(map[int64][]byte)
+	}
+	c.epochKeys[room][epoch] = key
+}
+
 // GroupMembers returns the member list for a group DM.
 func (c *Client) GroupMembers(groupID string) []string {
 	c.mu.RLock()

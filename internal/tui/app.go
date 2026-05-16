@@ -5006,7 +5006,17 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				a.sendReadReceipt()
 			}
 		} else if !a.replayingSyncBatch {
-			a.sidebar.IncrementUnread(m.Room)
+			// Defence-in-depth (Layer 2a): only count messages the
+			// user can actually read. A member added after an epoch
+			// rotation holds keys ONLY for post-join epochs; counting
+			// pre-join-epoch messages would inflate the badge and leak
+			// the existence of room activity the user has no
+			// cryptographic access to. RoomEpochKey is a cheap
+			// key-presence check (no decrypt). See
+			// unread-epoch-leak-fix.md.
+			if a.client != nil && a.client.RoomEpochKey(m.Room, m.Epoch) != nil {
+				a.sidebar.IncrementUnread(m.Room)
+			}
 		}
 		// Notifications for messages not from self
 		if !a.replayingSyncBatch && a.client != nil && m.From != a.client.UserID() {
@@ -5044,7 +5054,16 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				a.sendReadReceipt()
 			}
 		} else if !a.replayingSyncBatch {
-			a.sidebar.IncrementUnread(m.Group)
+			// Defence-in-depth (Layer 2a): groups are per-message
+			// wrapped-key (no epoch model). Count only messages this
+			// user is a designated recipient of — a late-added member
+			// has no wrapped key for pre-join messages, so counting
+			// them would inflate the badge and leak pre-join activity.
+			// Cheap wrapped-key-presence check, NOT a decrypt (mirrors
+			// the room RoomEpochKey gate). See unread-epoch-leak-fix.md.
+			if a.client != nil && a.client.IsGroupMessageRecipient(m.WrappedKeys) {
+				a.sidebar.IncrementUnread(m.Group)
+			}
 		}
 		if !a.replayingSyncBatch && a.client != nil && m.From != a.client.UserID() {
 			payload, err := a.client.DecryptGroupMessage(m.WrappedKeys, m.Payload)

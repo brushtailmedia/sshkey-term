@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
@@ -74,6 +75,21 @@ func TestSyncBatchReplayDoesNotIncrementUnread(t *testing.T) {
 
 func TestLiveMessageStillIncrementsUnreadAfterSyncReplay(t *testing.T) {
 	a := minimalAppForServerMsg(t)
+	// Layer 2a: the room-path IncrementUnread is now gated on a
+	// non-nil client whose RoomEpochKey(room, epoch) is non-nil
+	// (see unread-epoch-leak-fix.md). The nil-client harness no
+	// longer exercises the live-increment path, so attach a real
+	// client and seed the epoch key for the test message's
+	// (room, epoch=0 zero-value). This preserves this test's
+	// original invariant — a live (non-replay) message still
+	// increments unread, replayed sync_batch rows do not.
+	// userID = "alice" matches m.From so the unrelated
+	// notification/decrypt branch is skipped (self-message); the
+	// unread gate itself is sender-independent.
+	c := client.New(client.Config{DeviceID: "dev_unread_replay"})
+	client.SetUserIDForTesting(c, "alice")
+	client.SetEpochKeyForTesting(c, "room_support", 0, []byte{1})
+	a.client = c
 
 	batchRaw := mustJSONRaw(t, protocol.SyncBatch{
 		Type: "sync_batch",
