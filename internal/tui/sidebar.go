@@ -20,14 +20,14 @@ var (
 
 	sidebarFocusedStyle = lipgloss.NewStyle().
 				BorderStyle(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#7C3AED"))
+				BorderForeground(lipgloss.Color("#875FFF"))
 
 	sidebarHeaderStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("#64748B"))
 
 	unreadStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7C3AED")).
+			Foreground(lipgloss.Color("#875FFF")).
 			Bold(true)
 
 	// Presence dots — color encodes the user's locked-set status
@@ -47,7 +47,7 @@ var (
 
 	// Preview-pane placeholder styles. Used by buildPreviewPlaceholder
 	// when no image is selected.
-	previewFrameStyleFocused   = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED"))
+	previewFrameStyleFocused   = lipgloss.NewStyle().Foreground(lipgloss.Color("#875FFF"))
 	previewFrameStyleUnfocused = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B"))
 	previewBadgeBorderStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B"))
 	previewTitleStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B"))

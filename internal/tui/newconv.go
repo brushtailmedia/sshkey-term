@@ -11,7 +11,7 @@ import (
 var (
 	dialogStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#7C3AED")).
+			BorderForeground(lipgloss.Color("#875FFF")).
 			Padding(1, 2)
 
 	checkStyle = lipgloss.NewStyle().

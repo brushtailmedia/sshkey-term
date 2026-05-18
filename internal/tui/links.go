@@ -11,7 +11,7 @@ var (
 	urlRegex = regexp.MustCompile(`https?://[^\s<>"{}|\\^` + "`" + `\[\]]+`)
 
 	linkStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#7C3AED")).
+		Foreground(lipgloss.Color("#875FFF")).
 		Underline(true)
 )
 

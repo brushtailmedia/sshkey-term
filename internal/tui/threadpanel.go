@@ -11,7 +11,7 @@ import (
 
 var threadPanelStyle = lipgloss.NewStyle().
 	BorderStyle(lipgloss.RoundedBorder()).
-	BorderForeground(lipgloss.Color("#7C3AED"))
+	BorderForeground(lipgloss.Color("#875FFF"))
 
 // ThreadPanelModel shows a threaded view — a root message and all replies to it.
 type ThreadPanelModel struct {

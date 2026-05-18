@@ -36,15 +36,15 @@ var (
 			Italic(true)
 
 	reactionStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7C3AED"))
+			Foreground(lipgloss.Color("#875FFF"))
 
 	mentionStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7C3AED")).
+			Foreground(lipgloss.Color("#875FFF")).
 			Bold(true)
 
 	mentionBorder = lipgloss.NewStyle().
 			BorderStyle(lipgloss.Border{Left: "▐"}).
-			BorderForeground(lipgloss.Color("#7C3AED"))
+			BorderForeground(lipgloss.Color("#875FFF"))
 
 	messagesPanelStyle = lipgloss.NewStyle().
 				BorderStyle(lipgloss.RoundedBorder()).
@@ -52,7 +52,7 @@ var (
 
 	messagesFocusedStyle = lipgloss.NewStyle().
 				BorderStyle(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#7C3AED"))
+				BorderForeground(lipgloss.Color("#875FFF"))
 
 	selectedMsgStyle = lipgloss.NewStyle().
 				Background(lipgloss.Color("#1E1E2E"))

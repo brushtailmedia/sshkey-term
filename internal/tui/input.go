@@ -19,7 +19,7 @@ var (
 
 	inputFocusedStyle = lipgloss.NewStyle().
 				BorderStyle(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#7C3AED")).
+				BorderForeground(lipgloss.Color("#875FFF")).
 				Padding(0, 1)
 )
 
@@ -85,7 +85,7 @@ func NewInput() InputModel {
 	ti.Focus()
 	ti.CharLimit = 16000 // under 16KB
 	ti.Prompt = "> "
-	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED"))
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#875FFF"))
 	return InputModel{
 		textInput: ti,
 	}

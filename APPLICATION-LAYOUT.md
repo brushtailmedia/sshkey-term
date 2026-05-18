@@ -1396,7 +1396,7 @@ Text and backgrounds use the terminal default so the app adapts to the user's sc
 ### Palette
 
 ```
-Brand accent:     #7C3AED  (violet)
+Brand accent:     #875FFF  (violet)
 Success/verified: #22C55E  (green)
 Warning:          #F59E0B  (amber)
 Error/danger:     #EF4444  (red)
@@ -1421,11 +1421,11 @@ Background:       terminal default
 | `★` sidebar admin marker (Phase 14) | muted `#64748B` | faint |
 | `★` info-panel admin marker (Phase 14) | muted `#64748B` | faint |
 | **Interactive** | | |
-| Selected sidebar item | accent `#7C3AED` | bg highlight |
-| Unread badge `(2)` | accent `#7C3AED` | bold |
-| Reaction counts | accent `#7C3AED` | normal |
-| Input cursor | accent `#7C3AED` | |
-| Pinned indicator `📌` | accent `#7C3AED` | |
+| Selected sidebar item | accent `#875FFF` | bg highlight |
+| Unread badge `(2)` | accent `#875FFF` | bold |
+| Reaction counts | accent `#875FFF` | normal |
+| Input cursor | accent `#875FFF` | |
+| Pinned indicator `📌` | accent `#875FFF` | |
 | **Status** | | |
 | Online dot `●` | green `#22C55E` | |
 | Offline dot `○` | muted `#64748B` | |

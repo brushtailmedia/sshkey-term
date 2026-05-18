@@ -16,7 +16,7 @@ import (
 var (
 	searchHeaderStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("#7C3AED"))
+				Foreground(lipgloss.Color("#875FFF"))
 
 	searchResultStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#64748B"))
@@ -43,7 +43,7 @@ func NewSearch() SearchModel {
 	ti := textinput.New()
 	ti.Placeholder = "Search messages..."
 	ti.Prompt = "> "
-	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED"))
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#875FFF"))
 	return SearchModel{input: ti}
 }
 

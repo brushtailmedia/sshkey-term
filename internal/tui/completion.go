@@ -9,7 +9,7 @@ import (
 var (
 	completionStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#7C3AED")).
+			BorderForeground(lipgloss.Color("#875FFF")).
 			Padding(0, 1)
 
 	// Selection highlight used by every popup / modal / overlay that

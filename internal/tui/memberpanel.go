@@ -17,7 +17,7 @@ var (
 
 	memberPanelFocusedStyle = lipgloss.NewStyle().
 				BorderStyle(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#7C3AED"))
+				BorderForeground(lipgloss.Color("#875FFF"))
 )
 
 // MemberPanelModel manages the persistent right-side member panel.

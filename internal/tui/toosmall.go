@@ -36,7 +36,7 @@ func renderTerminalTooSmall(width, height int) string {
 		height = 1
 	}
 
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7C3AED"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#875FFF"))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#64748B"))
 
 	// Lines we'd ideally show. Each is a logical line; we pick a

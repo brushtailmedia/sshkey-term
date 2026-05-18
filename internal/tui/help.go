@@ -10,12 +10,12 @@ import (
 var (
 	helpStyle = lipgloss.NewStyle().
 			BorderStyle(lipgloss.DoubleBorder()).
-			BorderForeground(lipgloss.Color("#7C3AED")).
+			BorderForeground(lipgloss.Color("#875FFF")).
 			Padding(1, 2)
 
 	helpHeaderStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#7C3AED"))
+			Foreground(lipgloss.Color("#875FFF"))
 
 	helpKeyStyle = lipgloss.NewStyle().
 			Bold(true)

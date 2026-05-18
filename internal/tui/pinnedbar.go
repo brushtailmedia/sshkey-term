@@ -16,7 +16,7 @@ import (
 // the cursor row faster — same rationale that originally motivated
 // the purple style.
 var pinnedSelectedStyle = lipgloss.NewStyle().
-	Background(lipgloss.Color("#7C3AED")).
+	Background(lipgloss.Color("#875FFF")).
 	Foreground(lipgloss.Color("#FFFFFF"))
 
 // PinnedMessage holds a pin with preview info.
