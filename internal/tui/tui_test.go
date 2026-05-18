@@ -39,16 +39,16 @@ func TestMouseLayoutHitTest(t *testing.T) {
 		SidebarX0: 0, SidebarX1: 22,
 		SidebarY0: 0, SidebarY1: 30,
 		SidebarWidth: 20,
-		MessagesX0: 22, MessagesX1: 80,
+		MessagesX0:   22, MessagesX1: 80,
 		MessagesY0: 0, MessagesY1: 25,
 		MessagesWidth: 56,
-		InputX0: 22, InputX1: 80,
+		InputX0:       22, InputX1: 80,
 		InputY0: 25, InputY1: 30,
 		MemberX0: 81, MemberX1: 100,
 		MemberY0: 0, MemberY1: 30,
 		MemberWidth: 18,
-		StatusY: 31,
-		Height:  32,
+		StatusY:     31,
+		Height:      32,
 	}
 
 	tests := []struct {
@@ -187,14 +187,52 @@ func TestTabCompletion(t *testing.T) {
 	if comp == nil {
 		t.Fatal("no completion for /re")
 	}
+	foundRename := false
 	foundReply := false
+	foundReact := false
 	for _, item := range comp.items {
+		if item.Display == "/rename" {
+			foundRename = true
+		}
 		if item.Display == "/reply" {
 			foundReply = true
 		}
+		if item.Display == "/react" {
+			foundReact = true
+		}
 	}
-	if !foundReply {
-		t.Error("/reply not found")
+	if !foundRename {
+		t.Error("/rename not found")
+	}
+	if foundReply {
+		t.Error("/reply should not be offered as slash completion")
+	}
+	if foundReact {
+		t.Error("/react should not be offered as slash completion")
+	}
+
+	comp = Complete("/p", 2, nil)
+	if comp == nil {
+		t.Fatal("no completion for /p")
+	}
+	for _, item := range comp.items {
+		if item.Display == "/pin" {
+			t.Error("/pin should not be offered as slash completion")
+		}
+	}
+
+	comp = Complete("/?", 2, nil)
+	if comp == nil {
+		t.Fatal("no completion for /?")
+	}
+	foundQHelp := false
+	for _, item := range comp.items {
+		if item.Display == "/?" {
+			foundQHelp = true
+		}
+	}
+	if !foundQHelp {
+		t.Error("/? not found")
 	}
 
 	comp = Complete("@", 1, members)

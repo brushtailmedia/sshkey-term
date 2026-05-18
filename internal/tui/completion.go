@@ -186,23 +186,21 @@ func completeMentions(prefix string, members []MemberEntry) *CompletionModel {
 
 func completeCommands(prefix string) *CompletionModel {
 	commands := []CompletionItem{
-		{Text: "/reply ", Display: "/reply", Description: "reply to message"},
-		{Text: "/react ", Display: "/react", Description: "add reaction"},
-		{Text: "/pin", Display: "/pin", Description: "pin message"},
 		{Text: "/delete", Display: "/delete", Description: "delete message"},
-		{Text: "/rename ", Display: "/rename", Description: "rename group (admin)"},
+		{Text: "/rename ", Display: "/rename", Description: "rename group DM (admin)"},
 		{Text: "/upload ", Display: "/upload", Description: "upload file"},
 		{Text: "/verify ", Display: "/verify", Description: "verify user"},
 		{Text: "/unverify ", Display: "/unverify", Description: "remove verification"},
 		{Text: "/whois ", Display: "/whois", Description: "show user's fingerprint + verified state"},
 		{Text: "/mute", Display: "/mute", Description: "toggle mute"},
 		{Text: "/search ", Display: "/search", Description: "search messages"},
-		{Text: "/leave", Display: "/leave", Description: "leave room or group"},
+		{Text: "/leave", Display: "/leave", Description: "leave room or group DM"},
 		{Text: "/settings", Display: "/settings", Description: "open settings"},
 		{Text: "/setstatus ", Display: "/setstatus", Description: "set status: available / away / busy"},
 		{Text: "/pending", Display: "/pending", Description: "pending keys (admin)"},
 		{Text: "/mykey", Display: "/mykey", Description: "copy public key"},
 		{Text: "/help", Display: "/help", Description: "show help"},
+		{Text: "/?", Display: "/?", Description: "show help"},
 		// Phase 14 admin verbs
 		{Text: "/add ", Display: "/add", Description: "add member (admin)"},
 		{Text: "/kick ", Display: "/kick", Description: "remove member (admin)"},
@@ -216,13 +214,13 @@ func completeCommands(prefix string) *CompletionModel {
 		{Text: "/whoami", Display: "/whoami", Description: "show your role"},
 		{Text: "/info", Display: "/info", Description: "open info panel"},
 		{Text: "/groupinfo", Display: "/groupinfo", Description: "group info panel"},
-		{Text: "/audit", Display: "/audit", Description: "recent admin actions"},
+		{Text: "/audit ", Display: "/audit", Description: "recent admin actions [N]"},
 		{Text: "/undo", Display: "/undo", Description: "revert last kick (30s)"},
 		// Phase 14 creation
 		{Text: "/groupcreate ", Display: "/groupcreate", Description: "create group DM"},
 		{Text: "/dmcreate ", Display: "/dmcreate", Description: "create 1:1 DM"},
 		// Phase 18 topic (read-only; rooms only)
-		{Text: "/topic ", Display: "/topic", Description: "show or set room topic (admin)"},
+		{Text: "/topic ", Display: "/topic", Description: "show room topic / set topic (admin, rooms)"},
 	}
 
 	query := strings.ToLower(prefix)

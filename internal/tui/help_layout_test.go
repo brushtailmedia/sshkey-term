@@ -45,3 +45,21 @@ func TestHelpView_AdminCommandVisibility(t *testing.T) {
 		}
 	}
 }
+
+func TestHelpView_ShowsSlashParityCommands(t *testing.T) {
+	var h HelpModel
+	h.SetContext(true)
+	h.Toggle()
+	view := h.View(120, 220)
+
+	for _, want := range []string{
+		"/groupinfo",
+		"/groupcreate",
+		"/dmcreate",
+		"/rename <name>",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("help view missing %s, got:\n%s", want, view)
+		}
+	}
+}

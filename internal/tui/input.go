@@ -477,10 +477,6 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 	}
 
 	switch cmd {
-	case "/typing":
-		if c != nil {
-			c.SendTyping(room, group, dm)
-		}
 	case "/leave":
 		// Route to the app — it will show the confirmation dialog and
 		// send the leave_group / leave_room message on confirm. /leave

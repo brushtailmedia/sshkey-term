@@ -242,7 +242,10 @@ func (h HelpModel) renderContent(width int) string {
 		{cmd: "/role <user>", desc: "show a user's role"},
 		{cmd: "/whoami", desc: "show your own role"},
 		{cmd: "/info", desc: "open info panel"},
+		{cmd: "/groupinfo", desc: "open group info panel (alias)"},
 		{cmd: "/audit [N]", desc: "recent admin actions"},
+		{cmd: "/groupcreate \"name\" <@users...>", desc: "create group DM"},
+		{cmd: "/dmcreate <@user>", desc: "create 1:1 DM"},
 		// Phase 14 admin verbs (group-context, admin-only)
 		{cmd: "/add <user>", desc: "add member to group", adminOnly: true},
 		{cmd: "/kick <user>", desc: "remove member from group", adminOnly: true},
