@@ -4,6 +4,8 @@ Expect breaking changes until v1.0.
 
 Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat) -- a private messaging server over SSH with E2E encryption.
 
+![sshkey-term demo](.github/images/sshkey-term.gif)
+
 ## Features
 
 - End-to-end encrypted rooms, 1:1 DMs, and group DMs (AES-256-GCM, X25519 key wrapping)
