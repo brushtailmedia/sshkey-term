@@ -4,7 +4,7 @@ Expect breaking changes until v1.0.
 
 Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat) -- a private messaging server over SSH with E2E encryption.
 
-![sshkey-term demo](.github/images/sshkey-term.gif)
+![sshkey-term demo](.github/images/readme.gif)
 
 ## Features
 
