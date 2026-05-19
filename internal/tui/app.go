@@ -257,18 +257,18 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		navTimeoutMs = 0
 	}
 
-	return App{
-		cfg:             cfg,
-		sidebar:         NewSidebar(),
-		messages:        NewMessages(),
-		input:           NewInput(),
-		statusBar:       NewStatusBar(),
-		search:          NewSearch(),
-		newConv:         NewNewConv(),
-		emojiPicker:     NewEmojiPicker(),
-		quickSwitch:     NewQuickSwitch(),
-		memberPanel:     NewMemberPanel(),
-		settings:        NewSettings(),
+	a := App{
+		cfg:         cfg,
+		sidebar:     NewSidebar(),
+		messages:    NewMessages(),
+		input:       NewInput(),
+		statusBar:   NewStatusBar(),
+		search:      NewSearch(),
+		newConv:     NewNewConv(),
+		emojiPicker: NewEmojiPicker(),
+		quickSwitch: NewQuickSwitch(),
+		memberPanel: NewMemberPanel(),
+		settings:    NewSettings(),
 		// AddServer's scanDirsFn captures appCfg + configDir so the
 		// "Existing Ed25519 keys" list reflects the LIVE list of
 		// configured servers at scan time — every dialog open / rescan
@@ -295,7 +295,7 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 			}
 			return dirs
 		}),
-		retireConfirm: NewRetireConfirm(),
+		retireConfirm:   NewRetireConfirm(),
 		deviceRevoked:   NewDeviceRevoked(),
 		deviceMgr:       NewDeviceMgr(),
 		saveAttachment:  NewSaveAttachment(),
@@ -312,6 +312,14 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		focus:           FocusInput,
 		navModeTimeout:  time.Duration(navTimeoutMs) * time.Millisecond,
 	}
+	// Seed the input model's typing-suppression flag from persisted
+	// config so `/typing off` survives a restart. Zero value = false
+	// = enabled, so a fresh or older config with no `typing_disabled`
+	// key defaults to typing-on with no migration. appCfg is
+	// guaranteed non-nil here (already dereferenced above for bell /
+	// muted / showHelpHint).
+	a.input.SetTypingDisabled(appCfg.Notifications.TypingDisabled)
+	return a
 }
 
 func (a App) Init() tea.Cmd {
@@ -1262,6 +1270,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Info panel intercepts keys when visible
 		if a.infoPanel.IsVisible() {
 			var cmd tea.Cmd
+			a.infoPanel.SetViewport(a.width, a.height)
 			a.infoPanel, cmd = a.infoPanel.Update(msg)
 			if !a.infoPanel.IsVisible() {
 				a.focus = FocusInput
@@ -1404,13 +1413,6 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "?":
 			if a.focus != FocusInput {
-				// Phase 14: same context-aware help filter as the
-				// /help slash command path.
-				showAdmin := false
-				if a.messages.group != "" {
-					showAdmin = a.isLocalAdminOfGroup(a.messages.group)
-				}
-				a.help.SetContext(showAdmin)
 				a.help.Toggle()
 				return a, nil
 			}
@@ -4249,18 +4251,55 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		}
 		a.memberPanel.SetPresence(self, online, arg)
 		a.statusBar.SetError("Status set to " + arg)
-	case "/help", "/?":
-		// Phase 14: context-aware /help — show admin commands only
-		// when the local user is an admin of the currently-active
-		// group. In room/DM contexts the admin verbs are hidden
-		// regardless since they're group-only anyway.
-		// /? is an advertised alias (visible in the help panel as
-		// "/help or /?"), routes through the same showAdmin logic.
-		showAdmin := false
-		if sc.Group != "" {
-			showAdmin = a.isLocalAdminOfGroup(sc.Group)
+	case "/typing":
+		// Local UX toggle for typing indicators. THIS IS NOT A
+		// SECURITY CONTROL — the server is authoritative and
+		// independently authorizes every typing relay (sshkey-chat
+		// handleTyping; see typing-relay-authz-hardening). Any client
+		// can speak the protocol, so this flag only governs whether
+		// *our* client emits typing pings and renders received ones.
+		// Persisted to config.toml so the preference survives a
+		// restart, consistent with the other local TUI prefs
+		// (HelpShown, muted, bell).
+		//
+		// Bare `/typing` toggles; `/typing on` / `/typing off` set
+		// explicitly. Anything else is a usage error.
+		if a.appConfig == nil {
+			a.statusBar.SetError("Typing toggle unavailable (no config)")
+			return
 		}
-		a.help.SetContext(showAdmin)
+		arg := strings.ToLower(strings.TrimSpace(sc.Arg))
+		var disabled bool
+		switch arg {
+		case "":
+			disabled = !a.appConfig.Notifications.TypingDisabled
+		case "on":
+			disabled = false
+		case "off":
+			disabled = true
+		default:
+			a.statusBar.SetError("Usage: /typing [on|off]")
+			return
+		}
+		a.appConfig.Notifications.TypingDisabled = disabled
+		a.input.SetTypingDisabled(disabled)
+		if err := config.Save(a.configDir, a.appConfig); err != nil {
+			a.statusBar.SetError("Typing pref not saved: " + err.Error())
+			return
+		}
+		if disabled {
+			a.statusBar.SetError("Typing indicators off")
+		} else {
+			a.statusBar.SetError("Typing indicators on")
+		}
+	case "/help", "/?":
+		// The help panel lists ALL slash commands unconditionally;
+		// admin/context restrictions are labelled in each command's
+		// description, not hidden behind a role/context gate (the
+		// old context-aware showAdminCommands path was removed — see
+		// help.go — so the reference stays complete regardless of
+		// role or active context). /? is an advertised alias
+		// (rendered in the panel as "/help or /?").
 		a.help.Toggle()
 	case "/pending":
 		if a.client == nil {
@@ -4598,7 +4637,11 @@ func (a *App) handleGroupcreateCommand(sc *SlashCommandMsg) {
 	}
 	name, tokens := parseGroupcreateArgs(sc.Arg)
 	if len(tokens) == 0 {
-		a.statusBar.SetError("Usage: /groupcreate [\"name\"] @user [@user ...]")
+		// Bare /groupcreate (no member tokens) → open the in-place
+		// New-Conversation panel (the guided group/DM creator) instead
+		// of erroring. The args form below still acts directly.
+		// missing.md §6.
+		a.openNewConversation()
 		return
 	}
 	var members []string
@@ -4628,7 +4671,13 @@ func (a *App) handleGroupcreateCommand(sc *SlashCommandMsg) {
 // a 1:1 DM via client.CreateDM. The server dedups by pair so running
 // twice for the same target returns the existing row.
 func (a *App) handleDmcreateCommand(sc *SlashCommandMsg) {
-	if a.client == nil || sc.Arg == "" {
+	if a.client == nil {
+		return
+	}
+	if sc.Arg == "" {
+		// Bare /dmcreate → open the in-place New-Conversation panel
+		// (same guided creator; selecting one user = DM). missing.md §6.
+		a.openNewConversation()
 		return
 	}
 	targetID, ok := a.resolveNonMemberByName(sc.Arg)
@@ -5117,9 +5166,17 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			}
 		}
 	case "typing":
-		var m protocol.Typing
-		json.Unmarshal(msg.Raw, &m)
-		a.messages.SetTyping(m.User, m.Room, m.Group, m.DM)
+		// Suppress rendering received typing indicators when the
+		// local `/typing off` preference is set — symmetric with the
+		// send-side gate in input.go. Server still relays (it's
+		// authoritative and unaware of this client-local pref); we
+		// just drop the display. Nil-guard appConfig defensively
+		// (tests may construct App without it; default = show).
+		if a.appConfig == nil || !a.appConfig.Notifications.TypingDisabled {
+			var m protocol.Typing
+			json.Unmarshal(msg.Raw, &m)
+			a.messages.SetTyping(m.User, m.Room, m.Group, m.DM)
+		}
 	case "room_list":
 		// Reconcile the server's active-room list with any locally-archived
 		// rooms. The server drops a room from room_list as soon as the user
@@ -6405,7 +6462,7 @@ func (a App) viewBody() string {
 		return a.pendingPanel.View(a.width)
 	}
 	if a.infoPanel.IsVisible() {
-		return a.infoPanel.View(a.width)
+		return a.infoPanel.ViewWithHeight(a.width, a.height)
 	}
 	if a.settings.IsVisible() {
 		return a.settings.View(a.width, a.height)

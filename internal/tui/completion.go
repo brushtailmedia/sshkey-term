@@ -197,6 +197,7 @@ func completeCommands(prefix string) *CompletionModel {
 		{Text: "/leave", Display: "/leave", Description: "leave room or group DM"},
 		{Text: "/settings", Display: "/settings", Description: "open settings"},
 		{Text: "/setstatus ", Display: "/setstatus", Description: "set status: available / away / busy"},
+		{Text: "/typing ", Display: "/typing", Description: "toggle typing indicators (on/off)"},
 		{Text: "/pending", Display: "/pending", Description: "pending keys (admin)"},
 		{Text: "/mykey", Display: "/mykey", Description: "copy public key"},
 		{Text: "/help", Display: "/help", Description: "show help"},

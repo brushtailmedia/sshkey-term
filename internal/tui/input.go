@@ -37,6 +37,7 @@ type InputModel struct {
 	replyGroup     string           // group context where reply target was selected
 	replyDM        string           // dm context where reply target was selected
 	lastTypingSent time.Time        // throttle typing indicators
+	typingDisabled bool             // /typing off — suppress sending typing indicators (set by App from config; local UX only, server authorizes relay independently)
 	completion     *CompletionModel // active completion popup
 	members        []MemberEntry    // current room/group members for @completion
 	// Phase 14: non-member pool for /add target completion. Populated
@@ -299,7 +300,7 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 	}
 
 	// Send typing indicator (throttled to 1 per second)
-	if c != nil && time.Since(i.lastTypingSent) > time.Second {
+	if c != nil && !i.typingDisabled && time.Since(i.lastTypingSent) > time.Second {
 		text := i.textInput.Value()
 		if len(text) > 0 && !strings.HasPrefix(text, "/") {
 			c.SendTyping(room, group, dm)
@@ -323,6 +324,14 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 // subtracting prompt + cursor + borders + padding from the panel
 // width). Callers should compute it via layoutInputContentWidth in
 // app.go.
+// SetTypingDisabled gates whether keystrokes emit typing indicators.
+// Driven by the /typing command + persisted NotificationConfig
+// .TypingDisabled. Local UX only — the server authorizes the typing
+// relay independently regardless of this.
+func (i *InputModel) SetTypingDisabled(disabled bool) {
+	i.typingDisabled = disabled
+}
+
 func (i *InputModel) SetTextInputWidth(width int) {
 	if width < 1 {
 		width = 1
@@ -510,8 +519,15 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		}
 	case "/mute":
 		// Handled via info panel toggle — just set a flag
-	case "/verify", "/unverify", "/whois", "/search", "/settings", "/help", "/?", "/pending", "/mykey", "/setstatus":
-		// These need to be handled at the app level
+	case "/verify", "/unverify", "/whois", "/search", "/settings", "/help", "/?", "/pending", "/mykey", "/setstatus", "/typing":
+		// These need to be handled at the app level. `/typing` belongs
+		// here (not its own case) because it is the exact analog of
+		// `/setstatus`: app-level, optional arg, valid in any context
+		// (no room/group/dm requirement), and persisted. Without this
+		// the typed command was consumed by the input box but the
+		// switch (no default) left pendingCmd nil, so app.go's
+		// handleSlashCommand "/typing" case was never reached — the
+		// command silently did nothing.
 		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	case "/upload":
 		if arg != "" {
@@ -570,16 +586,15 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		//   /groupcreate @alice @bob @carol
 		// The arg is parsed entirely in the app layer (it needs
 		// the client's display-name → user-ID mapping), so we just
-		// forward the whole remainder. Any context — groups DMs
-		// can be created from anywhere.
-		if arg != "" {
-			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg}
-		}
+		// forward the whole remainder. Bare /groupcreate is also
+		// meaningful: app.go opens the guided New-Conversation panel.
+		// Any context — group DMs can be created from anywhere.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg}
 	case "/dmcreate":
-		// Phase 14 inline 1:1 DM creation. /dmcreate @user.
-		if arg != "" {
-			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg}
-		}
+		// Phase 14 inline 1:1 DM creation. /dmcreate @user acts
+		// directly; bare /dmcreate opens the guided New-Conversation
+		// panel in app.go.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg}
 	case "/topic":
 		// Rooms only — groups have no topics by design, 1:1 DMs have
 		// neither. Two modes:

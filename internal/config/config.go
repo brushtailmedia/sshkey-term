@@ -56,6 +56,7 @@ type NotificationConfig struct {
 	MutedRooms       []string `toml:"muted_rooms"`        // rooms muted via info panel
 	MutedGroups      []string `toml:"muted_groups"`       // group DMs muted via info panel
 	HelpShown        bool     `toml:"help_shown"`         // true after first-time help hint dismissed
+	TypingDisabled   bool     `toml:"typing_disabled"`    // /typing off — suppress sending+showing typing indicators (zero value false = enabled = default; no migration)
 }
 
 type DeviceConfig struct {

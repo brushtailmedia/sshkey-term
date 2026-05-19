@@ -14,13 +14,13 @@ import (
 // dialog can compute the resulting count ("will have N admins")
 // and warn when demoting drops the group to a single admin.
 type DemoteConfirmModel struct {
-	visible       bool
-	group         string
-	groupName     string
-	targetID      string
-	targetName    string
-	adminCount    int // admins BEFORE the demote
-	targetIsSelf  bool
+	visible      bool
+	group        string
+	groupName    string
+	targetID     string
+	targetName   string
+	adminCount   int // admins BEFORE the demote
+	targetIsSelf bool
 }
 
 // DemoteConfirmMsg is emitted on confirm. The app handles it by

@@ -9,7 +9,6 @@ import (
 
 func TestHelpView_ScrollDownChangesVisibleWindow(t *testing.T) {
 	var h HelpModel
-	h.SetContext(true)
 	h.Toggle()
 
 	before := h.View(100, 14)
@@ -23,7 +22,6 @@ func TestHelpView_ScrollDownChangesVisibleWindow(t *testing.T) {
 
 func TestHelpView_ScrollClampsAtTop(t *testing.T) {
 	var h HelpModel
-	h.SetContext(true)
 	h.Toggle()
 
 	h.Update(tea.KeyMsg{Type: tea.KeyUp}, 100, 14)

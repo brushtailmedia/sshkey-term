@@ -454,32 +454,37 @@ func TestInputParser_UndoRequiresGroupContext(t *testing.T) {
 	}
 }
 
-func TestInputParser_GroupcreateDmcreateRouteWithArg(t *testing.T) {
-	i := &InputModel{}
-	i.handleCommand("/groupcreate @alice @bob", nil, "", "", "")
-	sc := i.PendingCommand()
-	if sc == nil || sc.Command != "/groupcreate" || sc.Arg != "@alice @bob" {
-		t.Errorf("groupcreate wrong: %+v", sc)
+func TestInputParser_GroupcreateDmcreateRouteBareAndWithArg(t *testing.T) {
+	cases := []struct {
+		text    string
+		wantCmd string
+		wantArg string
+	}{
+		{"/groupcreate", "/groupcreate", ""},
+		{"/groupcreate @alice @bob", "/groupcreate", "@alice @bob"},
+		{"/dmcreate", "/dmcreate", ""},
+		{"/dmcreate @alice", "/dmcreate", "@alice"},
 	}
-	i.handleCommand("/dmcreate @alice", nil, "", "", "")
-	sc = i.PendingCommand()
-	if sc == nil || sc.Command != "/dmcreate" || sc.Arg != "@alice" {
-		t.Errorf("dmcreate wrong: %+v", sc)
+	for _, tc := range cases {
+		i := &InputModel{}
+		i.handleCommand(tc.text, nil, "", "", "")
+		sc := i.PendingCommand()
+		if sc == nil || sc.Command != tc.wantCmd || sc.Arg != tc.wantArg {
+			t.Errorf("%q routed wrong: got %+v, want command=%q arg=%q", tc.text, sc, tc.wantCmd, tc.wantArg)
+		}
 	}
 }
 
 // --- Info panel A/K/P/X keybindings ---
 
-func TestInfoPanel_AKPXEmitAdminMemberActionMsgs(t *testing.T) {
-	cases := []struct {
-		key    string
-		action string
-	}{
-		{"K", "admin_kick"},
-		{"p", "admin_promote"},
-		{"x", "admin_demote"},
-	}
-	for _, tc := range cases {
+// A/K/P/X admin keys are DISABLED 2026-05-19 — they were mis-wired
+// (K/x froze the app behind the modal info panel; a/p were no-ops).
+// They are now inert no-ops in the group info panel pending the locked
+// picker-hand-off rework (a/r/p/x → close panel + open the verb's
+// picker). See missing.md §2a. When the picker lands, replace this with
+// the re-wired behaviour.
+func TestInfoPanel_AKPXAdminKeysDisabledInGroup(t *testing.T) {
+	for _, key := range []string{"a", "K", "p", "x"} {
 		i := InfoPanelModel{
 			visible: true,
 			isGroup: true,
@@ -489,21 +494,9 @@ func TestInfoPanel_AKPXEmitAdminMemberActionMsgs(t *testing.T) {
 			},
 			cursor: 1, // bob
 		}
-		_, cmd := i.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.key)})
-		if cmd == nil {
-			t.Errorf("%s should emit MemberActionMsg", tc.key)
-			continue
-		}
-		action, ok := cmd().(MemberActionMsg)
-		if !ok {
-			t.Errorf("%s expected MemberActionMsg, got %T", tc.key, cmd())
-			continue
-		}
-		if action.Action != tc.action {
-			t.Errorf("%s action = %q, want %q", tc.key, action.Action, tc.action)
-		}
-		if action.User != "usr_bob" {
-			t.Errorf("%s user = %q, want usr_bob", tc.key, action.User)
+		_, cmd := i.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		if cmd != nil {
+			t.Errorf("%q must be an inert no-op in the group info panel (admin keys disabled pending picker rework, missing.md §2a); emitted %T", key, cmd())
 		}
 	}
 }

@@ -18,12 +18,12 @@ import (
 // subset). Same model + rendering for both — /admins is just a
 // pre-filtered view.
 type MembersOverlayModel struct {
-	visible    bool
-	groupID    string
-	groupName  string
-	mode       string // "members" or "admins"
-	rows       []memberRow
-	cursor     int
+	visible     bool
+	groupID     string
+	groupName   string
+	mode        string // "members" or "admins"
+	rows        []memberRow
+	cursor      int
 	resolveName func(string) string
 }
 

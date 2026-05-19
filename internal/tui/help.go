@@ -24,18 +24,18 @@ var (
 			Foreground(lipgloss.Color("#64748B"))
 )
 
-// HelpModel manages the help overlay. Phase 14 added context-aware
-// rendering: the showAdminCommands flag controls whether in-group
-// admin verbs (/add, /kick, /promote, /demote, /transfer, /rename)
-// appear in the slash-command list. Set by the App based on the
-// local user's admin status in the currently-active group. When the
-// user is not an admin (or not in a group context), admin verbs are
-// hidden so the help list doesn't advertise commands the server
-// would reject anyway.
+// HelpModel manages the help overlay. The slash-command list is a
+// complete command *reference*: every command is always shown
+// regardless of role/context. Permission/context constraints are
+// communicated in the description (admin-only verbs are labelled
+// "(group admin only)"), never by hiding the entry — server-side
+// checks remain the real enforcement. (The earlier Phase-14
+// role-gating via a showAdminCommands flag was removed; see
+// missing.md §1 — a reference must not hide commands. The group info
+// panel, by contrast, *is* role-gated as a context affordance.)
 type HelpModel struct {
-	visible           bool
-	showAdminCommands bool
-	scroll            int
+	visible bool
+	scroll  int
 }
 
 type helpRow struct {
@@ -46,13 +46,6 @@ type helpRow struct {
 type helpSection struct {
 	title string
 	rows  []helpRow
-}
-
-// SetContext updates the help overlay's context-awareness flags.
-// Called from app.go before Show/Toggle so the help list reflects
-// the current group state.
-func (h *HelpModel) SetContext(showAdminCommands bool) {
-	h.showAdminCommands = showAdminCommands
 }
 
 func (h *HelpModel) Toggle() {
@@ -212,11 +205,10 @@ func (h HelpModel) renderContent(width int) string {
 	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftCol, spaces(colGap), rightCol))
 	b.WriteString("\n")
 
-	// Slash commands. Phase 14: admin-gated verbs are included only
-	// when showAdminCommands is true (local user is an admin of the
-	// currently-active group). Status commands that don't mutate
-	// state (/members, /admins, /role, /whoami, /info, /audit)
-	// are always shown.
+	// Slash commands — a complete reference: ALL commands are always
+	// listed regardless of role/context (missing.md §1). Admin-only
+	// verbs are *labelled* "(group admin only)" below, never hidden;
+	// server-side checks remain the real enforcement.
 	type cmdEntry struct {
 		cmd, desc string
 		adminOnly bool
@@ -232,6 +224,7 @@ func (h HelpModel) renderContent(width int) string {
 		{cmd: "/topic [text]", desc: "show or set room topic — set is admin only (rooms only)"},
 		{cmd: "/settings", desc: "open settings"},
 		{cmd: "/setstatus [status]", desc: "set status — bare opens picker, or pass: available / away / busy"},
+		{cmd: "/typing [on|off]", desc: "toggle typing indicators — local, persisted, default on"},
 		{cmd: "/unverify <user>", desc: "remove verification"},
 		{cmd: "/whois <user>", desc: "open user profile (display name, ID, fingerprint, key, verified, role)"},
 		{cmd: "/pending", desc: "pending keys (admin)"},
@@ -244,8 +237,8 @@ func (h HelpModel) renderContent(width int) string {
 		{cmd: "/info", desc: "open info panel"},
 		{cmd: "/groupinfo", desc: "open group info panel (alias)"},
 		{cmd: "/audit [N]", desc: "recent admin actions"},
-		{cmd: "/groupcreate \"name\" <@users...>", desc: "create group DM"},
-		{cmd: "/dmcreate <@user>", desc: "create 1:1 DM"},
+		{cmd: "/groupcreate [\"name\"] [@users...]", desc: "create group DM — bare opens the new-conversation panel"},
+		{cmd: "/dmcreate [@user]", desc: "create 1:1 DM — bare opens the new-conversation panel"},
 		// Phase 14 admin verbs (group-context, admin-only)
 		{cmd: "/add <user>", desc: "add member to group", adminOnly: true},
 		{cmd: "/kick <user>", desc: "remove member from group", adminOnly: true},
@@ -258,9 +251,6 @@ func (h HelpModel) renderContent(width int) string {
 
 	cmdWidth := 0
 	for _, c := range commands {
-		if c.adminOnly && !h.showAdminCommands {
-			continue
-		}
 		if w := visibleWidth(c.cmd); w > cmdWidth {
 			cmdWidth = w
 		}
@@ -276,10 +266,11 @@ func (h HelpModel) renderContent(width int) string {
 	b.WriteString("  " + strings.Repeat("─", maxInt(24, contentWidth-4)))
 	b.WriteString("\n")
 	for _, c := range commands {
-		if c.adminOnly && !h.showAdminCommands {
-			continue
+		desc := c.desc
+		if c.adminOnly {
+			desc += " (group admin only)"
 		}
-		b.WriteString("  " + helpKeyStyle.Render(padRight(c.cmd, cmdWidth)) + " " + helpDescStyle.Render(c.desc) + "\n")
+		b.WriteString("  " + helpKeyStyle.Render(padRight(c.cmd, cmdWidth)) + " " + helpDescStyle.Render(desc) + "\n")
 	}
 
 	b.WriteString("\n")

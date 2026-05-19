@@ -21,12 +21,12 @@ import (
 // Two-phase flow:
 //
 //  1. phaseEdit   — user edits the destination path (pre-filled with the
-//                   platform default + the sender's filename, sanitized).
-//                   Enter submits; Esc cancels.
+//     platform default + the sender's filename, sanitized).
+//     Enter submits; Esc cancels.
 //
 //  2. phaseExists — the submitted path already points at an existing
-//                   file. User picks: overwrite / auto-rename / edit the
-//                   path again / cancel.
+//     file. User picks: overwrite / auto-rename / edit the
+//     path again / cancel.
 //
 // The model never touches the filesystem directly beyond a non-destructive
 // os.Stat. The actual copy is delegated to the App via SaveAttachmentDoMsg

@@ -11,8 +11,8 @@ var (
 	urlRegex = regexp.MustCompile(`https?://[^\s<>"{}|\\^` + "`" + `\[\]]+`)
 
 	linkStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#875FFF")).
-		Underline(true)
+			Foreground(lipgloss.Color("#875FFF")).
+			Underline(true)
 )
 
 // highlightLinks detects URLs in text and renders them with link styling.

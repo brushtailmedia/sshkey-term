@@ -149,16 +149,17 @@ func (r RetireConfirmModel) Update(msg tea.KeyMsg) (RetireConfirmModel, tea.Cmd)
 // (typing the phrase + Enter) actually submits.
 //
 // Layout:
-//   Y=0: border top
-//   Y=1: padding top
-//   Y=2: header " ⚠ Retire Account"
-//   Y=3: blank
-//   Y=4..9: consequence bullets (6 lines) + blank (Y=10)
-//   Y=11: "Reason:" label
-//   Y=12..17: 3 reasons × 2 lines (radio + hint) = 6 lines
-//   Y=18: blank
-//   Y=19: phrase label
-//   Y=20: phrase input
+//
+//	Y=0: border top
+//	Y=1: padding top
+//	Y=2: header " ⚠ Retire Account"
+//	Y=3: blank
+//	Y=4..9: consequence bullets (6 lines) + blank (Y=10)
+//	Y=11: "Reason:" label
+//	Y=12..17: 3 reasons × 2 lines (radio + hint) = 6 lines
+//	Y=18: blank
+//	Y=19: phrase label
+//	Y=20: phrase input
 func (r RetireConfirmModel) HandleMouse(msg tea.MouseMsg) (RetireConfirmModel, tea.Cmd) {
 	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionRelease {
 		return r, nil

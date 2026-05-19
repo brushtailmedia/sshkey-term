@@ -16,8 +16,8 @@ var threadPanelStyle = lipgloss.NewStyle().
 // ThreadPanelModel shows a threaded view — a root message and all replies to it.
 type ThreadPanelModel struct {
 	visible  bool
-	rootID   string            // message ID of the thread root
-	messages []DisplayMessage  // root + replies in chronological order
+	rootID   string           // message ID of the thread root
+	messages []DisplayMessage // root + replies in chronological order
 	cursor   int
 }
 

@@ -8,10 +8,10 @@ import (
 
 // BellConfig controls when the terminal bell fires.
 type BellConfig struct {
-	Mode          string            // "all", "mentions", "dms", "off"
-	MuteRooms     map[string]bool   // room names where bell is silenced
-	MuteDMs       bool              // silence bell for all DMs
-	MuteMentions  bool              // silence bell for @mentions
+	Mode         string          // "all", "mentions", "dms", "off"
+	MuteRooms    map[string]bool // room names where bell is silenced
+	MuteDMs      bool            // silence bell for all DMs
+	MuteMentions bool            // silence bell for @mentions
 }
 
 // NewBellConfig creates a BellConfig from the notification config.

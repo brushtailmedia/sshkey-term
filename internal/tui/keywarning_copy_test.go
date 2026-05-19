@@ -46,17 +46,17 @@ func TestKeyWarningModal_NoRotationFraming(t *testing.T) {
 	}
 
 	for _, required := range []string{
-		"Keys do not rotate",      // explicit invariant statement
-		"compromised server",      // attack class 1
-		"server bug",              // attack class 2
-		"tampering",               // attack class 3
-		"different user ID",       // points at the legitimate new-key flow
-		"Old:",                    // fingerprint labels
-		"New:",                    // fingerprint labels
-		"SHA256:old",              // old fingerprint rendered
-		"SHA256:new",              // new fingerprint rendered
-		"[a] Accept new key",      // choice 1 still present
-		"[d] Disconnect",          // choice 2 still present
+		"Keys do not rotate", // explicit invariant statement
+		"compromised server", // attack class 1
+		"server bug",         // attack class 2
+		"tampering",          // attack class 3
+		"different user ID",  // points at the legitimate new-key flow
+		"Old:",               // fingerprint labels
+		"New:",               // fingerprint labels
+		"SHA256:old",         // old fingerprint rendered
+		"SHA256:new",         // new fingerprint rendered
+		"[a] Accept new key", // choice 1 still present
+		"[d] Disconnect",     // choice 2 still present
 	} {
 		if !strings.Contains(out, required) {
 			t.Errorf("modal copy missing required text %q:\n%s", required, out)
@@ -106,9 +106,9 @@ func TestKeyWarningAccept_StatusBarIncludesVerifyNudge(t *testing.T) {
 
 	msg := a.statusBar.errorMsg
 	for _, required := range []string{
-		"Alice",                           // resolves display name, not raw userID
-		"/verify",                         // nudge points at the verify command
-		"safety number",                   // explains what /verify will do
+		"Alice",         // resolves display name, not raw userID
+		"/verify",       // nudge points at the verify command
+		"safety number", // explains what /verify will do
 	} {
 		if !strings.Contains(msg, required) {
 			t.Errorf("status bar missing %q; got %q", required, msg)

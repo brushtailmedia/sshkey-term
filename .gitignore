@@ -59,5 +59,9 @@ connectfailed-classification-fix.md
 fix-server-switching.md
 fix-cross-server-db-isolation.md
 fix-member-panel-refetch-storm.md
+group-infopanel-picker-rework.md
+member-panel-add-to-group.md
+slash-command-argless-model.md
+shared-picker-widget.md
 release-notes.md
 missing.md

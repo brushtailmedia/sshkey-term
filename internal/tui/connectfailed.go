@@ -27,7 +27,7 @@ func (c *ConnectFailedModel) Show(errMsg, fingerprint, pubKey string) {
 	c.copied = false
 }
 
-func (c *ConnectFailedModel) Hide()          { c.visible = false }
+func (c *ConnectFailedModel) Hide()           { c.visible = false }
 func (c *ConnectFailedModel) IsVisible() bool { return c.visible }
 
 // Mouse clicks on this screen are intentionally NOT routed to

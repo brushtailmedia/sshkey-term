@@ -26,6 +26,9 @@ type InfoPanelModel struct {
 	retired         bool // true when the room has been retired by an admin (Phase 12)
 	muted           bool
 	cursor          int
+	scroll          int                 // panel-local scroll offset (line-based viewport)
+	viewportWidth   int                 // terminal width at last key-handling pass
+	viewportHeight  int                 // terminal height at last key-handling pass
 	resolveRoomName func(string) string // room nanoid → display name
 
 	// User-profile mode — set by ShowUser when the panel is opened
@@ -109,6 +112,7 @@ func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[stri
 	i.isDM = false
 	i.isUser = false // clear the user-profile mode flag so a prior ShowUser doesn't leak through
 	i.cursor = 0
+	i.scroll = 0
 	i.left = false
 	i.retired = false
 	i.topic = "" // Phase 18: populated below via DisplayRoomTopic
@@ -170,6 +174,7 @@ func (i *InfoPanelModel) ShowGroup(groupID string, c *client.Client, online map[
 	i.isDM = false
 	i.isUser = false // clear the user-profile mode flag so a prior ShowUser doesn't leak through
 	i.cursor = 0
+	i.scroll = 0
 	i.left = false
 	i.retired = false
 	i.topic = ""
@@ -227,6 +232,7 @@ func (i *InfoPanelModel) ShowDM(dmID string, c *client.Client, online map[string
 	i.isDM = true
 	i.isUser = false // clear the user-profile mode flag so a prior ShowUser doesn't leak through
 	i.cursor = 0
+	i.scroll = 0
 	// 1:1 DMs do not have a "left / read-only" intermediate state in the
 	// TUI — /delete is the only exit path and it removes the sidebar
 	// entry entirely. If we somehow end up rendering a DM whose local
@@ -303,6 +309,7 @@ func (i *InfoPanelModel) ShowUser(userID string, c *client.Client, online map[st
 	i.isGroup = false
 	i.isDM = false
 	i.cursor = 0
+	i.scroll = 0
 	i.members = nil
 	i.topic = ""
 	i.name = ""
@@ -411,6 +418,17 @@ func (i *InfoPanelModel) ToggleMute() {
 	i.muted = !i.muted
 }
 
+// SetViewport snapshots the active terminal dimensions for keyboard-local
+// paging behavior (pgup/pgdn/home/end) while the info panel is open.
+func (i *InfoPanelModel) SetViewport(width, height int) {
+	if width > 0 {
+		i.viewportWidth = width
+	}
+	if height > 0 {
+		i.viewportHeight = height
+	}
+}
+
 func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 	// User-profile mode has its own action set (m/v/f, no list nav,
 	// no admin keys). Esc-close stays uniform with the other modes.
@@ -418,6 +436,28 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			i.Hide()
+			return i, nil
+		case "up", "k":
+			i.scroll--
+			i.clampScrollForUser()
+			return i, nil
+		case "down", "j":
+			i.scroll++
+			i.clampScrollForUser()
+			return i, nil
+		case "pageup", "pgup":
+			i.scroll -= i.pageRows()
+			i.clampScrollForUser()
+			return i, nil
+		case "pagedown", "pgdown":
+			i.scroll += i.pageRows()
+			i.clampScrollForUser()
+			return i, nil
+		case "home":
+			i.scroll = 0
+			return i, nil
+		case "end":
+			i.scroll = i.maxScrollForUser()
 			return i, nil
 		case "m":
 			// Message: hidden when self, retired, or already-in-
@@ -455,6 +495,7 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 		return i, nil
 	}
 
+	movedCursor := false
 	switch msg.String() {
 	case "esc":
 		i.Hide()
@@ -462,10 +503,46 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 	case "up", "k":
 		if i.cursor > 0 {
 			i.cursor--
+			movedCursor = true
 		}
 	case "down", "j":
 		if i.cursor < len(i.members)-1 {
 			i.cursor++
+			movedCursor = true
+		}
+	case "pageup", "pgup":
+		if len(i.members) > 0 {
+			step := i.pageRows()
+			if step < 1 {
+				step = 1
+			}
+			i.cursor -= step
+			if i.cursor < 0 {
+				i.cursor = 0
+			}
+			movedCursor = true
+		}
+	case "pagedown", "pgdown":
+		if len(i.members) > 0 {
+			step := i.pageRows()
+			if step < 1 {
+				step = 1
+			}
+			i.cursor += step
+			if i.cursor > len(i.members)-1 {
+				i.cursor = len(i.members) - 1
+			}
+			movedCursor = true
+		}
+	case "home":
+		if len(i.members) > 0 {
+			i.cursor = 0
+			movedCursor = true
+		}
+	case "end":
+		if len(i.members) > 0 {
+			i.cursor = len(i.members) - 1
+			movedCursor = true
 		}
 	case "enter":
 		// In a 1:1 DM info panel we're already in a DM with the selected
@@ -508,74 +585,96 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 				return RefreshRequestMsg{Kind: "room_members"}
 			}
 		}
-	// Phase 14 admin-action shortcuts on the focused member row.
-	// A/K/P/X emit MemberActionMsg with admin action values that the
-	// app.go handler routes to the appropriate confirmation dialog
-	// (same dialog as typing /add, /kick, /promote, /demote). The
-	// app pre-checks local is_admin and falls through to a status
-	// bar error for non-admins. Keys only fire in a group context —
-	// rooms and DMs ignore them.
-	//
-	// "X" is used for demote because "D" means /delete everywhere
-	// else in the app. Matches the plan's keybinding.
-	case "a":
-		if i.isGroup {
-			return i, func() tea.Msg {
-				return MemberActionMsg{Action: "admin_add", User: ""}
-			}
-		}
-	case "K":
-		// Capital K to avoid colliding with lowercase "k" (up).
-		if i.isGroup && i.cursor < len(i.members) {
-			user := i.members[i.cursor].User
-			return i, func() tea.Msg {
-				return MemberActionMsg{Action: "admin_kick", User: user}
-			}
-		}
-	case "p":
-		if i.isGroup && i.cursor < len(i.members) {
-			user := i.members[i.cursor].User
-			return i, func() tea.Msg {
-				return MemberActionMsg{Action: "admin_promote", User: user}
-			}
-		}
-	case "x":
-		if i.isGroup && i.cursor < len(i.members) {
-			user := i.members[i.cursor].User
-			return i, func() tea.Msg {
-				return MemberActionMsg{Action: "admin_demote", User: user}
-			}
-		}
+		// Phase 14 admin-action shortcuts (a=add, K=remove, p=promote,
+		// x=demote) are DISABLED 2026-05-19. They were mis-wired: K/x opened
+		// a confirmation dialog that stayed trapped behind the still-modal
+		// info panel (the app appeared frozen); a/p were effectively no-ops.
+		// Rather than fix wiring that is about to be replaced, the keys are
+		// removed here pending the locked picker-hand-off rework (a/r/p/x →
+		// close the panel + open the verb's picker). Do NOT re-add inline
+		// MemberActionMsg{admin_*} emission from the info panel — see
+		// missing.md §2a. Until the picker lands, group admin actions are
+		// via the typed /add /kick /promote /demote commands; these
+		// keystrokes are intentionally inert no-ops in the info panel.
+	}
+	if movedCursor {
+		i.syncScrollToSelection()
 	}
 	return i, nil
 }
 
 func (i InfoPanelModel) View(width int) string {
-	// User-profile mode is rendered by a dedicated helper to keep
-	// the existing room/group/DM render path unchanged. Both modes
-	// share the dialogStyle chrome and headline pattern but diverge
-	// substantially in body content + footer keys.
-	if i.visible && i.isUser {
-		return i.viewUser(width)
-	}
+	return i.ViewWithHeight(width, 0)
+}
+
+// ViewWithHeight renders the info panel with an explicit terminal height so
+// overlay-local scrolling can clip and paginate content safely.
+func (i InfoPanelModel) ViewWithHeight(width, height int) string {
 	if !i.visible {
 		return ""
 	}
 
-	var b strings.Builder
+	var lines []string
+	selectedLine := -1
+	if i.isUser {
+		lines = i.renderUserContent(width)
+	} else {
+		lines, selectedLine = i.renderContextContent()
+	}
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+
+	rows := i.pageRowsWithHeight(height)
+	maxScroll := len(lines) - rows
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scroll := i.scroll
+	if selectedLine >= 0 {
+		if selectedLine < scroll {
+			scroll = selectedLine
+		}
+		if selectedLine >= scroll+rows {
+			scroll = selectedLine - rows + 1
+		}
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+	if scroll > maxScroll {
+		scroll = maxScroll
+	}
+	end := scroll + rows
+	if end > len(lines) {
+		end = len(lines)
+	}
+	visible := strings.Join(lines[scroll:end], "\n")
+
+	innerWidth := width - 4
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	return dialogStyle.Width(innerWidth).Render(visible)
+}
+
+func (i InfoPanelModel) renderContextContent() ([]string, int) {
+	lines := make([]string, 0, 64)
+	selectedLine := -1
+	appendLine := func(s string) {
+		lines = append(lines, s)
+	}
+	appendBlank := func() {
+		lines = append(lines, "")
+	}
 
 	if i.room != "" {
 		roomDisplay := i.room
 		if i.resolveRoomName != nil {
 			roomDisplay = i.resolveRoomName(i.room)
 		}
-		b.WriteString(searchHeaderStyle.Render(fmt.Sprintf(" #%s — info", roomDisplay)))
+		appendLine(searchHeaderStyle.Render(fmt.Sprintf(" #%s — info", roomDisplay)))
 	} else if i.isDM {
-		// Header for a 1:1 DM: show "DM with <other>". The "other" party
-		// is whichever of the two members is not self. Members list was
-		// built in ShowDM with self at index 0 when both parties are
-		// known; pick the last entry as "other" so a fallback with only
-		// self still renders a sane title.
 		other := ""
 		if len(i.members) > 0 {
 			other = i.members[len(i.members)-1].DisplayName
@@ -583,67 +682,53 @@ func (i InfoPanelModel) View(width int) string {
 		if other == "" {
 			other = "conversation"
 		}
-		b.WriteString(searchHeaderStyle.Render(fmt.Sprintf(" DM with %s — info", other)))
+		appendLine(searchHeaderStyle.Render(fmt.Sprintf(" DM with %s — info", other)))
 	} else {
 		title := i.group
 		if i.name != "" {
 			title = i.name
 		}
-		b.WriteString(searchHeaderStyle.Render(fmt.Sprintf(" %s — info", title)))
+		appendLine(searchHeaderStyle.Render(fmt.Sprintf(" %s — info", title)))
 	}
-	b.WriteString("\n\n")
+	appendBlank()
 
-	// Status + /leave + /delete hints. The wording depends on whether
-	// the context is:
-	//   - a retired room: admin archived it, only /delete remains
-	//   - a left room/group: user self-left, only /delete remains
-	//   - an active room: both /leave and /delete are options
-	//   - an active group: both /leave and /delete are options
-	// Retirement takes priority over left (it's the underlying cause).
 	if i.retired {
-		b.WriteString(" " + errorStyle.Render("Status:") + " this room was archived by an admin (read-only)\n")
-		b.WriteString(" " + helpDescStyle.Render("Type /delete to remove from your view.") + "\n\n")
+		appendLine(" " + errorStyle.Render("Status:") + " this room was archived by an admin (read-only)")
+		appendLine(" " + helpDescStyle.Render("Type /delete to remove from your view."))
+		appendBlank()
 	} else if i.left {
-		var label string
+		label := "group"
 		if i.room != "" {
 			label = "room"
-		} else {
-			label = "group"
 		}
-		b.WriteString(" " + errorStyle.Render("Status:") + " you left this " + label + " (read-only)\n")
-		b.WriteString(" " + helpDescStyle.Render("Type /delete to remove from your view.") + "\n\n")
+		appendLine(" " + errorStyle.Render("Status:") + " you left this " + label + " (read-only)")
+		appendLine(" " + helpDescStyle.Render("Type /delete to remove from your view."))
+		appendBlank()
 	} else if i.room != "" {
-		// Active room: surface both /leave and /delete as the available
-		// exit paths. /leave is subject to the server's policy flag, so
-		// the user may get a "Forbidden" back — but we don't pre-check
-		// here (the server is authoritative and hot-reloadable).
-		b.WriteString(" " + helpDescStyle.Render("Type /leave to stop receiving messages, or /delete to remove from your view.") + "\n\n")
+		appendLine(" " + helpDescStyle.Render("Type /leave to stop receiving messages, or /delete to remove from your view."))
+		appendBlank()
 	} else if i.isGroup {
-		// Active group DM: /leave and /delete are both available.
-		b.WriteString(" " + helpDescStyle.Render("Type /leave to stop receiving messages, or /delete to remove from your view.") + "\n\n")
+		appendLine(" " + helpDescStyle.Render("Type /leave to stop receiving messages, or /delete to remove from your view."))
+		appendBlank()
 	}
 
-	// 1:1 DMs surface the /delete hint up front — it's the only exit
-	// path for a DM, and the refactor doc (§ 398) explicitly asks for
-	// this text in the info panel. There's no "left" intermediate state
-	// for DMs, so this is always shown for an active DM.
 	if i.isDM {
-		b.WriteString(" " + helpDescStyle.Render("Type /delete to remove this conversation from your view.") + "\n\n")
+		appendLine(" " + helpDescStyle.Render("Type /delete to remove this conversation from your view."))
+		appendBlank()
 	}
 
 	if i.topic != "" {
-		b.WriteString(" Topic: " + i.topic + "\n\n")
+		appendLine(" Topic: " + i.topic)
+		appendBlank()
 	}
 
-	// Mute status
 	muteLabel := "off"
 	if i.muted {
 		muteLabel = "on"
 	}
-	b.WriteString(fmt.Sprintf(" Muted: [%s]  (press m to toggle)\n\n", muteLabel))
+	appendLine(fmt.Sprintf(" Muted: [%s]  (press m to toggle)", muteLabel))
+	appendBlank()
 
-	// Split members into admins and non-admins (preserving cursor indices
-	// into i.members which is already sorted admins-first after Show*).
 	var adminCount int
 	for _, m := range i.members {
 		if m.Admin {
@@ -664,75 +749,77 @@ func (i InfoPanelModel) View(width int) string {
 	}
 
 	if i.isDM {
-		// DMs: render the two parties without admin/member split. Self
-		// is always first (index 0), other is second. No header text
-		// since "Members (2)" is obvious for a 1:1.
 		for idx, m := range i.members {
-			b.WriteString(renderMember(idx, m) + "\n")
+			if idx == i.cursor {
+				selectedLine = len(lines)
+			}
+			appendLine(renderMember(idx, m))
 		}
 	} else {
-		b.WriteString(fmt.Sprintf(" Members (%d):\n", len(i.members)))
+		appendLine(fmt.Sprintf(" Members (%d):", len(i.members)))
 		if adminCount > 0 {
-			b.WriteString(sidebarHeaderStyle.Render("  [Admins]") + "\n")
+			appendLine(sidebarHeaderStyle.Render("  [Admins]"))
 			for idx, m := range i.members {
 				if !m.Admin {
 					continue
 				}
-				b.WriteString(renderMember(idx, m) + "\n")
+				if idx == i.cursor {
+					selectedLine = len(lines)
+				}
+				appendLine(renderMember(idx, m))
 			}
 		}
 		if adminCount < len(i.members) {
-			b.WriteString(sidebarHeaderStyle.Render("  [Members]") + "\n")
+			appendLine(sidebarHeaderStyle.Render("  [Members]"))
 			for idx, m := range i.members {
 				if m.Admin {
 					continue
 				}
-				b.WriteString(renderMember(idx, m) + "\n")
+				if idx == i.cursor {
+					selectedLine = len(lines)
+				}
+				appendLine(renderMember(idx, m))
 			}
 		}
 	}
 
-	b.WriteString("\n")
+	appendBlank()
 	if i.isDM {
-		b.WriteString(helpDescStyle.Render(" m=mute  Esc=close"))
+		appendLine(helpDescStyle.Render(" m=mute  Esc=close"))
+	} else if i.isGroup {
+		// Group admin-action hints intentionally omitted: the a/K/p/x
+		// keys are disabled pending the picker rework (missing.md §2a).
+		// Re-add the hint here when the picker hand-off is wired.
+		appendLine(helpDescStyle.Render(" Enter=message  m=mute  Esc=close"))
 	} else {
-		b.WriteString(helpDescStyle.Render(" Enter=message  m=mute  Esc=close"))
+		// Room context: surface r=refresh — `r` performs a real
+		// room-member-list refresh here (missing.md §2c). It is a no-op
+		// in DM/group context (case "r" is guarded `if i.room != ""`),
+		// so it is advertised only on this room branch.
+		appendLine(helpDescStyle.Render(" Enter=message  r=refresh  m=mute  Esc=close"))
 	}
 
-	return dialogStyle.Width(width - 4).Render(b.String())
+	return lines, selectedLine
 }
 
-// viewUser renders the per-user profile mode of the info panel —
-// opened by ShowUser via /whois or member-panel "view profile".
-// Layout matches the userprofile_mockup_test.go visual: title,
-// status row (presence + verified badge), identity block (name /
-// id / fingerprint / public key wrapped), history block (first-seen
-// / role / retired-since), clipboard-copy notice, action footer.
-//
-// Action keys are state-dependent:
-//   - m=message: hidden when self, retired, or already-in-DM-with
-//   - v=verify:  hidden when self or retired
-//   - f=copy fingerprint: always shown if a fingerprint is present
-func (i InfoPanelModel) viewUser(width int) string {
-	var b strings.Builder
+// renderUserContent renders the per-user profile mode of the info panel as
+// plain lines so the shared viewport slicer can paginate it.
+func (i InfoPanelModel) renderUserContent(width int) []string {
+	lines := make([]string, 0, 64)
+	appendLine := func(s string) {
+		lines = append(lines, s)
+	}
+	appendBlank := func() {
+		lines = append(lines, "")
+	}
 
-	// Title: "Profile: <name>" with " (you)" suffix on self-view
-	// to mirror the mockup vocabulary.
 	titleName := i.userDisplay
 	if i.userIsSelf {
 		titleName += " (you)"
 	}
-	b.WriteString(searchHeaderStyle.Render(" Profile: " + titleName))
-	b.WriteString("\n\n")
+	appendLine(searchHeaderStyle.Render(" Profile: " + titleName))
+	appendBlank()
 
-	// Status row — presence ●/○ + verified ✓ badge + retired marker.
-	// Presence dot color reflects locked-set status (Available/Away/
-	// Busy) when online; offline always renders the hollow ○. Status
-	// label appears next to the dot for clarity ("● away" rather
-	// than just a colored dot).
-	// Self-views append "(self)" instead of a verified badge since
-	// self-verification is meaningless. Unverified is the absence
-	// of the ✓ — never explicitly labeled.
 	var presence string
 	if i.userOnline {
 		presence = PresenceDot(true, i.userStatus) + " " + presenceLabel(i.userStatus)
@@ -750,25 +837,16 @@ func (i InfoPanelModel) viewUser(width int) string {
 	} else if i.userVerified {
 		statusRow += "   " + checkStyle.Render("✓ verified")
 	}
-	b.WriteString(statusRow + "\n\n")
+	appendLine(statusRow)
+	appendBlank()
 
-	// Identity block — display, ID, fingerprint, then the wrapped
-	// SSH public key. wrapPubKey indents continuation lines so the
-	// label column visually anchors the multi-row value.
-	b.WriteString("  Display:      " + i.userDisplay + "\n")
-	b.WriteString("  User ID:      " + i.userID + "\n")
+	appendLine("  Display:      " + i.userDisplay)
+	appendLine("  User ID:      " + i.userID)
 	if i.userFingerprint != "" {
-		b.WriteString("  Fingerprint:  " + i.userFingerprint + "\n")
+		appendLine("  Fingerprint:  " + i.userFingerprint)
 	}
 	if i.userPubKey != "" {
-		b.WriteString("  Public key:   ")
-		// Wrap at content-width minus the indent (16 cells of
-		// "  Public key:   " label). Continuation lines align to
-		// column 16 with the same indent.
 		const labelIndent = "                "
-		// Inner content width = dialog width minus 2 for borders
-		// minus 4 for padding. Minus 16 for label column =
-		// available pubkey body width.
 		bodyWidth := (width - 2 - 4) - len(labelIndent)
 		if bodyWidth < 20 {
 			bodyWidth = 20
@@ -780,49 +858,34 @@ func (i InfoPanelModel) viewUser(width int) string {
 				end = len(i.userPubKey)
 			}
 			if first {
-				b.WriteString(i.userPubKey[j:end] + "\n")
+				appendLine("  Public key:   " + i.userPubKey[j:end])
 				first = false
 			} else {
-				b.WriteString(labelIndent + i.userPubKey[j:end] + "\n")
+				appendLine(labelIndent + i.userPubKey[j:end])
 			}
 		}
 	}
-	b.WriteString("\n")
+	appendBlank()
 
-	// History block — first-seen, retirement-date, server role.
-	// Retirement-date is shown as raw RetiredAt string when
-	// available (server-pushed format); otherwise omitted.
 	if i.userFirstSeen > 0 {
-		b.WriteString("  First seen:   " +
-			time.Unix(i.userFirstSeen, 0).UTC().Format("2006-01-02") + "\n")
+		appendLine("  First seen:   " +
+			time.Unix(i.userFirstSeen, 0).UTC().Format("2006-01-02"))
 	}
 	if i.userRetired {
-		// userRetiredAt is the protocol-string parsed to int64
-		// timestamp; we don't currently parse it — placeholder.
-		// For now show "retired" indicator without precise date if
-		// not parsed. The status row above already shows "retired"
-		// so this line is informational.
-		b.WriteString("  " + helpDescStyle.Render("Account is retired — DMs are read-only.") + "\n")
+		appendLine("  " + helpDescStyle.Render("Account is retired — DMs are read-only."))
 	}
 	if i.userAdmin {
-		b.WriteString("  Server role:  admin\n")
+		appendLine("  Server role:  admin")
 	}
 	if i.userFirstSeen > 0 || i.userRetired || i.userAdmin {
-		b.WriteString("\n")
+		appendBlank()
 	}
 
-	// Clipboard notice — reflects the most recent copy action, set
-	// either by ShowUser (auto-copy of public key on open) or by
-	// the f-action handler (fingerprint copy). Empty string skips
-	// the line entirely.
 	if i.userClipboardNotice != "" {
-		b.WriteString("  " + helpDescStyle.Render(i.userClipboardNotice) + "\n\n")
+		appendLine("  " + helpDescStyle.Render(i.userClipboardNotice))
+		appendBlank()
 	}
 
-	// Action footer — keys vary by user state:
-	//   - self/retired: just f=copy fingerprint + Esc=close
-	//   - already in DM with this user: hide m=message
-	//   - everyone else: full action set
 	var actions []string
 	canMessage := !i.userIsSelf && !i.userRetired && !i.userInDMWith
 	canVerify := !i.userIsSelf && !i.userRetired
@@ -836,9 +899,88 @@ func (i InfoPanelModel) viewUser(width int) string {
 		actions = append(actions, "f=copy fingerprint")
 	}
 	actions = append(actions, "Esc=close")
-	b.WriteString(helpDescStyle.Render("  " + strings.Join(actions, "  ")))
+	appendLine(helpDescStyle.Render("  " + strings.Join(actions, "  ")))
 
-	return dialogStyle.Width(width - 4).Render(b.String())
+	return lines
+}
+
+func (i InfoPanelModel) pageRows() int {
+	return i.pageRowsWithHeight(0)
+}
+
+func (i InfoPanelModel) pageRowsWithHeight(height int) int {
+	h := height
+	if h <= 0 {
+		h = i.viewportHeight
+	}
+	if h <= 0 {
+		// No viewport known (unit tests or pre-first layout): effectively
+		// disable clipping until a real terminal height is provided.
+		return 1 << 30
+	}
+	rows := h - 4 // 2 borders + 2 vertical padding rows from dialogStyle
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
+}
+
+func (i InfoPanelModel) calcWidth() int {
+	if i.viewportWidth > 0 {
+		return i.viewportWidth
+	}
+	return 80
+}
+
+func (i InfoPanelModel) maxScrollForUser() int {
+	lines := i.renderUserContent(i.calcWidth())
+	rows := i.pageRows()
+	max := len(lines) - rows
+	if max < 0 {
+		return 0
+	}
+	return max
+}
+
+func (i *InfoPanelModel) clampScrollForUser() {
+	if i.scroll < 0 {
+		i.scroll = 0
+	}
+	max := i.maxScrollForUser()
+	if i.scroll > max {
+		i.scroll = max
+	}
+}
+
+func (i *InfoPanelModel) syncScrollToSelection() {
+	lines, selectedLine := i.renderContextContent()
+	if selectedLine < 0 {
+		i.scroll = 0
+		return
+	}
+	rows := i.pageRows()
+	maxScroll := len(lines) - rows
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if i.scroll < 0 {
+		i.scroll = 0
+	}
+	if i.scroll > maxScroll {
+		i.scroll = maxScroll
+	}
+	if selectedLine < i.scroll {
+		i.scroll = selectedLine
+	}
+	if selectedLine >= i.scroll+rows {
+		i.scroll = selectedLine - rows + 1
+	}
+	if i.scroll < 0 {
+		i.scroll = 0
+	}
+	if i.scroll > maxScroll {
+		i.scroll = maxScroll
+	}
 }
 
 // sortMembersAdminsFirst orders admins before non-admins, alphabetical within

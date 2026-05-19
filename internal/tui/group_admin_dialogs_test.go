@@ -292,10 +292,10 @@ func TestInputParser_WhoamiRoutesToAppInAnyContext(t *testing.T) {
 	// /whoami works in room, group, and DM contexts. Verify it
 	// routes to the app with the context preserved.
 	contexts := []struct {
-		name       string
-		room       string
-		group      string
-		dm         string
+		name  string
+		room  string
+		group string
+		dm    string
 	}{
 		{"room", "room_x", "", ""},
 		{"group", "", "group_x", ""},

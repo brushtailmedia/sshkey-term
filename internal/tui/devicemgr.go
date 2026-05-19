@@ -13,12 +13,12 @@ import (
 // non-current devices. The list is populated asynchronously by the app
 // via SetDevices() after a device_list response arrives.
 type DeviceMgrModel struct {
-	visible  bool
-	devices  []protocol.DeviceInfo
-	cursor   int
-	loading  bool
-	confirm  bool   // show confirmation prompt for revoke
-	status   string // inline status/error message
+	visible bool
+	devices []protocol.DeviceInfo
+	cursor  int
+	loading bool
+	confirm bool   // show confirmation prompt for revoke
+	status  string // inline status/error message
 }
 
 // DeviceMgrRevokeMsg is emitted when the user confirms revoking a device.

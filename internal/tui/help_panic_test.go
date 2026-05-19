@@ -16,7 +16,6 @@ func TestHelpView_DoesNotPanic(t *testing.T) {
 	}()
 
 	var h HelpModel
-	h.SetContext(true)
 	h.Toggle() // visible
 	_ = h.View(120, 40)
 	_ = h.View(80, 24)
