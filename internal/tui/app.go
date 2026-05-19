@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -152,6 +153,7 @@ type App struct {
 	contextMenu     ContextMenuModel
 	memberMenu      MemberMenuModel
 	statusPicker    StatusPickerModel
+	picker          PickerModel // shared single-select picker (bare-form verbs)
 	passphrase      PassphraseModel
 	passphraseCh    chan []byte
 	passphraseCache map[string][]byte // keyPath -> passphrase
@@ -1081,6 +1083,19 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
+		// Shared picker intercepts all keys when visible. Same
+		// Esc-at-App-level pattern as statusPicker above (#6 modal
+		// lifecycle: one modal focused at a time; Esc → bare).
+		if a.picker.IsVisible() {
+			if msg.Type == tea.KeyEsc {
+				a.picker.Hide()
+				return a, nil
+			}
+			var cmd tea.Cmd
+			a.picker, cmd = a.picker.Update(msg)
+			return a, cmd
+		}
+
 		// Context menu intercepts all keys. Same Esc-at-App-level
 		// pattern as memberMenu above. The user reported (2026-05-05)
 		// that pressing Esc with the menu open did NOT dismiss the
@@ -1817,6 +1832,19 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.client != nil {
 				a.infoPanel.ShowUser(msg.User, a.client, a.sidebar.online, a.sidebar.status, a.messages.dm)
 			}
+		}
+		return a, nil
+
+	case PickerSelectedMsg:
+		// The shared picker echoed a selection back (#5). App owns
+		// ALL verb routing — the widget stayed dumb. Each branch
+		// invokes that verb's POST-RESOLUTION step with the already-
+		// resolved ID, never re-entering name resolution (#3). More
+		// verbs are added here per the §9 sequence; `/whois` is the
+		// proving milestone (#12).
+		switch msg.Request.Verb {
+		case "/whois":
+			a.whoisReadout(msg.SelectedID)
 		}
 		return a, nil
 
@@ -3230,7 +3258,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.lastAdminPicker.IsVisible() ||
 		a.saveAttachment.IsVisible() ||
 		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() ||
-		a.statusPicker.IsVisible() {
+		a.statusPicker.IsVisible() || a.picker.IsVisible() {
 		return a, nil
 	}
 
@@ -4197,6 +4225,22 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		// output shape but using local TOFU state as the source of
 		// truth. Also copies the fingerprint to the clipboard so it can
 		// be pasted into a verification workflow.
+		//
+		// #1c/#12: bare `/whois` opens the shared picker (all users,
+		// cross-context, retired included + marked, #9a); typed
+		// `/whois @user` keeps its existing direct path (typed-bypass
+		// coexists) and never opens the picker.
+		if strings.TrimSpace(sc.Arg) == "" {
+			a.openPicker(PickerRequest{
+				Verb:       "/whois",
+				Source:     PickerSourceSlash,
+				Room:       sc.Room,
+				Group:      sc.Group,
+				DM:         sc.DM,
+				ShowFilter: true, // #7: large all-users set
+			})
+			return
+		}
 		a.handleWhoisCommand(sc.Arg)
 	case "/search":
 		a.search.Show()
@@ -4852,6 +4896,19 @@ func (a *App) handleWhoisCommand(rawName string) {
 		}
 	}
 
+	a.whoisReadout(targetID)
+}
+
+// whoisReadout opens the identity panel for an ALREADY-RESOLVED user
+// ID. It is the post-resolution step (shared-picker-widget.md §3
+// entry-vs-post-resolution): the typed `/whois <name>` path calls it
+// after name→ID resolution, and the picker selection path calls it
+// with the already-resolved ID — neither re-enters name resolution,
+// so behavior is identical on both paths.
+func (a *App) whoisReadout(targetID string) {
+	if a.client == nil {
+		return
+	}
 	// Sanity check: we need a fingerprint from somewhere — live
 	// profile OR pinned-keys row — for the panel to be meaningful.
 	// A profile with an empty KeyFingerprint is effectively the
@@ -4867,7 +4924,7 @@ func (a *App) handleWhoisCommand(rawName string) {
 		}
 	}
 	if !hasFingerprint {
-		a.statusBar.SetError("unknown user: " + strings.TrimSpace(rawName) + " (no profile or pinned key)")
+		a.statusBar.SetError("unknown user: " + a.resolveDisplayName(targetID) + " (no profile or pinned key)")
 		return
 	}
 
@@ -4878,6 +4935,74 @@ func (a *App) handleWhoisCommand(rawName string) {
 	// renders fingerprint, pubkey, presence, verified state,
 	// first-seen, role, retirement.
 	a.infoPanel.ShowUser(targetID, a.client, a.sidebar.online, a.sidebar.status, a.messages.dm)
+}
+
+// openPicker is the SINGLE entry for the shared picker (#6/§6). Both
+// the bare slash verb and (later) the group-info-panel footer `a`
+// converge here. It builds the verb's candidate list, applies #10
+// (empty / invalid-context → contextual status message and NO modal),
+// otherwise Shows the picker. The widget stays dumb — all verb and
+// context knowledge lives here.
+func (a *App) openPicker(req PickerRequest) {
+	items := a.pickerCandidates(req)
+	if len(items) == 0 {
+		// #10: never a dead modal — surface a message, stay in chat.
+		a.statusBar.SetError("No one to pick for " + req.Verb)
+		return
+	}
+	a.picker.Show(req, items)
+}
+
+// pickerCandidates builds the verb-specific candidate set. App owns
+// this; the widget never queries client/store. Only `/whois` is wired
+// for the proving milestone (#12); the remaining verbs are added here
+// per the §9 sequence (each with its own gate/scope from §6).
+func (a *App) pickerCandidates(req PickerRequest) []PickerItem {
+	switch req.Verb {
+	case "/whois":
+		return a.whoisCandidates()
+	default:
+		return nil
+	}
+}
+
+// whoisCandidates returns all locally-known users (#2: all-users,
+// cross-context — no group/admin gate). Per #9a `/whois` deliberately
+// INCLUDES retired accounts, marked + selectable, because it is an
+// identity-investigation tool. Self is excluded. Sorted by display
+// name so the list is stable (ForEachProfile iterates a map).
+func (a *App) whoisCandidates() []PickerItem {
+	if a.client == nil {
+		return nil
+	}
+	self := a.client.UserID()
+	seen := make(map[string]bool)
+	var items []PickerItem
+	a.client.ForEachProfile(func(p *protocol.Profile) {
+		if p == nil || p.User == "" || p.User == self || seen[p.User] {
+			return
+		}
+		seen[p.User] = true
+		items = append(items, PickerItem{
+			ID:      p.User,
+			Primary: a.resolveDisplayName(p.User),
+		})
+	})
+	for uid := range a.client.RetiredUsers() {
+		if uid == self || seen[uid] {
+			continue
+		}
+		seen[uid] = true
+		items = append(items, PickerItem{
+			ID:        uid,
+			Primary:   a.resolveDisplayName(uid),
+			Secondary: "retired",
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Primary) < strings.ToLower(items[j].Primary)
+	})
+	return items
 }
 
 // lookupGroupName returns the display name of a group, falling back
@@ -6228,7 +6353,8 @@ func (a *App) anyModalVisible() bool {
 		a.threadPanel.IsVisible() ||
 		a.search.IsVisible() ||
 		a.quickSwitch.IsVisible() ||
-		a.statusPicker.IsVisible()
+		a.statusPicker.IsVisible() ||
+		a.picker.IsVisible()
 }
 
 // appMinWidth and appMinHeight are the minimum terminal dimensions
@@ -6565,6 +6691,20 @@ func (a App) viewBody() string {
 	if a.memberMenu.IsVisible() {
 		mx, my := a.memberMenu.AnchorXY()
 		return overlay(screen, a.memberMenu.View(), mx, my+1, a.width, a.height)
+	}
+	if a.picker.IsVisible() {
+		// Same placement family as the /setstatus picker (#6/§7):
+		// indented into the messages pane, anchored higher because
+		// the list + filter + footer is taller than the 3-row status
+		// picker. overlay() clamps if it would overflow. #6 has
+		// already Hidden any prior modal/panel, so this always
+		// renders over bare chat regardless of the entry path.
+		col := layout.MessagesX0 + 2
+		row := layout.InputY0 - 22
+		if row < 1 {
+			row = 1
+		}
+		return overlay(screen, a.picker.View(a.width), col, row, a.width, a.height)
 	}
 	if a.statusPicker.IsVisible() {
 		// Anchor: a few cells above the input bar, indented from
