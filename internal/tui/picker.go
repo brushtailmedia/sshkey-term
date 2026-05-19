@@ -26,11 +26,21 @@ type PickerModel struct {
 	filter   string       // live filter text (only mutated when req.ShowFilter)
 	cursor   int          // index into `filtered`
 	scroll   int          // index of the first visible row in `filtered`
+
+	// Same defensive state machine as InputModel: some terminal/tmux setups
+	// leak SGR mouse bytes as KeyRunes. The picker has a filter input, so it
+	// needs to drop those bytes too instead of treating scroll as typed text.
+	mouseSeqState int
+	mouseSeqBuf   []rune
 }
 
 // pickerVisibleRows is the viewport height (item rows shown at once).
 // Lists longer than this scroll; the cursor is always kept visible.
 const pickerVisibleRows = 12
+
+// Match the scroll feel used by help/messages panels: a wheel notch moves a
+// small chunk, while cursor/viewport clamping keeps the selected row visible.
+const pickerMouseWheelStep = 3
 
 // PickerItem is one selectable row. ID is opaque to the widget
 // (userID or groupID — #4). Primary is rendered and filtered;
@@ -81,6 +91,8 @@ func (m *PickerModel) Show(req PickerRequest, items []PickerItem) {
 	m.filter = ""
 	m.cursor = 0
 	m.scroll = 0
+	m.mouseSeqState = 0
+	m.mouseSeqBuf = nil
 	m.applyFilter()
 }
 
@@ -92,6 +104,8 @@ func (m *PickerModel) Hide() {
 	m.filter = ""
 	m.cursor = 0
 	m.scroll = 0
+	m.mouseSeqState = 0
+	m.mouseSeqBuf = nil
 }
 
 func (m *PickerModel) IsVisible() bool {
@@ -161,7 +175,74 @@ func (m *PickerModel) clampScroll() {
 	}
 }
 
+func (m *PickerModel) filterLeakedMouseRunes(runes []rune) []rune {
+	var out []rune
+	for _, r := range runes {
+		for {
+			again := false
+			switch m.mouseSeqState {
+			case 0:
+				if r == '[' {
+					m.mouseSeqState = 1
+				} else {
+					out = append(out, r)
+				}
+			case 1:
+				if r == '<' {
+					m.mouseSeqState = 2
+					m.mouseSeqBuf = m.mouseSeqBuf[:0]
+					break
+				}
+				out = append(out, '[')
+				m.mouseSeqState = 0
+				again = true
+			case 2:
+				switch {
+				case r >= '0' && r <= '9', r == ';':
+					m.mouseSeqBuf = append(m.mouseSeqBuf, r)
+				case r == 'M' || r == 'm':
+					m.mouseSeqState = 0
+					m.mouseSeqBuf = m.mouseSeqBuf[:0]
+				default:
+					out = append(out, '[', '<')
+					out = append(out, m.mouseSeqBuf...)
+					m.mouseSeqBuf = m.mouseSeqBuf[:0]
+					m.mouseSeqState = 0
+					again = true
+				}
+			}
+			if !again {
+				break
+			}
+		}
+	}
+	return out
+}
+
+func (m *PickerModel) flushHeldMouseRunesToFilter() {
+	switch m.mouseSeqState {
+	case 1:
+		m.filter += "["
+	case 2:
+		m.filter += "[<" + string(m.mouseSeqBuf)
+		m.mouseSeqBuf = m.mouseSeqBuf[:0]
+	}
+	m.mouseSeqState = 0
+}
+
 func (m PickerModel) Update(msg tea.KeyMsg) (PickerModel, tea.Cmd) {
+	if m.req.ShowFilter {
+		if msg.Type == tea.KeyRunes {
+			msg.Runes = m.filterLeakedMouseRunes(msg.Runes)
+			if len(msg.Runes) == 0 {
+				return m, nil
+			}
+		} else if m.mouseSeqState != 0 {
+			m.flushHeldMouseRunesToFilter()
+			m.applyFilter()
+		}
+	}
+
 	switch msg.Type {
 	case tea.KeyEsc:
 		m.Hide()
@@ -228,6 +309,23 @@ func (m PickerModel) Update(msg tea.KeyMsg) (PickerModel, tea.Cmd) {
 			m.Hide()
 		}
 		return m, nil
+	}
+	return m, nil
+}
+
+// HandleMouse consumes mouse events while the picker is visible. Wheel events
+// move the highlighted row; clicks intentionally do not select yet, matching
+// the safer "mouse moves focus/selection, Enter confirms" convention used by
+// several other panels.
+func (m PickerModel) HandleMouse(msg tea.MouseMsg) (PickerModel, tea.Cmd) {
+	if !m.visible {
+		return m, nil
+	}
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		m.moveCursor(-pickerMouseWheelStep)
+	case tea.MouseButtonWheelDown:
+		m.moveCursor(pickerMouseWheelStep)
 	}
 	return m, nil
 }
