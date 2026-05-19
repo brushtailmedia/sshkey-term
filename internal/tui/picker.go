@@ -32,10 +32,6 @@ type PickerModel struct {
 // Lists longer than this scroll; the cursor is always kept visible.
 const pickerVisibleRows = 12
 
-// Match the scroll feel used by help/messages panels: a wheel notch moves a
-// small chunk, while cursor/viewport clamping keeps the selected row visible.
-const pickerMouseWheelStep = 3
-
 // PickerItem is one selectable row. ID is opaque to the widget
 // (userID or groupID — #4). Primary is rendered and filtered;
 // Secondary is render-only (e.g. "retired"); Search holds extra
@@ -232,23 +228,6 @@ func (m PickerModel) Update(msg tea.KeyMsg) (PickerModel, tea.Cmd) {
 			m.Hide()
 		}
 		return m, nil
-	}
-	return m, nil
-}
-
-// HandleMouse consumes mouse events while the picker is visible. Wheel events
-// move the highlighted row; clicks intentionally do not select yet, matching
-// the safer "mouse moves focus/selection, Enter confirms" convention used by
-// several other panels.
-func (m PickerModel) HandleMouse(msg tea.MouseMsg) (PickerModel, tea.Cmd) {
-	if !m.visible {
-		return m, nil
-	}
-	switch msg.Button {
-	case tea.MouseButtonWheelUp:
-		m.moveCursor(-pickerMouseWheelStep)
-	case tea.MouseButtonWheelDown:
-		m.moveCursor(pickerMouseWheelStep)
 	}
 	return m, nil
 }

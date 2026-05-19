@@ -3240,11 +3240,6 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.help.Update(msg, a.width, a.height)
 		return a, nil
 	}
-	if a.picker.IsVisible() {
-		var cmd tea.Cmd
-		a.picker, cmd = a.picker.HandleMouse(msg)
-		return a, cmd
-	}
 
 	// Other overlays are keyboard-only. Listing them here consumes any
 	// mouse event (click / wheel / drag) that arrives while the overlay
