@@ -18,7 +18,7 @@ import (
 	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
 
-func runes(s string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
+func runes(s string) tea.KeyMsg    { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)} }
 func key(t tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: t} }
 
 // --- Widget unit tests (pure; no App/client) ---
@@ -122,6 +122,35 @@ func TestPicker_ScrollAndClamp(t *testing.T) {
 	}
 }
 
+func TestPicker_MouseWheelMovesCursorAndClamps(t *testing.T) {
+	var p PickerModel
+	items := make([]PickerItem, pickerVisibleRows+8)
+	for i := range items {
+		items[i] = PickerItem{ID: string(rune('a' + i)), Primary: string(rune('a' + i))}
+	}
+	p.Show(PickerRequest{Verb: "/whois"}, items)
+
+	p, _ = p.HandleMouse(tea.MouseMsg{Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+	if p.cursor != pickerMouseWheelStep {
+		t.Fatalf("wheel down cursor=%d, want %d", p.cursor, pickerMouseWheelStep)
+	}
+
+	for i := 0; i < len(items); i++ {
+		p, _ = p.HandleMouse(tea.MouseMsg{Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+	}
+	if p.cursor != len(items)-1 {
+		t.Fatalf("wheel down should clamp cursor at end, got %d want %d", p.cursor, len(items)-1)
+	}
+	if p.scroll != len(items)-pickerVisibleRows {
+		t.Fatalf("wheel down should keep cursor visible, scroll=%d want %d", p.scroll, len(items)-pickerVisibleRows)
+	}
+
+	p, _ = p.HandleMouse(tea.MouseMsg{Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress})
+	if p.cursor != len(items)-1-pickerMouseWheelStep {
+		t.Fatalf("wheel up cursor=%d, want %d", p.cursor, len(items)-1-pickerMouseWheelStep)
+	}
+}
+
 func TestPicker_EmptyFilterState(t *testing.T) {
 	var p PickerModel
 	p.Show(PickerRequest{Verb: "/whois", ShowFilter: true}, []PickerItem{{ID: "u1", Primary: "Alice"}})
@@ -136,6 +165,24 @@ func TestPicker_EmptyFilterState(t *testing.T) {
 	}
 	if v := p.View(80); !strings.Contains(v, "No matches") {
 		t.Fatal("empty filtered view should show 'No matches'")
+	}
+}
+
+func TestAppMouse_RoutesWheelToVisiblePicker(t *testing.T) {
+	a := App{width: 100, height: 40}
+	items := make([]PickerItem, pickerVisibleRows+4)
+	for i := range items {
+		items[i] = PickerItem{ID: string(rune('a' + i)), Primary: string(rune('a' + i))}
+	}
+	a.picker.Show(PickerRequest{Verb: "/whois"}, items)
+
+	model, cmd := a.handleMouse(tea.MouseMsg{Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress, X: 1, Y: 1})
+	if cmd != nil {
+		t.Fatalf("picker mouse wheel should not emit command, got %T", cmd())
+	}
+	na := model.(App)
+	if na.picker.cursor != pickerMouseWheelStep {
+		t.Fatalf("App did not route wheel to picker: cursor=%d want %d", na.picker.cursor, pickerMouseWheelStep)
 	}
 }
 
