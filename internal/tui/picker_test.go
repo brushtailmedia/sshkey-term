@@ -903,6 +903,148 @@ func TestInfoPanelAdminKeyMsg_Routing(t *testing.T) {
 	}
 }
 
+// --- §9 step 7: member-panel "Add to existing group" ---
+
+// setupGroupsForAddToGroup wires sidebar + client so the local user
+// (usr_self) is admin of g_admin1+g_admin2, member-only of g_member,
+// with the given members per group.
+func setupGroupsForAddToGroup(t *testing.T, c *client.Client, a *App, members map[string][]string, adminGroups []string) {
+	t.Helper()
+	a.sidebar = NewSidebar()
+	var groups []protocol.GroupInfo
+	for gid, ms := range members {
+		groups = append(groups, protocol.GroupInfo{ID: gid, Name: gid, Members: ms})
+		client.SetGroupMembersForTesting(c, gid, ms)
+	}
+	a.sidebar.SetGroups(groups)
+	for _, gid := range adminGroups {
+		client.SetGroupAdminsForTesting(c, gid, []string{"usr_self"})
+	}
+}
+
+func TestAddToGroupCandidates_OnlyEligibleGroups(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	// g_a: self admin, bob not a member → ELIGIBLE.
+	// g_b: self admin, bob already a member → excluded (rule 3).
+	// g_c: self NOT admin → excluded (rule 1).
+	setupGroupsForAddToGroup(t, c, a,
+		map[string][]string{
+			"g_a": {"usr_self", "usr_alice"},
+			"g_b": {"usr_self", "usr_bob"},
+			"g_c": {"usr_carol", "usr_bob"},
+		},
+		[]string{"g_a", "g_b"},
+	)
+	got := a.addToGroupCandidates("usr_bob")
+	if len(got) != 1 || got[0].ID != "g_a" {
+		ids := make([]string, len(got))
+		for i, it := range got {
+			ids[i] = it.ID
+		}
+		t.Fatalf("addToGroupCandidates(usr_bob) = %v, want [g_a] (non-admin g_c + already-member g_b excluded)", ids)
+	}
+}
+
+func TestAddToGroupCandidates_SelfAndRetiredReturnNil(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	setupGroupsForAddToGroup(t, c, a,
+		map[string][]string{"g_a": {"usr_self"}},
+		[]string{"g_a"},
+	)
+	if got := a.addToGroupCandidates("usr_self"); got != nil {
+		t.Fatalf("addToGroupCandidates(self) = %v, want nil (rule 4: self)", got)
+	}
+	client.SetRetiredForTesting(c, "usr_dave", "2026-05-20T00:00:00Z")
+	if got := a.addToGroupCandidates("usr_dave"); got != nil {
+		t.Fatalf("addToGroupCandidates(retired) = %v, want nil (rule 4: retired)", got)
+	}
+}
+
+func TestBuildMemberMenuItems_PrependsAddToGroupWhenEligible(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	setupGroupsForAddToGroup(t, c, a,
+		map[string][]string{"g_a": {"usr_self"}},
+		[]string{"g_a"},
+	)
+	items := a.buildMemberMenuItems("usr_bob", "Bob")
+	// Default 4 + "Add to group..." prepended at position 0 = 5 total.
+	if len(items) != 5 {
+		t.Fatalf("got %d items, want 5 (add-to-group + 4 default)", len(items))
+	}
+	if items[0].Action != "add_to_existing_group" {
+		t.Fatalf("items[0] Action = %q, want add_to_existing_group (top-of-list placement)", items[0].Action)
+	}
+	// The 4 defaults follow in their original order.
+	wantOrder := []string{"add_to_existing_group", "create_group", "message", "verify", "profile"}
+	for i, want := range wantOrder {
+		if items[i].Action != want {
+			t.Fatalf("items[%d] Action = %q, want %q (full order)", i, items[i].Action, want)
+		}
+	}
+}
+
+func TestBuildMemberMenuItems_HidesAddToGroupWhenNoEligible(t *testing.T) {
+	a, _, _ := newPickerWhoisApp(t)
+	// No groups set up → no eligible groups → action hidden.
+	items := a.buildMemberMenuItems("usr_bob", "Bob")
+	if len(items) != 4 {
+		t.Fatalf("got %d items, want 4 (default only — no eligible groups)", len(items))
+	}
+	for _, it := range items {
+		if it.Action == "add_to_existing_group" {
+			t.Fatal("add_to_existing_group must NOT appear when no eligible groups exist")
+		}
+	}
+}
+
+func TestAddToGroupAction_OpensPickerWithSubject(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	setupGroupsForAddToGroup(t, c, a,
+		map[string][]string{"g_a": {"usr_self"}},
+		[]string{"g_a"},
+	)
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_bob", DisplayName: "Bob"})
+
+	model, _ := (*a).Update(MemberActionMsg{Action: "add_to_existing_group", User: "usr_bob"})
+	na := model.(App)
+	if !na.picker.IsVisible() {
+		t.Fatal("MemberActionMsg{add_to_existing_group} must open the shared picker")
+	}
+	if na.picker.req.Verb != "add_to_group" || na.picker.req.Source != PickerSourceMemberPanel {
+		t.Fatalf("picker req = {Verb:%q Source:%q}, want {add_to_group, member_panel}",
+			na.picker.req.Verb, na.picker.req.Source)
+	}
+	if na.picker.req.SubjectUserID != "usr_bob" {
+		t.Fatalf("picker req.SubjectUserID = %q, want usr_bob (carries the user being added)", na.picker.req.SubjectUserID)
+	}
+}
+
+func TestAddToGroupPicker_SelectionOpensAddConfirm(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	setupGroupsForAddToGroup(t, c, a,
+		map[string][]string{"g_a": {"usr_self"}},
+		[]string{"g_a"},
+	)
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_bob", DisplayName: "Bob"})
+
+	// Picker selection: picked GROUP id "g_a"; subject user carried
+	// in Request.SubjectUserID. Note the OPPOSITE id semantics vs
+	// slash /add (where SelectedID would be the user, not the group).
+	model, _ := (*a).Update(PickerSelectedMsg{
+		Request: PickerRequest{
+			Verb:            "add_to_group",
+			Source:          PickerSourceMemberPanel,
+			SubjectUserID:   "usr_bob",
+			SubjectUserName: "Bob",
+		},
+		SelectedID: "g_a",
+	})
+	na := model.(App)
+	if !na.addConfirm.IsVisible() {
+		t.Fatal("picker selection must open AddConfirmModel for the picked group + subject user")
+	}
+}
+
 // TestInputParser_GroupAdminRoutesToAppInAllForms exercises the REAL
 // router path for /add /kick /promote /demote /transfer — the
 // regression guard for the same router-guard gap that bit /role.

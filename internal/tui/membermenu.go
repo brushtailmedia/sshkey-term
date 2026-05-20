@@ -19,18 +19,19 @@ func NewMemberMenu() MemberMenuModel {
 	return MemberMenuModel{}
 }
 
-func (m *MemberMenuModel) Show(user, displayName string, x, y int) {
+// Show opens the menu with caller-injected items. App owns the
+// active client/sidebar/group state needed to decide which actions
+// are available (e.g. "Add to group..." is only included when there's
+// at least one eligible group — §9 step 7) so building the items
+// list is the App's job; the menu stays dumb. Callers normally start
+// from `defaultMemberMenuItems(displayName)` and append per context.
+func (m *MemberMenuModel) Show(user string, items []ContextMenuItem, x, y int) {
 	m.visible = true
 	m.user = user
 	m.cursor = 0
 	m.x = x
 	m.y = y
-	m.items = []ContextMenuItem{
-		{Label: "Message " + displayName, Action: "message"},
-		{Label: "Create group with...", Action: "create_group"},
-		{Label: "Verify " + displayName, Action: "verify"},
-		{Label: "View profile", Action: "profile"},
-	}
+	m.items = items
 }
 
 func (m *MemberMenuModel) Hide() {

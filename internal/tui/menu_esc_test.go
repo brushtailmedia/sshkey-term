@@ -37,7 +37,7 @@ func TestApp_EscDismissesContextMenu(t *testing.T) {
 func TestApp_EscDismissesMemberMenu(t *testing.T) {
 	a := App{}
 	a.memberMenu = NewMemberMenu()
-	a.memberMenu.Show("usr_bob", "Bob", 10, 10)
+	a.memberMenu.Show("usr_bob", defaultMemberMenuItems("Bob"), 10, 10)
 	if !a.memberMenu.IsVisible() {
 		t.Fatal("precondition: memberMenu should be visible after Show")
 	}

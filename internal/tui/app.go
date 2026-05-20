@@ -1821,8 +1821,29 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// explicit action that opens this menu.
 			// Anchor at the member panel's top-left so the overlay pops up
 			// over the panel rather than down at screen origin.
+			//
+			// §9 step 7: items are built by App (the menu widget is
+			// dumb). `buildMemberMenuItems` conditionally appends
+			// "Add to group..." when there is at least one eligible
+			// target group — never advertises a dead path.
 			layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
-			a.memberMenu.Show(msg.User, a.resolveDisplayName(msg.User), layout.MemberX0+1, layout.MemberY0+2)
+			displayName := a.resolveDisplayName(msg.User)
+			items := a.buildMemberMenuItems(msg.User, displayName)
+			a.memberMenu.Show(msg.User, items, layout.MemberX0+1, layout.MemberY0+2)
+		case "add_to_existing_group":
+			// §9 step 7: open the shared picker over eligible target
+			// groups for the subject user. SubjectUserID is carried
+			// through selection so the post-resolution step
+			// (PickerSelectedMsg case "add_to_group") knows which
+			// user to add. Source=PickerSourceMemberPanel makes the
+			// origin explicit in observability/debug traces.
+			a.openPicker(PickerRequest{
+				Verb:            "add_to_group",
+				Source:          PickerSourceMemberPanel,
+				SubjectUserID:   msg.User,
+				SubjectUserName: a.resolveDisplayName(msg.User),
+				ShowFilter:      true,
+			})
 		case "message":
 			if a.client != nil {
 				if msg.User == a.client.UserID() {
@@ -1905,6 +1926,16 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.demoteConfirmForTarget(msg.Request.Group, msg.SelectedID)
 		case "/transfer":
 			a.transferConfirmForTarget(msg.Request.Group, msg.SelectedID)
+		case "add_to_group":
+			// §9 step 7: member-panel add-to-existing-group. ID-shape
+			// is OPPOSITE to slash `/add`: SelectedID is the picked
+			// GROUP ID; the user being added is the subject user
+			// carried in Request.SubjectUserID. The post-resolution
+			// step is the same addConfirmForTarget(groupID, userID)
+			// shared by step 5 — already-member etc. checks fire
+			// identically. Source==PickerSourceMemberPanel by
+			// construction; assert nothing changes on slash /add.
+			a.addConfirmForTarget(msg.SelectedID, msg.Request.SubjectUserID)
 		}
 		return a, nil
 
@@ -5199,6 +5230,11 @@ func (a *App) pickerCandidates(req PickerRequest) []PickerItem {
 		return a.demoteCandidates(req.Group)
 	case "/transfer":
 		return a.kickCandidates(req.Group) // same shape: members excl. self
+	case "add_to_group":
+		// §9 step 7: member-panel "Add to existing group" — items are
+		// GROUPS, subject user is req.SubjectUserID. Not a slash verb;
+		// see addToGroupCandidates doc for the ID-shape note.
+		return a.addToGroupCandidates(req.SubjectUserID)
 	default:
 		return nil
 	}
@@ -5439,6 +5475,110 @@ func (a *App) demoteCandidates(groupID string) []PickerItem {
 		items = append(items, PickerItem{
 			ID:      uid,
 			Primary: a.resolveDisplayName(uid),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Primary) < strings.ToLower(items[j].Primary)
+	})
+	return items
+}
+
+// defaultMemberMenuItems returns the standard member-context menu
+// actions for the given user. App callers start from this list and
+// conditionally append context-dependent extras (§9 step 7 appends
+// "Add to group..." when `addToGroupCandidates` is non-empty). Kept
+// as a free helper so it's trivially testable and the menu widget
+// stays dumb (it does not query any state).
+func defaultMemberMenuItems(displayName string) []ContextMenuItem {
+	return []ContextMenuItem{
+		{Label: "Create group with...", Action: "create_group"},
+		{Label: "Message " + displayName, Action: "message"},
+		{Label: "Verify " + displayName, Action: "verify"},
+		{Label: "View profile", Action: "profile"},
+	}
+}
+
+// buildMemberMenuItems composes the default member-menu items and
+// PREPENDS "Add to group..." at position 0 when the local user is an
+// admin of at least one group the subject user could be added to (§9
+// step 7 / member-panel-add-to-group.md). Top-of-list placement so
+// the action is the first thing under the cursor when the menu opens
+// — the typical reason an admin opens this menu on someone else is
+// to take an admin action on them, not to chat. If the action would
+// land in an empty picker, it is HIDDEN here — no dead path.
+func (a *App) buildMemberMenuItems(targetID, displayName string) []ContextMenuItem {
+	defaults := defaultMemberMenuItems(displayName)
+	if len(a.addToGroupCandidates(targetID)) == 0 {
+		return defaults
+	}
+	return append(
+		[]ContextMenuItem{{Label: "Add to group...", Action: "add_to_existing_group"}},
+		defaults...,
+	)
+}
+
+// addToGroupCandidates returns the list of GROUPS the member-panel
+// "Add to existing group" picker should offer, for the given subject
+// user (the one whose menu was opened). §9 step 7 / member-panel-
+// add-to-group.md. ID-shape note: returned PickerItem.ID is a GROUP
+// ID — opposite to slash `/add` where SelectedID is a user ID. The
+// caller routes by Request.Verb ("add_to_group") + Source
+// (PickerSourceMemberPanel) to interpret correctly. Eligibility (all
+// four must hold):
+//
+//  1. Local user is an admin of the group.
+//  2. Group is active (not archived / left locally).
+//  3. Subject user is not already a member of the group.
+//  4. Subject user is not retired AND not self (admin ⇒ member, so
+//     self-add is a dead path).
+//
+// Empty result → caller (member-menu) HIDES the action entirely; do
+// not surface a dead path. Sorted by display name for stability.
+func (a *App) addToGroupCandidates(subjectUserID string) []PickerItem {
+	if a.client == nil || subjectUserID == "" {
+		return nil
+	}
+	self := a.client.UserID()
+	if subjectUserID == self {
+		return nil // rule 4: self
+	}
+	if retired := a.client.RetiredUsers(); retired != nil {
+		if _, isRetired := retired[subjectUserID]; isRetired {
+			return nil // rule 4: retired
+		}
+	}
+	var items []PickerItem
+	for _, g := range a.sidebar.groups {
+		if g.ID == "" {
+			continue
+		}
+		// rule 1: local admin of the group
+		if !a.client.IsGroupAdmin(g.ID, self) {
+			continue
+		}
+		// rule 2: active. sidebar.groups is the LIVE active list
+		// (the sidebar reconciles archived/left at append time —
+		// using sidebar.groups instead of raw Store.GetAllGroups is
+		// the §6 rule because GetAllGroups has no left_at).
+		//
+		// rule 3: subject user not already a member
+		alreadyMember := false
+		for _, m := range a.client.GroupMembers(g.ID) {
+			if m == subjectUserID {
+				alreadyMember = true
+				break
+			}
+		}
+		if alreadyMember {
+			continue
+		}
+		name := strings.TrimSpace(a.client.DisplayGroupName(g.ID))
+		if name == "" {
+			name = g.ID
+		}
+		items = append(items, PickerItem{
+			ID:      g.ID,
+			Primary: name,
 		})
 	}
 	sort.Slice(items, func(i, j int) bool {
