@@ -75,6 +75,10 @@ func (m DemoteConfirmModel) View(width int) string {
 		return ""
 	}
 	var b strings.Builder
+	writeHelpLine := func(s string) {
+		b.WriteString(helpDescStyle.Render(s))
+		b.WriteString("\n")
+	}
 	b.WriteString(searchHeaderStyle.Render(" Demote admin?"))
 	b.WriteString("\n\n")
 	b.WriteString("  Demote " + errorStyle.Render(m.targetName) + " from admin?\n")
@@ -89,11 +93,11 @@ func (m DemoteConfirmModel) View(width int) string {
 			groupLabel = "the group"
 		}
 		if resulting == 1 && !m.targetIsSelf {
-			b.WriteString(helpDescStyle.Render(fmt.Sprintf("  After: %s will have 1 %s (you).\n", groupLabel, adminsLabel)))
-			b.WriteString(helpDescStyle.Render("  If you retire your account, the oldest remaining member\n"))
-			b.WriteString(helpDescStyle.Render("  will be auto-promoted as successor.\n"))
+			writeHelpLine(fmt.Sprintf("  After: %s will have 1 %s (you).", groupLabel, adminsLabel))
+			writeHelpLine("  If you retire your account, the oldest remaining member")
+			writeHelpLine("  will be auto-promoted as successor.")
 		} else {
-			b.WriteString(helpDescStyle.Render(fmt.Sprintf("  After: %s will have %d %s.\n", groupLabel, resulting, adminsLabel)))
+			writeHelpLine(fmt.Sprintf("  After: %s will have %d %s.", groupLabel, resulting, adminsLabel))
 		}
 	}
 	b.WriteString("\n")

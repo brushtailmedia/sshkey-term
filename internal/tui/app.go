@@ -1868,6 +1868,16 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// of msg.Request.Group, so the caller invariants of
 			// roleReadout hold by construction.
 			a.roleReadout(msg.Request.Group, msg.SelectedID)
+		case "/add":
+			a.addConfirmForTarget(msg.Request.Group, msg.SelectedID)
+		case "/kick":
+			a.kickConfirmForTarget(msg.Request.Group, msg.SelectedID)
+		case "/promote":
+			a.promoteConfirmForTarget(msg.Request.Group, msg.SelectedID)
+		case "/demote":
+			a.demoteConfirmForTarget(msg.Request.Group, msg.SelectedID)
+		case "/transfer":
+			a.transferConfirmForTarget(msg.Request.Group, msg.SelectedID)
 		}
 		return a, nil
 
@@ -4565,6 +4575,35 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			a.statusBar.SetError("Rename failed: " + err.Error())
 		}
 	case "/add", "/kick", "/promote", "/demote", "/transfer":
+		// §9 step 5: bare verb → shared picker; `verb @user` → existing
+		// direct path via handleGroupAdminCommand (typed-bypass
+		// coexists, #1c). Bare-branch gates (group context + local
+		// admin) mirror handleGroupAdminCommand's own messages so the
+		// two branches read identically; bare → invalid-context /
+		// non-admin surfaces a status, never opens an empty picker
+		// (§6 / #10).
+		if strings.TrimSpace(sc.Arg) == "" {
+			if sc.Group == "" {
+				a.statusBar.SetError(sc.Command + " only works inside a group DM")
+				return
+			}
+			if a.client == nil {
+				return
+			}
+			if !a.isLocalAdminOfGroup(sc.Group) {
+				a.statusBar.SetError("You are not an admin of this group — only admins can " + sc.Command + ". Type /admins to see who is.")
+				return
+			}
+			a.openPicker(PickerRequest{
+				Verb:       sc.Command,
+				Source:     PickerSourceSlash,
+				Room:       sc.Room,
+				Group:      sc.Group,
+				DM:         sc.DM,
+				ShowFilter: true, // #7
+			})
+			return
+		}
 		a.handleGroupAdminCommand(sc)
 	case "/whoami":
 		a.handleWhoamiCommand(sc)
@@ -5123,6 +5162,16 @@ func (a *App) pickerCandidates(req PickerRequest) []PickerItem {
 		return a.unverifyCandidates()
 	case "/role":
 		return a.roleCandidates(req.Group)
+	case "/add":
+		return a.addCandidates(req.Group)
+	case "/kick":
+		return a.kickCandidates(req.Group)
+	case "/promote":
+		return a.promoteCandidates(req.Group)
+	case "/demote":
+		return a.demoteCandidates(req.Group)
+	case "/transfer":
+		return a.kickCandidates(req.Group) // same shape: members excl. self
 	default:
 		return nil
 	}
@@ -5243,6 +5292,134 @@ func (a *App) unverifyCandidates() []PickerItem {
 	return items
 }
 
+// addCandidates returns users who are NOT in the active group (the
+// /add candidate set: § §6). Excludes self (admin implies membership
+// so self is filtered indirectly), retired (#9a), and current
+// members. Sorted by display name.
+func (a *App) addCandidates(groupID string) []PickerItem {
+	if a.client == nil || groupID == "" {
+		return nil
+	}
+	self := a.client.UserID()
+	retired := a.client.RetiredUsers()
+	members := make(map[string]bool)
+	for _, m := range a.client.GroupMembers(groupID) {
+		members[m] = true
+	}
+	seen := make(map[string]bool)
+	var items []PickerItem
+	a.client.ForEachProfile(func(p *protocol.Profile) {
+		if p == nil || p.User == "" || p.User == self || seen[p.User] {
+			return
+		}
+		if members[p.User] {
+			return // already in the group
+		}
+		if _, isRetired := retired[p.User]; isRetired {
+			return // #9a
+		}
+		seen[p.User] = true
+		items = append(items, PickerItem{
+			ID:      p.User,
+			Primary: a.resolveDisplayName(p.User),
+		})
+	})
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Primary) < strings.ToLower(items[j].Primary)
+	})
+	return items
+}
+
+// kickCandidates returns the active group's members excluding self
+// (you can't /kick yourself — `/leave` is the right verb; the typed
+// path silently redirects, and the picker just hides self) and
+// excluding retired (#9a). Also used as-is by `/transfer` (same
+// candidate shape — members excl. self).
+func (a *App) kickCandidates(groupID string) []PickerItem {
+	if a.client == nil || groupID == "" {
+		return nil
+	}
+	self := a.client.UserID()
+	retired := a.client.RetiredUsers()
+	var items []PickerItem
+	for _, uid := range a.client.GroupMembers(groupID) {
+		if uid == "" || uid == self {
+			continue
+		}
+		if _, isRetired := retired[uid]; isRetired {
+			continue
+		}
+		items = append(items, PickerItem{
+			ID:      uid,
+			Primary: a.resolveDisplayName(uid),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Primary) < strings.ToLower(items[j].Primary)
+	})
+	return items
+}
+
+// promoteCandidates returns active-group members who are NOT already
+// admins, excluding self and retired (#9a, #6).
+func (a *App) promoteCandidates(groupID string) []PickerItem {
+	if a.client == nil || groupID == "" {
+		return nil
+	}
+	self := a.client.UserID()
+	retired := a.client.RetiredUsers()
+	var items []PickerItem
+	for _, uid := range a.client.GroupMembers(groupID) {
+		if uid == "" || uid == self {
+			continue
+		}
+		if a.client.IsGroupAdmin(groupID, uid) {
+			continue // already an admin
+		}
+		if _, isRetired := retired[uid]; isRetired {
+			continue
+		}
+		items = append(items, PickerItem{
+			ID:      uid,
+			Primary: a.resolveDisplayName(uid),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Primary) < strings.ToLower(items[j].Primary)
+	})
+	return items
+}
+
+// demoteCandidates returns the active group's current admins,
+// retired excluded (#9a). Self is INTENTIONALLY included — self-
+// demote is a valid action (the existing DemoteConfirm carries
+// targetIsSelf and the last-admin guard applies) and matches the
+// typed path's behavior. No explicit self exclusion (unlike the
+// other mutating verbs).
+func (a *App) demoteCandidates(groupID string) []PickerItem {
+	if a.client == nil || groupID == "" {
+		return nil
+	}
+	retired := a.client.RetiredUsers()
+	var items []PickerItem
+	for _, uid := range a.client.GroupAdmins(groupID) {
+		if uid == "" {
+			continue
+		}
+		if _, isRetired := retired[uid]; isRetired {
+			continue
+		}
+		items = append(items, PickerItem{
+			ID:      uid,
+			Primary: a.resolveDisplayName(uid),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Primary) < strings.ToLower(items[j].Primary)
+	})
+	return items
+}
+
 // roleCandidates returns the current group's members for the `/role`
 // picker (#9b: group-scoped, NOT admin-gated; per #9a mark retired
 // members with Secondary="retired" but keep them in the list — /role
@@ -5323,8 +5500,6 @@ func (a *App) handleGroupAdminCommand(sc *SlashCommandMsg) {
 		return
 	}
 
-	groupName := a.lookupGroupName(sc.Group)
-
 	// Resolve @user → userID. /add looks at the profile cache (target
 	// is not yet a member); the other four verbs look at the current
 	// group's member list.
@@ -5339,44 +5514,108 @@ func (a *App) handleGroupAdminCommand(sc *SlashCommandMsg) {
 		a.statusBar.SetError("No user matching " + sc.Arg)
 		return
 	}
-	targetName := a.client.DisplayName(targetID)
 
+	// §9 step 5 / §3 entry-vs-post-resolution: dispatch to the per-
+	// verb POST-RESOLUTION step (ID → action). The picker selection
+	// path calls these same functions directly with its picked ID —
+	// neither path re-enters name resolution, so behavior is identical
+	// on both.
 	switch sc.Command {
 	case "/add":
-		for _, m := range a.client.GroupMembers(sc.Group) {
-			if m == targetID {
-				a.statusBar.SetError(targetName + " is already a member of this group")
-				return
-			}
-		}
-		a.addConfirm.Show(sc.Group, groupName, targetID, targetName)
+		a.addConfirmForTarget(sc.Group, targetID)
 	case "/kick":
-		// Self-kick shortcut: route to /leave flow instead (applies
-		// the last-admin gate and keeps the audit trail cleaner).
-		if targetID == a.client.UserID() {
-			a.leaveConfirm.Show(sc.Group, groupName)
-			return
-		}
-		memberCount := len(a.client.GroupMembers(sc.Group))
-		a.kickConfirm.Show(sc.Group, groupName, targetID, targetName, memberCount)
+		a.kickConfirmForTarget(sc.Group, targetID)
 	case "/promote":
-		if a.client.IsGroupAdmin(sc.Group, targetID) {
-			a.statusBar.SetError(targetName + " is already an admin")
-			return
-		}
-		a.promoteConfirm.Show(sc.Group, groupName, targetID, targetName)
+		a.promoteConfirmForTarget(sc.Group, targetID)
 	case "/demote":
-		if !a.client.IsGroupAdmin(sc.Group, targetID) {
-			a.statusBar.SetError(targetName + " is not an admin")
+		a.demoteConfirmForTarget(sc.Group, targetID)
+	case "/transfer":
+		a.transferConfirmForTarget(sc.Group, targetID)
+	}
+}
+
+// addConfirmForTarget is the post-resolution step for `/add` — opens
+// the existing AddConfirmModel for an already-resolved target. Shared
+// by the typed path (after name→ID) and the picker selection path.
+// Caller invariant: groupID is non-empty and the local user is an
+// admin of groupID (the typed path's gates enforce this; the picker
+// only opens when those gates pass).
+func (a *App) addConfirmForTarget(groupID, targetID string) {
+	if a.client == nil || groupID == "" || targetID == "" {
+		return
+	}
+	targetName := a.client.DisplayName(targetID)
+	for _, m := range a.client.GroupMembers(groupID) {
+		if m == targetID {
+			a.statusBar.SetError(targetName + " is already a member of this group")
 			return
 		}
-		adminCount := len(a.client.GroupAdmins(sc.Group))
-		targetIsSelf := targetID == a.client.UserID()
-		a.demoteConfirm.Show(sc.Group, groupName, targetID, targetName, adminCount, targetIsSelf)
-	case "/transfer":
-		alreadyAdmin := a.client.IsGroupAdmin(sc.Group, targetID)
-		a.transferConfirm.Show(sc.Group, groupName, targetID, targetName, alreadyAdmin)
 	}
+	a.addConfirm.Show(groupID, a.lookupGroupName(groupID), targetID, targetName)
+}
+
+// kickConfirmForTarget is the post-resolution step for `/kick`.
+// Self-kick is redirected to the /leave flow (applies the last-admin
+// gate and keeps the audit trail cleaner).
+func (a *App) kickConfirmForTarget(groupID, targetID string) {
+	if a.client == nil || groupID == "" || targetID == "" {
+		return
+	}
+	groupName := a.lookupGroupName(groupID)
+	if targetID == a.client.UserID() {
+		a.leaveConfirm.Show(groupID, groupName)
+		return
+	}
+	targetName := a.client.DisplayName(targetID)
+	memberCount := len(a.client.GroupMembers(groupID))
+	a.kickConfirm.Show(groupID, groupName, targetID, targetName, memberCount)
+}
+
+// promoteConfirmForTarget is the post-resolution step for `/promote`.
+// Already-admin → status, no dialog (matches the picker candidate
+// filter which already hides admins from the /promote list).
+func (a *App) promoteConfirmForTarget(groupID, targetID string) {
+	if a.client == nil || groupID == "" || targetID == "" {
+		return
+	}
+	targetName := a.client.DisplayName(targetID)
+	if a.client.IsGroupAdmin(groupID, targetID) {
+		a.statusBar.SetError(targetName + " is already an admin")
+		return
+	}
+	a.promoteConfirm.Show(groupID, a.lookupGroupName(groupID), targetID, targetName)
+}
+
+// demoteConfirmForTarget is the post-resolution step for `/demote`.
+// Not-an-admin → status, no dialog. Self-demote is permitted (the
+// existing DemoteConfirm carries targetIsSelf and the last-admin
+// guard applies). adminCount/targetIsSelf are derived here so the
+// picker selection path computes them the same way the typed path
+// does.
+func (a *App) demoteConfirmForTarget(groupID, targetID string) {
+	if a.client == nil || groupID == "" || targetID == "" {
+		return
+	}
+	targetName := a.client.DisplayName(targetID)
+	if !a.client.IsGroupAdmin(groupID, targetID) {
+		a.statusBar.SetError(targetName + " is not an admin")
+		return
+	}
+	adminCount := len(a.client.GroupAdmins(groupID))
+	targetIsSelf := targetID == a.client.UserID()
+	a.demoteConfirm.Show(groupID, a.lookupGroupName(groupID), targetID, targetName, adminCount, targetIsSelf)
+}
+
+// transferConfirmForTarget is the post-resolution step for `/transfer`.
+// targetAlreadyAdmin is derived here so the picker selection path
+// computes it the same way the typed path does (the existing
+// TransferConfirm flips its wording based on that flag).
+func (a *App) transferConfirmForTarget(groupID, targetID string) {
+	if a.client == nil || groupID == "" || targetID == "" {
+		return
+	}
+	alreadyAdmin := a.client.IsGroupAdmin(groupID, targetID)
+	a.transferConfirm.Show(groupID, a.lookupGroupName(groupID), targetID, a.client.DisplayName(targetID), alreadyAdmin)
 }
 
 // handleWhoamiCommand surfaces the local user's display name + role

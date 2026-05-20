@@ -183,6 +183,32 @@ func TestDemoteConfirm_YEmitsMsgWithFields(t *testing.T) {
 	}
 }
 
+func TestDemoteConfirm_ViewKeepsSingleAdminWarningOnSeparateLines(t *testing.T) {
+	m := DemoteConfirmModel{}
+	m.Show("group_x", "Project X", "usr_bob", "Bob", 2, false)
+	plain := stripANSI(m.View(120))
+	lines := strings.Split(plain, "\n")
+
+	findLine := func(fragment string) int {
+		t.Helper()
+		for i, line := range lines {
+			if strings.Contains(line, fragment) {
+				return i
+			}
+		}
+		t.Fatalf("view missing fragment %q in:\n%s", fragment, plain)
+		return -1
+	}
+
+	afterLine := findLine("After: Project X will have 1 admin (you).")
+	retireLine := findLine("If you retire your account, the oldest remaining member")
+	successorLine := findLine("will be auto-promoted as successor.")
+	if afterLine == retireLine || retireLine == successorLine {
+		t.Fatalf("single-admin warning lines collapsed together: after=%d retire=%d successor=%d\n%s",
+			afterLine, retireLine, successorLine, plain)
+	}
+}
+
 // --- TransferConfirmModel ---
 
 func TestTransferConfirm_YEmitsMsgWithFields(t *testing.T) {
@@ -274,16 +300,26 @@ func TestInputParser_NewAdminVerbsRouteToApp(t *testing.T) {
 	}
 }
 
-func TestInputParser_AdminVerbsWithoutGroupAreDropped(t *testing.T) {
-	// /add /kick /promote /demote /transfer are group-context only.
-	// Typed outside a group they silently drop (no pendingCmd set).
-	// The app layer's handleGroupAdminCommand would also reject, but
-	// this verifies the parser never emits a cmd without a group.
+func TestInputParser_AdminVerbsWithoutGroupForwardForFriendlyStatus(t *testing.T) {
+	// §9 step 5 (2026-05-20): the router now ALWAYS forwards these
+	// verbs, even from a non-group context — App's handler surfaces
+	// the friendly "only works inside a group DM" status instead of
+	// the previous silent input-box drop. (The earlier silent-drop
+	// contract was the same router-guard pattern that bit /role
+	// pre-step 3; same fix applied here.) This test was inverted
+	// from `…AreDropped` to lock the new forward-with-context
+	// contract; App-level handlers + the picker tests verify the
+	// resulting friendly-status behavior.
 	for _, cmd := range []string{"/add", "/kick", "/promote", "/demote", "/transfer"} {
 		i := &InputModel{}
 		i.handleCommand(cmd+" @bob", nil, "room_x", "", "")
-		if sc := i.PendingCommand(); sc != nil {
-			t.Errorf("%s in room context should not pendingCmd, got %+v", cmd, sc)
+		sc := i.PendingCommand()
+		if sc == nil {
+			t.Errorf("%s in room context should now forward to App (not be silently dropped)", cmd)
+			continue
+		}
+		if sc.Command != cmd || sc.Arg != "@bob" || sc.Room != "room_x" || sc.Group != "" {
+			t.Errorf("%s forwarded as %+v, want {Command:%s Arg:@bob Room:room_x Group:\"\"}", cmd, sc, cmd)
 		}
 	}
 }

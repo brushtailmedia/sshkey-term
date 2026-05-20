@@ -534,13 +534,17 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 		}
 	case "/add", "/kick", "/promote", "/demote", "/transfer":
-		// Phase 14 admin verbs. Each requires a group context and an
-		// @user argument. Route to the app layer for the pre-check,
-		// @user → userID resolution, and confirmation dialog. The
-		// actual wire send happens on dialog confirm.
-		if group != "" && arg != "" {
-			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Group: group}
-		}
+		// Forward ALL invocations to App so it can route per the
+		// shared-picker-widget.md §9 step 5: bare verb in a group →
+		// picker; bare outside a group / not-an-admin → existing
+		// friendly status messages (§6 invalid-context rule); typed
+		// `verb @user` → existing direct path via
+		// handleGroupAdminCommand. The earlier guard
+		// (`if group != "" && arg != ""`) dropped bare in the input
+		// box and was the same router gap as `/role` had pre-step 3
+		// (App's bare-handling branch unreachable). Forwarding
+		// Room/Group/DM/Arg so App has the active context.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	case "/whoami":
 		// Phase 14 status command. Shows the current user's own
 		// display name + role in the active context. Works in any

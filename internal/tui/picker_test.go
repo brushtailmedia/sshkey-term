@@ -685,6 +685,219 @@ func TestUnverifyCandidates_OnlyVerifiedExcludeSelfRetired(t *testing.T) {
 	}
 }
 
+// --- Mutating verbs (§9 step 5: /add /kick /promote /demote /transfer) ---
+
+// Each mutating verb shares the same bare-flow contract:
+//   - bare outside a group → friendly status, no picker
+//   - bare in a group as non-admin → friendly status, no picker
+//   - bare in a group as admin → picker opens with right req
+// Driven through `handleSlashCommand` (the real dispatch), but via a
+// constructed SlashCommandMsg since the router-level coverage is
+// `TestInputParser_GroupAdminRoutesToAppInAllForms` below.
+
+func mutatingVerbs() []string {
+	return []string{"/add", "/kick", "/promote", "/demote", "/transfer"}
+}
+
+// setupGroupAsAdmin seeds c so usr_self is a member + admin of g_x,
+// alongside alice (non-admin member) and bob (non-member candidate
+// for /add). Returns nothing — caller uses the names directly.
+func setupGroupAsAdmin(t *testing.T, c *client.Client) {
+	t.Helper()
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_alice", DisplayName: "Alice"})
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_bob", DisplayName: "Bob"})
+	client.SetGroupMembersForTesting(c, "g_x", []string{"usr_self", "usr_alice"})
+	client.SetGroupAdminsForTesting(c, "g_x", []string{"usr_self"})
+}
+
+func TestMutatingPicker_BareOutsideGroupStatusOnly(t *testing.T) {
+	for _, verb := range mutatingVerbs() {
+		a, _, _ := newPickerWhoisApp(t)
+		a.handleSlashCommand(&SlashCommandMsg{Command: verb})
+		if a.picker.IsVisible() {
+			t.Errorf("%s bare outside group must NOT open the picker", verb)
+		}
+		if !strings.Contains(a.statusBar.errorMsg, "only works inside a group") {
+			t.Errorf("%s expected 'only works inside a group' status, got %q", verb, a.statusBar.errorMsg)
+		}
+	}
+}
+
+func TestMutatingPicker_BareNonAdminStatusOnly(t *testing.T) {
+	for _, verb := range mutatingVerbs() {
+		a, c, _ := newPickerWhoisApp(t)
+		// self is a member but NOT an admin
+		client.SetGroupMembersForTesting(c, "g_x", []string{"usr_self", "usr_alice"})
+		client.SetGroupAdminsForTesting(c, "g_x", []string{"usr_alice"})
+		a.handleSlashCommand(&SlashCommandMsg{Command: verb, Group: "g_x"})
+		if a.picker.IsVisible() {
+			t.Errorf("%s bare as non-admin must NOT open the picker", verb)
+		}
+		if !strings.Contains(a.statusBar.errorMsg, "not an admin") {
+			t.Errorf("%s expected 'not an admin' status, got %q", verb, a.statusBar.errorMsg)
+		}
+	}
+}
+
+func TestMutatingPicker_BareInGroupAsAdminOpensPicker(t *testing.T) {
+	for _, verb := range mutatingVerbs() {
+		a, c, _ := newPickerWhoisApp(t)
+		setupGroupAsAdmin(t, c)
+		a.handleSlashCommand(&SlashCommandMsg{Command: verb, Group: "g_x"})
+		if !a.picker.IsVisible() {
+			t.Errorf("%s bare in group as admin MUST open the picker", verb)
+			continue
+		}
+		if a.picker.req.Verb != verb || a.picker.req.Group != "g_x" || !a.picker.req.ShowFilter {
+			t.Errorf("%s picker req = {%q,%q,filter=%v}, want {%q,g_x,true}",
+				verb, a.picker.req.Verb, a.picker.req.Group, a.picker.req.ShowFilter, verb)
+		}
+	}
+}
+
+// Picker selection routes each verb to the right existing XConfirm
+// via the new *ConfirmForTarget helpers. /add → addConfirm,
+// /kick → kickConfirm, /promote → promoteConfirm, /demote → demoteConfirm,
+// /transfer → transferConfirm.
+func TestMutatingPicker_SelectionOpensRightConfirm(t *testing.T) {
+	cases := []struct {
+		verb            string
+		selectedID      string
+		extraSetup      func(c *client.Client) // e.g. make selected an admin for /demote
+		wantVisibleFn   func(a App) bool
+		wantVisibleName string
+	}{
+		{"/add", "usr_bob", nil, func(a App) bool { return a.addConfirm.IsVisible() }, "addConfirm"},
+		{"/kick", "usr_alice", nil, func(a App) bool { return a.kickConfirm.IsVisible() }, "kickConfirm"},
+		{"/promote", "usr_alice", nil, func(a App) bool { return a.promoteConfirm.IsVisible() }, "promoteConfirm"},
+		{"/demote", "usr_alice", func(c *client.Client) {
+			// alice must be an admin for /demote to open the confirm.
+			client.SetGroupAdminsForTesting(c, "g_x", []string{"usr_self", "usr_alice"})
+		}, func(a App) bool { return a.demoteConfirm.IsVisible() }, "demoteConfirm"},
+		{"/transfer", "usr_alice", nil, func(a App) bool { return a.transferConfirm.IsVisible() }, "transferConfirm"},
+	}
+	for _, tc := range cases {
+		a, c, _ := newPickerWhoisApp(t)
+		setupGroupAsAdmin(t, c)
+		if tc.extraSetup != nil {
+			tc.extraSetup(c)
+		}
+		model, _ := (*a).Update(PickerSelectedMsg{
+			Request:    PickerRequest{Verb: tc.verb, Source: PickerSourceSlash, Group: "g_x"},
+			SelectedID: tc.selectedID,
+		})
+		na := model.(App)
+		if !tc.wantVisibleFn(na) {
+			t.Errorf("%s picker selection should open %s, but it is not visible (status=%q)",
+				tc.verb, tc.wantVisibleName, na.statusBar.errorMsg)
+		}
+	}
+}
+
+// Candidate builders — each verb has a different inclusion rule;
+// one focused test per builder.
+
+func TestAddCandidates_ExcludesMembersSelfRetired(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_alice", DisplayName: "Alice"}) // member → excluded
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_bob", DisplayName: "Bob"})     // non-member → eligible
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_carol", DisplayName: "Carol"}) // non-member but retired
+	client.SetGroupMembersForTesting(c, "g_x", []string{"usr_self", "usr_alice"})
+	client.SetRetiredForTesting(c, "usr_carol", "2026-05-20T00:00:00Z")
+
+	got := a.addCandidates("g_x")
+	if len(got) != 1 || got[0].ID != "usr_bob" {
+		ids := make([]string, len(got))
+		for i, it := range got {
+			ids[i] = it.ID
+		}
+		t.Fatalf("addCandidates = %v, want [usr_bob] (members/self/retired excluded)", ids)
+	}
+}
+
+func TestKickCandidates_MembersExcludeSelfRetired(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_alice", DisplayName: "Alice"})
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_bob", DisplayName: "Bob"})
+	client.SetGroupMembersForTesting(c, "g_x", []string{"usr_self", "usr_alice", "usr_bob"})
+	client.SetRetiredForTesting(c, "usr_bob", "2026-05-20T00:00:00Z")
+	got := a.kickCandidates("g_x")
+	if len(got) != 1 || got[0].ID != "usr_alice" {
+		t.Fatalf("kickCandidates = %v, want [usr_alice] only (self + retired excluded)", got)
+	}
+}
+
+func TestPromoteCandidates_NonAdminsExcludeSelfRetired(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_alice", DisplayName: "Alice"}) // member, non-admin → eligible
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_bob", DisplayName: "Bob"})     // member, already admin → excluded
+	client.SetGroupMembersForTesting(c, "g_x", []string{"usr_self", "usr_alice", "usr_bob"})
+	client.SetGroupAdminsForTesting(c, "g_x", []string{"usr_self", "usr_bob"})
+	got := a.promoteCandidates("g_x")
+	if len(got) != 1 || got[0].ID != "usr_alice" {
+		t.Fatalf("promoteCandidates = %v, want [usr_alice] only (admins + self excluded)", got)
+	}
+}
+
+func TestDemoteCandidates_AdminsIncludeSelfExcludeRetired(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_self", DisplayName: "Zelf"})
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_alice", DisplayName: "Alice"})
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_bob", DisplayName: "Bob"})
+	client.SetGroupMembersForTesting(c, "g_x", []string{"usr_self", "usr_alice", "usr_bob"})
+	client.SetGroupAdminsForTesting(c, "g_x", []string{"usr_self", "usr_alice", "usr_bob"})
+	client.SetRetiredForTesting(c, "usr_bob", "2026-05-20T00:00:00Z")
+	got := a.demoteCandidates("g_x")
+	// Self IS included (self-demote is valid). bob retired → excluded.
+	if len(got) != 2 {
+		t.Fatalf("demoteCandidates = %v, want 2 (self + alice; bob retired excluded)", got)
+	}
+	hasSelf := false
+	for _, it := range got {
+		if it.ID == "usr_self" {
+			hasSelf = true
+		}
+		if it.ID == "usr_bob" {
+			t.Fatal("demoteCandidates must exclude retired admin")
+		}
+	}
+	if !hasSelf {
+		t.Fatal("demoteCandidates MUST include self (self-demote is permitted; last-admin guard applies via DemoteConfirm)")
+	}
+}
+
+// TestInputParser_GroupAdminRoutesToAppInAllForms exercises the REAL
+// router path for /add /kick /promote /demote /transfer — the
+// regression guard for the same router-guard gap that bit /role.
+// The previous `if group != "" && arg != ""` silently dropped bare
+// forms; this test would have failed against that.
+func TestInputParser_GroupAdminRoutesToAppInAllForms(t *testing.T) {
+	for _, verb := range mutatingVerbs() {
+		cases := []struct {
+			text, group, room, dm string
+			wantArg, wantGroup    string
+		}{
+			{verb, "", "", "", "", ""},                       // bare outside group
+			{verb, "group_x", "", "", "", "group_x"},         // bare in group
+			{verb + " @alice", "group_x", "", "", "@alice", "group_x"}, // typed in group
+			{verb + " @alice", "", "room_x", "", "@alice", ""},         // typed outside group
+		}
+		for _, tc := range cases {
+			i := &InputModel{}
+			i.handleCommand(tc.text, nil, tc.room, tc.group, tc.dm)
+			sc := i.PendingCommand()
+			if sc == nil {
+				t.Errorf("%q in {group=%q room=%q} produced no pendingCmd — router still guarding bare/non-group", tc.text, tc.group, tc.room)
+				continue
+			}
+			if sc.Command != verb || sc.Arg != tc.wantArg || sc.Group != tc.wantGroup {
+				t.Errorf("%q in {group=%q room=%q} routed as {Command:%q Arg:%q Group:%q}, want {%q %q %q}",
+					tc.text, tc.group, tc.room, sc.Command, sc.Arg, sc.Group, verb, tc.wantArg, tc.wantGroup)
+			}
+		}
+	}
+}
+
 // TestInputParser_RoleRoutesToAppInAllForms exercises the REAL input
 // router path (`handleCommand` → `PendingCommand`) for /role — the
 // path the App-handler-in-isolation tests above do NOT touch, and
