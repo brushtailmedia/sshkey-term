@@ -12,23 +12,48 @@ import (
 // DISABLED 2026-05-19 pending the picker-hand-off rework — the keys were
 // mis-wired (K/x froze the app behind the modal info panel; a/p were
 // no-ops). The group footer must NOT advertise them; it shows the
-// generic footer until the picker is implemented. See missing.md §2a.
-// When the picker lands, update this test to assert the re-wired hints.
-func TestInfoPanel_GroupFooterAdminHintsDisabled(t *testing.T) {
+// §9 step 6 re-enable (2026-05-20): the group info-panel admin hints
+// are role-gated — shown ONLY to group admins (the user). This pair of
+// tests pins both halves of that contract: admins see `a/r/p/x`
+// hints; non-admins see the generic footer with no admin keys
+// advertised.
+func TestInfoPanel_GroupFooterAdminHintsShownForAdmin(t *testing.T) {
 	i := InfoPanelModel{
-		visible: true,
-		group:   "group_1",
-		isGroup: true,
-		members: []memberInfo{{User: "usr_alice", DisplayName: "Alice"}},
+		visible:      true,
+		group:        "group_1",
+		isGroup:      true,
+		isGroupAdmin: true, // local user IS a group admin
+		members:      []memberInfo{{User: "usr_alice", DisplayName: "Alice"}},
 	}
 	view := i.View(80)
-	for _, banned := range []string{"a=add", "K=remove", "p=promote", "x=demote"} {
+	for _, expected := range []string{"a=add", "r=remove", "p=promote", "x=demote"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("group admin footer should contain %q, got:\n%s", expected, view)
+		}
+	}
+	// Capital `K` must NOT come back — `r` is the locked letter
+	// (group-infopanel-picker-rework.md §1).
+	if strings.Contains(view, "K=remove") {
+		t.Fatalf("'K=remove' is the OLD locked letter; the new contract is `r=remove`, got:\n%s", view)
+	}
+}
+
+func TestInfoPanel_GroupFooterAdminHintsHiddenForNonAdmin(t *testing.T) {
+	i := InfoPanelModel{
+		visible:      true,
+		group:        "group_1",
+		isGroup:      true,
+		isGroupAdmin: false, // non-admin in the same group
+		members:      []memberInfo{{User: "usr_alice", DisplayName: "Alice"}},
+	}
+	view := i.View(80)
+	for _, banned := range []string{"a=add", "r=remove", "p=promote", "x=demote"} {
 		if strings.Contains(view, banned) {
-			t.Fatalf("group info footer must NOT contain disabled admin hint %q (pending picker rework, missing.md §2a), got:\n%s", banned, view)
+			t.Fatalf("non-admin group footer must NOT advertise admin hint %q (role-gated), got:\n%s", banned, view)
 		}
 	}
 	if !strings.Contains(view, "Esc=close") {
-		t.Fatalf("group info footer should still show the generic footer, got:\n%s", view)
+		t.Fatalf("non-admin group footer should still show the generic footer, got:\n%s", view)
 	}
 }
 

@@ -21,6 +21,7 @@ type InfoPanelModel struct {
 	topic           string
 	name            string
 	isGroup         bool
+	isGroupAdmin    bool // local user is an admin of i.group (set by ShowGroup; gates the a/r/p/x footer keys + admin-hint text)
 	isDM            bool
 	left            bool // true when the user has left this context (read-only)
 	retired         bool // true when the room has been retired by an admin (Phase 12)
@@ -88,6 +89,23 @@ type MemberActionMsg struct {
 	User   string
 }
 
+// InfoPanelAdminKeyMsg is emitted by the group info panel's four
+// admin-action footer keys (a/r/p/x) when the local user is a group
+// admin (`isGroupAdmin`). App routes per Verb: "/add" → openPicker
+// (target is not in the panel list — non-member); "/kick" /
+// "/promote" / "/demote" → the matching `<verb>ConfirmForTarget`
+// for the highlighted member. The panel is Hide()d BEFORE this
+// message is queued (#6 modal lifecycle — Hide-before-Show prevents
+// the original freeze-class bug where a confirm opened behind the
+// still-visible modal panel). See group-infopanel-picker-rework.md
+// §1; do NOT restore the old inline MemberActionMsg{admin_*}
+// emission.
+type InfoPanelAdminKeyMsg struct {
+	Verb     string // "/add", "/kick", "/promote", "/demote"
+	Group    string
+	TargetID string // selected member's ID; empty for "/add" (target picked by /add picker, not the panel)
+}
+
 // RefreshRequestMsg is emitted by refresh-key bindings in info-panel /
 // device-manager / the global Ctrl+Shift+R handler. The app routes it
 // to the matching client request verb and starts the "refreshing…"
@@ -109,6 +127,7 @@ func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[stri
 	i.group = ""
 	i.dm = ""
 	i.isGroup = false
+	i.isGroupAdmin = false
 	i.isDM = false
 	i.isUser = false // clear the user-profile mode flag so a prior ShowUser doesn't leak through
 	i.cursor = 0
@@ -171,6 +190,18 @@ func (i *InfoPanelModel) ShowGroup(groupID string, c *client.Client, online map[
 	i.group = groupID
 	i.dm = ""
 	i.isGroup = true
+	// Role-gate the admin footer keys (a/r/p/x) + hint text: shown
+	// only when the LOCAL user is an admin of this group
+	// (group-infopanel-picker-rework.md §1). A non-admin in the same
+	// group sees the generic footer with the keys inert. Computed
+	// from the live client at Show time; if the admin set changes
+	// while the panel is open (server broadcasts a promote/demote),
+	// the panel reopens with fresh state on the next entry.
+	if c != nil {
+		i.isGroupAdmin = c.IsGroupAdmin(groupID, c.UserID())
+	} else {
+		i.isGroupAdmin = false
+	}
 	i.isDM = false
 	i.isUser = false // clear the user-profile mode flag so a prior ShowUser doesn't leak through
 	i.cursor = 0
@@ -229,6 +260,7 @@ func (i *InfoPanelModel) ShowDM(dmID string, c *client.Client, online map[string
 	i.group = ""
 	i.dm = dmID
 	i.isGroup = false
+	i.isGroupAdmin = false
 	i.isDM = true
 	i.isUser = false // clear the user-profile mode flag so a prior ShowUser doesn't leak through
 	i.cursor = 0
@@ -307,6 +339,7 @@ func (i *InfoPanelModel) ShowUser(userID string, c *client.Client, online map[st
 	i.group = ""
 	i.dm = ""
 	i.isGroup = false
+	i.isGroupAdmin = false
 	i.isDM = false
 	i.cursor = 0
 	i.scroll = 0
@@ -576,26 +609,56 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 			return MuteToggleMsg{Target: target, Kind: kind, Muted: muted}
 		}
 	case "r":
-		// Phase 17c Step 6: refresh room member list. Only meaningful
-		// in room context (groups use group_event broadcasts to stay
-		// current; DMs have no member list). App.go handles the
-		// actual server request + statusBar.SetRefreshing.
+		// Two contexts share the `r` key:
+		//   - room: refresh the room member list (Phase 17c Step 6).
+		//   - group as admin: /kick the highlighted member
+		//     (group-infopanel-picker-rework.md §1 step 6 re-enable).
+		// The contexts are mutually exclusive (i.room=="" in groups,
+		// i.isGroup=false in rooms), so the two branches never collide.
 		if i.room != "" {
 			return i, func() tea.Msg {
 				return RefreshRequestMsg{Kind: "room_members"}
 			}
 		}
-		// Phase 14 admin-action shortcuts (a=add, K=remove, p=promote,
-		// x=demote) are DISABLED 2026-05-19. They were mis-wired: K/x opened
-		// a confirmation dialog that stayed trapped behind the still-modal
-		// info panel (the app appeared frozen); a/p were effectively no-ops.
-		// Rather than fix wiring that is about to be replaced, the keys are
-		// removed here pending the locked picker-hand-off rework (a/r/p/x →
-		// close the panel + open the verb's picker). Do NOT re-add inline
-		// MemberActionMsg{admin_*} emission from the info panel — see
-		// missing.md §2a. Until the picker lands, group admin actions are
-		// via the typed /add /kick /promote /demote commands; these
-		// keystrokes are intentionally inert no-ops in the info panel.
+		if i.isGroup && i.isGroupAdmin && i.cursor >= 0 && i.cursor < len(i.members) {
+			groupID, target := i.group, i.members[i.cursor].User
+			i.Hide() // #6 modal lifecycle — Hide BEFORE the next modal opens
+			return i, func() tea.Msg {
+				return InfoPanelAdminKeyMsg{Verb: "/kick", Group: groupID, TargetID: target}
+			}
+		}
+	case "a":
+		// /add: target is a NON-member (not in the panel list) — this
+		// is the ONLY footer key that hands off to the shared picker.
+		// App routes per Source/Verb to openPicker.
+		if i.isGroup && i.isGroupAdmin {
+			groupID := i.group
+			i.Hide()
+			return i, func() tea.Msg {
+				return InfoPanelAdminKeyMsg{Verb: "/add", Group: groupID}
+			}
+		}
+	case "p":
+		// /promote the highlighted member. Already-admin → status
+		// message via promoteConfirmForTarget (mirrors typed path).
+		if i.isGroup && i.isGroupAdmin && i.cursor >= 0 && i.cursor < len(i.members) {
+			groupID, target := i.group, i.members[i.cursor].User
+			i.Hide()
+			return i, func() tea.Msg {
+				return InfoPanelAdminKeyMsg{Verb: "/promote", Group: groupID, TargetID: target}
+			}
+		}
+	case "x":
+		// /demote the highlighted member. Existing DemoteConfirm
+		// safeguards (adminCount, targetIsSelf, last-admin) apply via
+		// demoteConfirmForTarget; not-an-admin → status message.
+		if i.isGroup && i.isGroupAdmin && i.cursor >= 0 && i.cursor < len(i.members) {
+			groupID, target := i.group, i.members[i.cursor].User
+			i.Hide()
+			return i, func() tea.Msg {
+				return InfoPanelAdminKeyMsg{Verb: "/demote", Group: groupID, TargetID: target}
+			}
+		}
 	}
 	if movedCursor {
 		i.syncScrollToSelection()
@@ -787,10 +850,16 @@ func (i InfoPanelModel) renderContextContent() ([]string, int) {
 	if i.isDM {
 		appendLine(helpDescStyle.Render(" m=mute  Esc=close"))
 	} else if i.isGroup {
-		// Group admin-action hints intentionally omitted: the a/K/p/x
-		// keys are disabled pending the picker rework (missing.md §2a).
-		// Re-add the hint here when the picker hand-off is wired.
-		appendLine(helpDescStyle.Render(" Enter=message  m=mute  Esc=close"))
+		// Group admin-action hints (group-infopanel-picker-rework.md §1
+		// step 6): shown ONLY to group admins; non-admins see the
+		// generic footer. `a` hands off to the /add picker (the one
+		// footer→picker path); `r/p/x` act directly on the highlighted
+		// member via the existing kick/promote/demote confirms.
+		if i.isGroupAdmin {
+			appendLine(helpDescStyle.Render(" Enter=message  a=add  r=remove  p=promote  x=demote  m=mute  Esc=close"))
+		} else {
+			appendLine(helpDescStyle.Render(" Enter=message  m=mute  Esc=close"))
+		}
 	} else {
 		// Room context: surface r=refresh — `r` performs a real
 		// room-member-list refresh here (missing.md §2c). It is a no-op

@@ -1738,6 +1738,33 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case InfoPanelAdminKeyMsg:
+		// §9 step 6: group info-panel admin keys (a/r/p/x) hand off to
+		// the right downstream. Panel is already Hide()d by the time
+		// this fires (#6 modal lifecycle — Hide-before-Show). `a` is
+		// the only verb that opens the shared picker (target is not
+		// in the panel's member list); the other three call the
+		// matching `<verb>ConfirmForTarget` for the highlighted
+		// member, reusing the exact post-resolution step the typed
+		// path uses (#3) — so already-admin / not-an-admin / self
+		// pre-checks and last-admin guards behave identically.
+		switch msg.Verb {
+		case "/add":
+			a.openPicker(PickerRequest{
+				Verb:       "/add",
+				Source:     PickerSourceInfoPanel,
+				Group:      msg.Group,
+				ShowFilter: true,
+			})
+		case "/kick":
+			a.kickConfirmForTarget(msg.Group, msg.TargetID)
+		case "/promote":
+			a.promoteConfirmForTarget(msg.Group, msg.TargetID)
+		case "/demote":
+			a.demoteConfirmForTarget(msg.Group, msg.TargetID)
+		}
+		return a, nil
+
 	case MemberActionMsg:
 		fromMembersPanel := a.memberPanel.IsVisible() && (a.focus == FocusMembers || a.memberMenu.IsVisible())
 		fromContextInfoPanel := a.infoPanel.IsVisible() && !a.infoPanel.isDM && (a.infoPanel.room != "" || a.infoPanel.group != "")

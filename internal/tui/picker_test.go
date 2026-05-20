@@ -866,6 +866,43 @@ func TestDemoteCandidates_AdminsIncludeSelfExcludeRetired(t *testing.T) {
 	}
 }
 
+// §9 step 6: InfoPanelAdminKeyMsg routes per-verb. `/add` opens the
+// shared picker (target is not in the panel list); `r/p/x` invoke
+// the matching ConfirmForTarget for the highlighted member. App
+// owns all routing; the panel stayed dumb (just emitted the msg).
+func TestInfoPanelAdminKeyMsg_Routing(t *testing.T) {
+	cases := []struct {
+		verb            string
+		targetID        string
+		setup           func(t *testing.T, c *client.Client)
+		wantVisibleFn   func(a App) bool
+		wantVisibleName string
+	}{
+		{"/add", "", setupGroupAsAdmin,
+			func(a App) bool { return a.picker.IsVisible() && a.picker.req.Verb == "/add" && a.picker.req.Source == PickerSourceInfoPanel },
+			"picker (Source=info_panel, Verb=/add)"},
+		{"/kick", "usr_alice", setupGroupAsAdmin,
+			func(a App) bool { return a.kickConfirm.IsVisible() }, "kickConfirm"},
+		{"/promote", "usr_alice", setupGroupAsAdmin,
+			func(a App) bool { return a.promoteConfirm.IsVisible() }, "promoteConfirm"},
+		{"/demote", "usr_alice", func(t *testing.T, c *client.Client) {
+			setupGroupAsAdmin(t, c)
+			// alice must be an admin for /demote to open the confirm.
+			client.SetGroupAdminsForTesting(c, "g_x", []string{"usr_self", "usr_alice"})
+		}, func(a App) bool { return a.demoteConfirm.IsVisible() }, "demoteConfirm"},
+	}
+	for _, tc := range cases {
+		a, c, _ := newPickerWhoisApp(t)
+		tc.setup(t, c)
+		model, _ := (*a).Update(InfoPanelAdminKeyMsg{Verb: tc.verb, Group: "g_x", TargetID: tc.targetID})
+		na := model.(App)
+		if !tc.wantVisibleFn(na) {
+			t.Errorf("InfoPanelAdminKeyMsg{%q} did not route to %s (statusBar=%q)",
+				tc.verb, tc.wantVisibleName, na.statusBar.errorMsg)
+		}
+	}
+}
+
 // TestInputParser_GroupAdminRoutesToAppInAllForms exercises the REAL
 // router path for /add /kick /promote /demote /transfer — the
 // regression guard for the same router-guard gap that bit /role.

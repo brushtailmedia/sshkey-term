@@ -480,23 +480,79 @@ func TestInputParser_GroupcreateDmcreateRouteBareAndWithArg(t *testing.T) {
 // A/K/P/X admin keys are DISABLED 2026-05-19 — they were mis-wired
 // (K/x froze the app behind the modal info panel; a/p were no-ops).
 // They are now inert no-ops in the group info panel pending the locked
-// picker-hand-off rework (a/r/p/x → close panel + open the verb's
-// picker). See missing.md §2a. When the picker lands, replace this with
-// the re-wired behaviour.
-func TestInfoPanel_AKPXAdminKeysDisabledInGroup(t *testing.T) {
-	for _, key := range []string{"a", "K", "p", "x"} {
+// §9 step 6 re-enable (2026-05-20): the four admin-action footer keys
+// (a/r/p/x) emit InfoPanelAdminKeyMsg with the right Verb and
+// (for r/p/x) the highlighted member's ID. `a` carries no TargetID
+// because its target is a NON-member (picked via the shared picker
+// App opens in response). `K` (capital) is NOT re-enabled — `r` is
+// the locked letter. Panel Hide()d before the message fires (#6).
+// This test pair replaces the prior `…DisabledInGroup` locking test.
+func TestInfoPanel_AKPXAdminKeysEmitMsgForAdmin(t *testing.T) {
+	cases := []struct {
+		key          string
+		wantVerb     string
+		wantTargetID string
+	}{
+		{"a", "/add", ""},          // target picked later via the /add picker
+		{"r", "/kick", "usr_bob"},  // highlighted member
+		{"p", "/promote", "usr_bob"},
+		{"x", "/demote", "usr_bob"},
+	}
+	for _, tc := range cases {
 		i := InfoPanelModel{
-			visible: true,
-			isGroup: true,
+			visible:      true,
+			group:        "group_1",
+			isGroup:      true,
+			isGroupAdmin: true,
 			members: []memberInfo{
 				{User: "usr_alice", DisplayName: "alice"},
 				{User: "usr_bob", DisplayName: "bob"},
 			},
-			cursor: 1, // bob
+			cursor: 1, // bob highlighted
+		}
+		updated, cmd := i.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(tc.key)})
+		if cmd == nil {
+			t.Errorf("%q (admin) must emit InfoPanelAdminKeyMsg, got nil", tc.key)
+			continue
+		}
+		// Modal lifecycle (#6 freeze-fix): panel Hide()d BEFORE the
+		// confirm/picker opens — never two modals visible at once.
+		if updated.IsVisible() {
+			t.Errorf("%q must Hide the panel before emitting the message (#6 lifecycle)", tc.key)
+		}
+		msg, ok := cmd().(InfoPanelAdminKeyMsg)
+		if !ok {
+			t.Errorf("%q emitted %T, want InfoPanelAdminKeyMsg", tc.key, cmd())
+			continue
+		}
+		if msg.Verb != tc.wantVerb || msg.Group != "group_1" || msg.TargetID != tc.wantTargetID {
+			t.Errorf("%q emitted {Verb:%q Group:%q TargetID:%q}, want {%q group_1 %q}",
+				tc.key, msg.Verb, msg.Group, msg.TargetID, tc.wantVerb, tc.wantTargetID)
+		}
+	}
+	// Capital K stays out — `r` is the new letter (group-infopanel-picker-rework.md §1).
+	i := InfoPanelModel{visible: true, group: "group_1", isGroup: true, isGroupAdmin: true,
+		members: []memberInfo{{User: "usr_alice"}}, cursor: 0}
+	if _, cmd := i.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("K")}); cmd != nil {
+		t.Errorf("capital K must NOT be the remove key — `r` is locked; emitted %T", cmd())
+	}
+}
+
+// Role-gating: a non-admin in the same group sees the keys as inert
+// (no messages emitted), matching the footer hint suppression.
+func TestInfoPanel_AKPXAdminKeysInertForNonAdmin(t *testing.T) {
+	for _, key := range []string{"a", "r", "p", "x"} {
+		i := InfoPanelModel{
+			visible:      true,
+			group:        "group_1",
+			isGroup:      true,
+			isGroupAdmin: false, // non-admin
+			members:      []memberInfo{{User: "usr_alice"}, {User: "usr_bob"}},
+			cursor:       1,
 		}
 		_, cmd := i.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
 		if cmd != nil {
-			t.Errorf("%q must be an inert no-op in the group info panel (admin keys disabled pending picker rework, missing.md §2a); emitted %T", key, cmd())
+			t.Errorf("%q for non-admin must be inert (role-gated), emitted %T", key, cmd())
 		}
 	}
 }
