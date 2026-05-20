@@ -256,7 +256,7 @@ func (n NewConvModel) View(width int) string {
 
 	var b strings.Builder
 
-	b.WriteString(searchHeaderStyle.Render("New Group DM"))
+	b.WriteString(searchHeaderStyle.Render("New Group or DM"))
 	b.WriteString("\n\n")
 
 	// Selected members
