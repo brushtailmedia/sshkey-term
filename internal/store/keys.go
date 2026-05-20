@@ -206,6 +206,30 @@ func (s *Store) ClearVerified(user string) error {
 	return err
 }
 
+// ListVerifiedPinnedKeys returns the user IDs of every pinned_keys row
+// currently marked verified=1. Backs the `/unverify` shared-picker
+// candidate builder (shared-picker-widget.md §6 — the one net-new
+// store helper the spec called out); enumerating verified users by
+// scanning unrelated TUI state would be both incomplete (only live
+// in-memory profiles) and a layering violation. Returns IDs only
+// (not display names) — callers resolve display via the usual path.
+func (s *Store) ListVerifiedPinnedKeys() ([]string, error) {
+	rows, err := s.db.Query(`SELECT user FROM pinned_keys WHERE verified = 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
 // StoreSeqMark stores the high-water seq for replay detection.
 func (s *Store) StoreSeqMark(key string, seq int64) error {
 	_, err := s.db.Exec(`

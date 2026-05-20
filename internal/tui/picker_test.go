@@ -348,6 +348,41 @@ func TestVerifyPicker_SelectionOpensVerifyModel(t *testing.T) {
 	}
 }
 
+// Typed `/verify @user` on an already-verified user must surface a
+// friendly status and NOT re-open the safety-number flow — matches
+// the picker candidate filter which excludes already-verified users.
+func TestVerifyTyped_AlreadyVerifiedStatusOnly(t *testing.T) {
+	a, c, st := newPickerWhoisApp(t)
+	seedAlice(t, c, st)
+	if err := st.MarkVerified("usr_alice"); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/verify", Arg: "Alice"})
+	if a.verify.IsVisible() {
+		t.Fatal("typed /verify on an already-verified user must NOT open VerifyModel")
+	}
+	if !strings.Contains(a.statusBar.errorMsg, "already verified") {
+		t.Fatalf("expected 'already verified' status, got %q", a.statusBar.errorMsg)
+	}
+}
+
+// Typed `/unverify @user` on a user who isn't currently verified must
+// surface a friendly status and NOT open the new confirm dialog —
+// matches the picker candidate filter (`unverifyCandidates` returns
+// only currently-verified). Covers both "pinned but verified=0" and
+// "no pinned key at all": neither is meaningfully unverifiable.
+func TestUnverifyTyped_NotVerifiedStatusOnly(t *testing.T) {
+	a, c, st := newPickerWhoisApp(t)
+	seedAlice(t, c, st) // pinned but NOT MarkVerified'd
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/unverify", Arg: "Alice"})
+	if a.unverifyConfirm.IsVisible() {
+		t.Fatal("typed /unverify on a not-verified user must NOT open the confirm")
+	}
+	if !strings.Contains(a.statusBar.errorMsg, "not verified") {
+		t.Fatalf("expected 'not verified' status, got %q", a.statusBar.errorMsg)
+	}
+}
+
 func TestVerifyCandidates_ExcludesVerifiedRetiredNoKeySelf(t *testing.T) {
 	a, c, st := newPickerWhoisApp(t)
 
@@ -491,6 +526,162 @@ func TestRoleCandidates_EmptyOutsideGroup(t *testing.T) {
 	a, _, _ := newPickerWhoisApp(t)
 	if got := a.roleCandidates(""); got != nil {
 		t.Fatalf("roleCandidates(\"\") = %v, want nil", got)
+	}
+}
+
+// --- /unverify (§9 step 4) ---
+
+func TestUnverifyConfirm_YEmitsMsg(t *testing.T) {
+	var m UnverifyConfirmModel
+	m.Show("usr_alice", "Alice")
+	if !m.IsVisible() {
+		t.Fatal("Show must mark visible")
+	}
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if m2.IsVisible() {
+		t.Fatal("y must Hide the confirm")
+	}
+	if cmd == nil {
+		t.Fatal("y must emit a command")
+	}
+	msg, ok := cmd().(UnverifyConfirmMsg)
+	if !ok || msg.TargetID != "usr_alice" {
+		t.Fatalf("y emitted %v, want UnverifyConfirmMsg{usr_alice}", cmd())
+	}
+}
+
+func TestUnverifyConfirm_NCancels(t *testing.T) {
+	var m UnverifyConfirmModel
+	m.Show("usr_alice", "Alice")
+	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if m2.IsVisible() {
+		t.Fatal("n must Hide the confirm")
+	}
+	if cmd != nil {
+		t.Fatal("n must NOT emit a command (cancel = no-op)")
+	}
+}
+
+func TestUnverifyPicker_BareOpensPicker(t *testing.T) {
+	a, c, st := newPickerWhoisApp(t)
+	// Seed bob as a verified candidate so the picker is non-empty.
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_bob", DisplayName: "Bob"})
+	if err := st.PinKey("usr_bob", "SHA256:b", "ssh-ed25519 b"); err != nil {
+		t.Fatalf("PinKey: %v", err)
+	}
+	if err := st.MarkVerified("usr_bob"); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/unverify"})
+	if !a.picker.IsVisible() {
+		t.Fatal("bare /unverify must open the shared picker (§9 step 4)")
+	}
+	if a.picker.req.Verb != "/unverify" || !a.picker.req.ShowFilter {
+		t.Fatalf("picker req = {%q, filter=%v}, want {/unverify, true}", a.picker.req.Verb, a.picker.req.ShowFilter)
+	}
+	if a.unverifyConfirm.IsVisible() {
+		t.Fatal("bare /unverify must NOT open the confirm directly — picker first")
+	}
+}
+
+func TestUnverifyPicker_TypedOpensConfirmNotImmediate(t *testing.T) {
+	a, c, st := newPickerWhoisApp(t)
+	seedAlice(t, c, st)
+	if err := st.MarkVerified("usr_alice"); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/unverify", Arg: "Alice"})
+	if a.picker.IsVisible() {
+		t.Fatal("typed /unverify @user must BYPASS the picker (#1c)")
+	}
+	if !a.unverifyConfirm.IsVisible() {
+		t.Fatal("typed /unverify @user MUST now open the confirm (no longer immediate clear) — #8 the one net-new dialog")
+	}
+	// The verification must still be intact until the user confirms.
+	info, _ := st.GetPinnedKeyInfo("usr_alice")
+	if !info.Verified {
+		t.Fatal("typed /unverify must NOT clear verification before the confirm — that was the silent-trust-removal gap #8 closes")
+	}
+}
+
+func TestUnverifyPicker_SelectionOpensConfirm(t *testing.T) {
+	a, c, st := newPickerWhoisApp(t)
+	seedAlice(t, c, st)
+	if err := st.MarkVerified("usr_alice"); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+	model, _ := (*a).Update(PickerSelectedMsg{
+		Request:    PickerRequest{Verb: "/unverify", Source: PickerSourceSlash},
+		SelectedID: "usr_alice",
+	})
+	na := model.(App)
+	if !na.unverifyConfirm.IsVisible() {
+		t.Fatal("PickerSelectedMsg{/unverify} must open the new confirm — picker selection is NOT an immediate clear")
+	}
+	info, _ := st.GetPinnedKeyInfo("usr_alice")
+	if !info.Verified {
+		t.Fatal("picker selection must NOT clear verification before the confirm")
+	}
+}
+
+func TestUnverifyConfirm_YClearsVerified(t *testing.T) {
+	a, c, st := newPickerWhoisApp(t)
+	seedAlice(t, c, st)
+	if err := st.MarkVerified("usr_alice"); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+	// Drive an UnverifyConfirmMsg straight into App.Update — same Msg
+	// the dialog's y/enter would emit.
+	model, _ := (*a).Update(UnverifyConfirmMsg{TargetID: "usr_alice"})
+	na := model.(App)
+	info, _ := st.GetPinnedKeyInfo("usr_alice")
+	if info.Verified {
+		t.Fatal("UnverifyConfirmMsg must call Store.ClearVerified")
+	}
+	if !strings.Contains(na.statusBar.errorMsg, "Verification removed") {
+		t.Fatalf("status should confirm removal, got %q", na.statusBar.errorMsg)
+	}
+}
+
+func TestUnverifyCandidates_OnlyVerifiedExcludeSelfRetired(t *testing.T) {
+	a, c, st := newPickerWhoisApp(t)
+	// alice: pinned + verified → eligible.
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_alice", DisplayName: "Alice"})
+	if err := st.PinKey("usr_alice", "SHA256:a", "ssh-ed25519 a"); err != nil {
+		t.Fatalf("PinKey: %v", err)
+	}
+	if err := st.MarkVerified("usr_alice"); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+	// bob: pinned but NOT verified → must be excluded.
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_bob", DisplayName: "Bob"})
+	if err := st.PinKey("usr_bob", "SHA256:b", "ssh-ed25519 b"); err != nil {
+		t.Fatalf("PinKey bob: %v", err)
+	}
+	// dave: pinned + verified BUT RETIRED → must be excluded (#9a).
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_dave", DisplayName: "Dave"})
+	if err := st.PinKey("usr_dave", "SHA256:d", "ssh-ed25519 d"); err != nil {
+		t.Fatalf("PinKey dave: %v", err)
+	}
+	if err := st.MarkVerified("usr_dave"); err != nil {
+		t.Fatalf("MarkVerified dave: %v", err)
+	}
+	client.SetRetiredForTesting(c, "usr_dave", "2026-05-20T00:00:00Z")
+	// self: pinned + verified → must NOT appear in own list.
+	if err := st.PinKey("usr_self", "SHA256:s", "ssh-ed25519 s"); err != nil {
+		t.Fatalf("PinKey self: %v", err)
+	}
+	if err := st.MarkVerified("usr_self"); err != nil {
+		t.Fatalf("MarkVerified self: %v", err)
+	}
+
+	got := a.unverifyCandidates()
+	if len(got) != 1 || got[0].ID != "usr_alice" {
+		ids := make([]string, len(got))
+		for i, it := range got {
+			ids[i] = it.ID
+		}
+		t.Fatalf("unverifyCandidates = %v, want exactly [usr_alice] (unverified/retired/self excluded)", ids)
 	}
 }
 

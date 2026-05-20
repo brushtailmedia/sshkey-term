@@ -90,6 +90,7 @@ type App struct {
 	promoteConfirm  PromoteConfirmModel
 	demoteConfirm   DemoteConfirmModel
 	transferConfirm TransferConfirmModel
+	unverifyConfirm UnverifyConfirmModel // §9 step 4 — the one net-new confirm in the picker effort (#8)
 	// Attachment save-as dialog (post-v0.2.0 image fix follow-up)
 	saveAttachment SaveAttachmentModel
 	// Phase 14 read-only overlays (/audit, /admins)
@@ -1224,6 +1225,11 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.transferConfirm, cmd = a.transferConfirm.Update(msg)
 			return a, cmd
 		}
+		if a.unverifyConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.unverifyConfirm, cmd = a.unverifyConfirm.Update(msg)
+			return a, cmd
+		}
 
 		// Device revoked dialog intercepts all keys
 		if a.deviceRevoked.IsVisible() {
@@ -1851,6 +1857,11 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.client != nil {
 				a.verify.Show(msg.SelectedID, a.client)
 			}
+		case "/unverify":
+			// §9 step 4 / #8: the one net-new confirm in the picker
+			// effort. Same dialog as the typed path uses now —
+			// behavior consistent across both entry paths.
+			a.unverifyConfirm.Show(msg.SelectedID, a.resolveDisplayName(msg.SelectedID))
 		case "/role":
 			// `/role` post-resolution: shared with the typed path
 			// via roleReadout (#3). The picker only offers members
@@ -2117,6 +2128,23 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}); err != nil {
 			a.statusBar.SetError("Transfer failed (leave): " + err.Error())
 		}
+		return a, nil
+
+	case UnverifyConfirmMsg:
+		// §9 step 4 / #8: user confirmed /unverify (typed or picker
+		// path — same dialog, same handler). Clears the verified=1
+		// flag in pinned_keys; the user's profile/messages are
+		// unaffected, only the trust marker.
+		if a.client == nil || msg.TargetID == "" {
+			return a, nil
+		}
+		if st := a.client.Store(); st != nil {
+			if err := st.ClearVerified(msg.TargetID); err != nil {
+				a.statusBar.SetError("Unverify failed: " + err.Error())
+				return a, nil
+			}
+		}
+		a.statusBar.SetError("Verification removed for " + a.resolveDisplayName(msg.TargetID))
 		return a, nil
 
 	case LeaveRoomConfirmMsg:
@@ -3270,7 +3298,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.quitConfirm.IsVisible() || a.leaveConfirm.IsVisible() || a.leaveRoomConfirm.IsVisible() ||
 		a.deleteDMConfirm.IsVisible() || a.deleteGroupConfirm.IsVisible() || a.deleteRoomConfirm.IsVisible() ||
 		a.addConfirm.IsVisible() || a.kickConfirm.IsVisible() || a.promoteConfirm.IsVisible() ||
-		a.demoteConfirm.IsVisible() || a.transferConfirm.IsVisible() ||
+		a.demoteConfirm.IsVisible() || a.transferConfirm.IsVisible() || a.unverifyConfirm.IsVisible() ||
 		a.auditOverlay.IsVisible() || a.membersOverlay.IsVisible() ||
 		a.lastAdminPicker.IsVisible() ||
 		a.saveAttachment.IsVisible() ||
@@ -4238,18 +4266,65 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			if !ok {
 				a.statusBar.SetError("unknown user: " + sc.Arg)
 			} else {
+				// State guard (matches the picker candidate filter):
+				// /verify on an already-verified user surfaces a
+				// friendly status instead of re-opening the safety-
+				// number flow. The picker hides these from the bare
+				// path; this is the typed-path equivalent.
+				if st := a.client.Store(); st != nil {
+					if info, _ := st.GetPinnedKeyInfo(targetID); info.Verified {
+						a.statusBar.SetError(a.resolveDisplayName(targetID) + " is already verified")
+						return
+					}
+				}
 				a.verify.Show(targetID, a.client)
 			}
 		}
 	case "/unverify":
 		// Phase 21 F29 closure — same resolution as /verify.
-		if sc.Arg != "" && a.client != nil {
+		//
+		// §9 step 4 / #8: bare `/unverify` opens the picker (currently
+		// verified users, exclude retired/self); typed `/unverify
+		// @user` keeps its existing direct path (typed-bypass coexists,
+		// #1c). The NEW UnverifyConfirmModel is applied to BOTH paths
+		// — typed previously cleared verification silently in one
+		// keystroke ("Verification removed for X"); now both forms
+		// open the confirm first and only clear on y/enter. This is
+		// the one net-new dialog in the entire picker effort (#8).
+		if strings.TrimSpace(sc.Arg) == "" {
+			a.openPicker(PickerRequest{
+				Verb:       "/unverify",
+				Source:     PickerSourceSlash,
+				Room:       sc.Room,
+				Group:      sc.Group,
+				DM:         sc.DM,
+				ShowFilter: true, // #7
+			})
+			return
+		}
+		if a.client != nil {
 			targetID, ok := a.resolveUserByName(sc.Arg)
 			if !ok {
 				a.statusBar.SetError("unknown user: " + sc.Arg)
-			} else if st := a.client.Store(); st != nil {
-				st.ClearVerified(targetID)
-				a.statusBar.SetError("Verification removed for " + a.resolveDisplayName(targetID))
+			} else {
+				// State guard (matches the picker candidate filter):
+				// /unverify on someone who isn't verified surfaces a
+				// friendly status instead of opening a confirm for a
+				// no-op. Covers both "pinned but verified=0" and "no
+				// pinned key at all" — neither is meaningfully
+				// "unverifiable." The picker hides these from the
+				// bare path; this is the typed-path equivalent.
+				verified := false
+				if st := a.client.Store(); st != nil {
+					if info, _ := st.GetPinnedKeyInfo(targetID); info.Verified {
+						verified = true
+					}
+				}
+				if !verified {
+					a.statusBar.SetError(a.resolveDisplayName(targetID) + " is not verified")
+					return
+				}
+				a.unverifyConfirm.Show(targetID, a.resolveDisplayName(targetID))
 			}
 		}
 	case "/whois":
@@ -5044,6 +5119,8 @@ func (a *App) pickerCandidates(req PickerRequest) []PickerItem {
 		return a.whoisCandidates()
 	case "/verify":
 		return a.verifyCandidates()
+	case "/unverify":
+		return a.unverifyCandidates()
 	case "/role":
 		return a.roleCandidates(req.Group)
 	default:
@@ -5123,6 +5200,43 @@ func (a *App) verifyCandidates() []PickerItem {
 			Primary: a.resolveDisplayName(p.User),
 		})
 	})
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Primary) < strings.ToLower(items[j].Primary)
+	})
+	return items
+}
+
+// unverifyCandidates returns currently verified users (#6 — backed
+// by the new Store.ListVerifiedPinnedKeys helper; scanning live UI
+// state would miss users whose profile broadcast hasn't arrived this
+// session). Exclude retired (#9a) and self. Sorted by display name.
+func (a *App) unverifyCandidates() []PickerItem {
+	if a.client == nil {
+		return nil
+	}
+	st := a.client.Store()
+	if st == nil {
+		return nil
+	}
+	users, err := st.ListVerifiedPinnedKeys()
+	if err != nil {
+		return nil
+	}
+	self := a.client.UserID()
+	retired := a.client.RetiredUsers()
+	var items []PickerItem
+	for _, uid := range users {
+		if uid == "" || uid == self {
+			continue
+		}
+		if _, isRetired := retired[uid]; isRetired {
+			continue
+		}
+		items = append(items, PickerItem{
+			ID:      uid,
+			Primary: a.resolveDisplayName(uid),
+		})
+	}
 	sort.Slice(items, func(i, j int) bool {
 		return strings.ToLower(items[i].Primary) < strings.ToLower(items[j].Primary)
 	})
@@ -6495,6 +6609,7 @@ func (a *App) anyModalVisible() bool {
 		a.promoteConfirm.IsVisible() ||
 		a.demoteConfirm.IsVisible() ||
 		a.transferConfirm.IsVisible() ||
+		a.unverifyConfirm.IsVisible() ||
 		a.deviceRevoked.IsVisible() ||
 		a.deviceMgr.IsVisible() ||
 		a.keyWarning.IsVisible() ||
@@ -6825,6 +6940,9 @@ func (a App) viewBody() string {
 	}
 	if a.transferConfirm.IsVisible() {
 		return a.transferConfirm.View(a.width)
+	}
+	if a.unverifyConfirm.IsVisible() {
+		return a.unverifyConfirm.View(a.width)
 	}
 	if a.saveAttachment.IsVisible() {
 		return a.saveAttachment.View(a.width)
