@@ -1449,6 +1449,53 @@ func SetEpochKeyForTesting(c *Client, room string, epoch int64, key []byte) {
 	c.epochKeys[room][epoch] = key
 }
 
+// SetGroupMembersForTesting seeds the in-memory group-membership cache
+// so tests can exercise verbs that scope candidates to a group
+// (`/role`, /kick/promote/demote/transfer/add). Mirrors the
+// SetProfileForTesting pattern — direct map write, no protocol round
+// trip required.
+func SetGroupMembersForTesting(c *Client, groupID string, members []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.groupMembers == nil {
+		c.groupMembers = make(map[string][]string)
+	}
+	cp := make([]string, len(members))
+	copy(cp, members)
+	c.groupMembers[groupID] = cp
+}
+
+// SetGroupAdminsForTesting seeds the in-memory group-admin set so
+// tests can exercise admin-aware behavior (/role admin/member
+// readout, demote/promote candidate filters). Mirrors the
+// SetGroupMembersForTesting pattern.
+func SetGroupAdminsForTesting(c *Client, groupID string, admins []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.groupAdmins == nil {
+		c.groupAdmins = make(map[string]map[string]bool)
+	}
+	set := make(map[string]bool, len(admins))
+	for _, u := range admins {
+		set[u] = true
+	}
+	c.groupAdmins[groupID] = set
+}
+
+// SetRetiredForTesting seeds the in-memory retired-users cache so
+// tests can exercise retired-account handling in candidate builders
+// (e.g. /whois retains them marked; /verify/unverify/kick/etc.
+// exclude them). The map value is the retirement timestamp (RFC3339
+// or any opaque string — tests pass "" or a synthetic ts).
+func SetRetiredForTesting(c *Client, userID, ts string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.retired == nil {
+		c.retired = make(map[string]string)
+	}
+	c.retired[userID] = ts
+}
+
 // GroupMembers returns the member list for a group DM.
 func (c *Client) GroupMembers(groupID string) []string {
 	c.mu.RLock()

@@ -307,3 +307,229 @@ func TestWhoisCandidates_ExcludesSelfSorted(t *testing.T) {
 		t.Fatalf("not sorted by display name: %q, %q", got[0].Primary, got[1].Primary)
 	}
 }
+
+// --- /verify + /role (§9 step 3) ---
+
+func TestVerifyPicker_BareOpensPicker(t *testing.T) {
+	a, c, st := newPickerWhoisApp(t)
+	// Seed alice as a pinned-but-unverified candidate.
+	seedAlice(t, c, st)
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/verify"})
+	if !a.picker.IsVisible() {
+		t.Fatal("bare /verify must open the shared picker (§9 step 3)")
+	}
+	if a.picker.req.Verb != "/verify" || !a.picker.req.ShowFilter {
+		t.Fatalf("picker req = {%q, filter=%v}, want {/verify, true}", a.picker.req.Verb, a.picker.req.ShowFilter)
+	}
+}
+
+func TestVerifyPicker_TypedBypassesPicker(t *testing.T) {
+	a, c, st := newPickerWhoisApp(t)
+	seedAlice(t, c, st)
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/verify", Arg: "Alice"})
+	if a.picker.IsVisible() {
+		t.Fatal("typed /verify @user must BYPASS the picker (#1c)")
+	}
+	if !a.verify.IsVisible() {
+		t.Fatal("typed /verify Alice should open the VerifyModel directly (unchanged path)")
+	}
+}
+
+func TestVerifyPicker_SelectionOpensVerifyModel(t *testing.T) {
+	a, c, st := newPickerWhoisApp(t)
+	seedAlice(t, c, st)
+	model, _ := (*a).Update(PickerSelectedMsg{
+		Request:    PickerRequest{Verb: "/verify", Source: PickerSourceSlash},
+		SelectedID: "usr_alice",
+	})
+	na := model.(App)
+	if !na.verify.IsVisible() {
+		t.Fatal("PickerSelectedMsg{/verify} must route to VerifyModel.Show (#3 clean ID seam)")
+	}
+}
+
+func TestVerifyCandidates_ExcludesVerifiedRetiredNoKeySelf(t *testing.T) {
+	a, c, st := newPickerWhoisApp(t)
+
+	// alice: pinned, NOT verified → eligible.
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_alice", DisplayName: "Alice", KeyFingerprint: "SHA256:a"})
+	if err := st.PinKey("usr_alice", "SHA256:a", "ssh-ed25519 a"); err != nil {
+		t.Fatalf("PinKey alice: %v", err)
+	}
+	// bob: pinned AND verified → must be excluded.
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_bob", DisplayName: "Bob", KeyFingerprint: "SHA256:b"})
+	if err := st.PinKey("usr_bob", "SHA256:b", "ssh-ed25519 b"); err != nil {
+		t.Fatalf("PinKey bob: %v", err)
+	}
+	if err := st.MarkVerified("usr_bob"); err != nil {
+		t.Fatalf("MarkVerified bob: %v", err)
+	}
+	// carol: profile but NO pinned key → must be excluded (#6: can't verify someone with no pinned fingerprint).
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_carol", DisplayName: "Carol"})
+	// dave: pinned-unverified but RETIRED → must be excluded (#9a action verbs exclude retired).
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_dave", DisplayName: "Dave", KeyFingerprint: "SHA256:d"})
+	if err := st.PinKey("usr_dave", "SHA256:d", "ssh-ed25519 d"); err != nil {
+		t.Fatalf("PinKey dave: %v", err)
+	}
+	client.SetRetiredForTesting(c, "usr_dave", "2026-05-20T00:00:00Z")
+	// self should never appear.
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_self", DisplayName: "Zelf", KeyFingerprint: "SHA256:s"})
+
+	got := a.verifyCandidates()
+	if len(got) != 1 || got[0].ID != "usr_alice" {
+		ids := make([]string, len(got))
+		for i, it := range got {
+			ids[i] = it.ID
+		}
+		t.Fatalf("verifyCandidates = %v, want exactly [usr_alice] (verified/no-key/retired/self all excluded)", ids)
+	}
+}
+
+func TestRolePicker_BareOutsideGroupStatusOnly(t *testing.T) {
+	a, _, _ := newPickerWhoisApp(t)
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/role"}) // sc.Group == ""
+	if a.picker.IsVisible() {
+		t.Fatal("bare /role outside a group MUST NOT open the picker (§6 invalid-context)")
+	}
+	if !strings.Contains(a.statusBar.errorMsg, "only works inside a group") {
+		t.Fatalf("expected 'only works inside a group' message, got %q", a.statusBar.errorMsg)
+	}
+	// Wording: must NOT end with "DM" (owner-asked, 2026-05-20).
+	if strings.HasSuffix(strings.TrimSpace(a.statusBar.errorMsg), "DM") {
+		t.Fatalf("message should not end with 'DM', got %q", a.statusBar.errorMsg)
+	}
+}
+
+// Typed /role @user outside a group used to silently return — fire
+// the same friendly status as the bare branch instead.
+func TestRolePicker_TypedOutsideGroupStatusOnly(t *testing.T) {
+	a, _, _ := newPickerWhoisApp(t)
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/role", Arg: "@alice", Room: "room_x"})
+	if a.picker.IsVisible() {
+		t.Fatal("typed /role @user outside a group must NOT open the picker")
+	}
+	if !strings.Contains(a.statusBar.errorMsg, "only works inside a group") {
+		t.Fatalf("typed /role outside a group should fire the same status, got %q", a.statusBar.errorMsg)
+	}
+	if strings.HasSuffix(strings.TrimSpace(a.statusBar.errorMsg), "DM") {
+		t.Fatalf("message should not end with 'DM', got %q", a.statusBar.errorMsg)
+	}
+}
+
+func TestRolePicker_BareInGroupOpensPicker(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_alice", DisplayName: "Alice"})
+	client.SetGroupMembersForTesting(c, "g_x", []string{"usr_self", "usr_alice"})
+
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/role", Group: "g_x"})
+	if !a.picker.IsVisible() {
+		t.Fatal("bare /role inside a group must open the picker")
+	}
+	if a.picker.req.Verb != "/role" || a.picker.req.Group != "g_x" || !a.picker.req.ShowFilter {
+		t.Fatalf("picker req = {%q,%q,filter=%v}, want {/role,g_x,true}", a.picker.req.Verb, a.picker.req.Group, a.picker.req.ShowFilter)
+	}
+}
+
+func TestRolePicker_TypedBypassesPicker(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_alice", DisplayName: "Alice"})
+	client.SetGroupMembersForTesting(c, "g_x", []string{"usr_self", "usr_alice"})
+	client.SetGroupAdminsForTesting(c, "g_x", []string{"usr_alice"})
+
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/role", Group: "g_x", Arg: "Alice"})
+	if a.picker.IsVisible() {
+		t.Fatal("typed /role @user must BYPASS the picker (#1c)")
+	}
+	if !strings.Contains(a.statusBar.errorMsg, "admin") {
+		t.Fatalf("typed /role should produce role readout in status, got %q", a.statusBar.errorMsg)
+	}
+}
+
+func TestRolePicker_SelectionRoutesToReadout(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_alice", DisplayName: "Alice"})
+	client.SetGroupMembersForTesting(c, "g_x", []string{"usr_self", "usr_alice"})
+	client.SetGroupAdminsForTesting(c, "g_x", []string{"usr_alice"})
+
+	model, _ := (*a).Update(PickerSelectedMsg{
+		Request:    PickerRequest{Verb: "/role", Source: PickerSourceSlash, Group: "g_x"},
+		SelectedID: "usr_alice",
+	})
+	na := model.(App)
+	if !strings.Contains(na.statusBar.errorMsg, "Alice") || !strings.Contains(na.statusBar.errorMsg, "admin") {
+		t.Fatalf("PickerSelectedMsg{/role} must route to roleReadout → status 'Alice — admin', got %q", na.statusBar.errorMsg)
+	}
+}
+
+func TestRoleCandidates_GroupMembersExcludeSelfMarkRetired(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_alice", DisplayName: "Alice"})
+	client.SetProfileForTesting(c, &protocol.Profile{User: "usr_bob", DisplayName: "Bob"})
+	client.SetGroupMembersForTesting(c, "g_x", []string{"usr_self", "usr_alice", "usr_bob"})
+	client.SetRetiredForTesting(c, "usr_bob", "2026-05-20T00:00:00Z")
+
+	got := a.roleCandidates("g_x")
+	if len(got) != 2 {
+		t.Fatalf("got %d candidates, want 2 (alice + bob; self excluded)", len(got))
+	}
+	if got[0].ID == "usr_self" || got[1].ID == "usr_self" {
+		t.Fatal("roleCandidates must exclude self")
+	}
+	// Sorted alphabetically: Alice, Bob.
+	if got[0].ID != "usr_alice" || got[1].ID != "usr_bob" {
+		t.Fatalf("order = [%q,%q], want [usr_alice,usr_bob]", got[0].ID, got[1].ID)
+	}
+	if got[0].Secondary != "" {
+		t.Fatalf("live member Alice should have empty Secondary, got %q", got[0].Secondary)
+	}
+	if got[1].Secondary != "retired" {
+		t.Fatalf("retired member Bob should have Secondary=\"retired\", got %q", got[1].Secondary)
+	}
+}
+
+func TestRoleCandidates_EmptyOutsideGroup(t *testing.T) {
+	a, _, _ := newPickerWhoisApp(t)
+	if got := a.roleCandidates(""); got != nil {
+		t.Fatalf("roleCandidates(\"\") = %v, want nil", got)
+	}
+}
+
+// TestInputParser_RoleRoutesToAppInAllForms exercises the REAL input
+// router path (`handleCommand` → `PendingCommand`) for /role — the
+// path the App-handler-in-isolation tests above do NOT touch, and
+// the gap that initially left bare `/role` silently dropped by the
+// input router (same class as the earlier /typing wiring bug). This
+// is the regression guard.
+func TestInputParser_RoleRoutesToAppInAllForms(t *testing.T) {
+	cases := []struct {
+		text          string
+		room, group, dm string
+		wantArg       string
+		wantGroup     string
+	}{
+		// Bare /role in a group → must forward so App can open the picker.
+		{"/role", "", "group_x", "", "", "group_x"},
+		// Typed /role @user in a group → must forward (existing behavior).
+		{"/role @alice", "", "group_x", "", "@alice", "group_x"},
+		// Bare /role outside a group → still forwards; App surfaces the
+		// invalid-context status. (Pre-fix this was dropped silently.)
+		{"/role", "room_x", "", "", "", ""},
+		// Typed /role @user outside a group → forwards too; App's typed
+		// handler surfaces the friendly group-only error.
+		{"/role @alice", "", "", "dm_x", "@alice", ""},
+	}
+	for _, tc := range cases {
+		i := &InputModel{}
+		i.handleCommand(tc.text, nil, tc.room, tc.group, tc.dm)
+		sc := i.PendingCommand()
+		if sc == nil {
+			t.Errorf("%q in {room=%q group=%q dm=%q} produced no pendingCmd — /role unwired in router",
+				tc.text, tc.room, tc.group, tc.dm)
+			continue
+		}
+		if sc.Command != "/role" || sc.Arg != tc.wantArg || sc.Group != tc.wantGroup {
+			t.Errorf("%q in {room=%q group=%q dm=%q} routed as {Command:%q Arg:%q Group:%q}, want {/role %q %q}",
+				tc.text, tc.room, tc.group, tc.dm, sc.Command, sc.Arg, sc.Group, tc.wantArg, tc.wantGroup)
+		}
+	}
+}

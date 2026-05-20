@@ -566,12 +566,17 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		// dropping the command.
 		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	case "/role":
-		// Phase 14: readout of a target user's role in the current
-		// group. Status bar message, no dialog. Requires a target
-		// (/role @user) and a group context.
-		if group != "" && arg != "" {
-			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Group: group}
-		}
+		// Forward ALL invocations to App so it can route per the
+		// shared-picker-widget.md §9 sequencing: bare `/role` in a
+		// group → picker; bare outside a group → existing friendly
+		// status (§6 invalid-context rule); `/role @user` → typed
+		// readout via handleRoleCommand. The earlier guard
+		// (`if group != "" && arg != ""`) dropped bare in the input
+		// box and was the reason the bare-picker wiring appeared
+		// dead — App's bare-handling branch was never reached.
+		// Forwarding Room/Group/DM along so App has the active
+		// context.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	case "/undo":
 		// Phase 14: revert the last kick if it happened within the
 		// undo window. Group-scoped because the kick itself was;

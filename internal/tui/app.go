@@ -1845,6 +1845,18 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Request.Verb {
 		case "/whois":
 			a.whoisReadout(msg.SelectedID)
+		case "/verify":
+			// `/verify` post-resolution = the existing VerifyModel
+			// (already a clean ID seam, #3) — no new dialog.
+			if a.client != nil {
+				a.verify.Show(msg.SelectedID, a.client)
+			}
+		case "/role":
+			// `/role` post-resolution: shared with the typed path
+			// via roleReadout (#3). The picker only offers members
+			// of msg.Request.Group, so the caller invariants of
+			// roleReadout hold by construction.
+			a.roleReadout(msg.Request.Group, msg.SelectedID)
 		}
 		return a, nil
 
@@ -4203,7 +4215,25 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		// shapes (display name and user ID); the raw user ID is also
 		// accepted as a no-op passthrough so pre-F29 /verify usr_abc
 		// invocations continue to work.
-		if sc.Arg != "" && a.client != nil {
+		//
+		// #1c/§9 step 3: bare `/verify` opens the shared picker (known
+		// users not yet verified, any context, retired excluded, #9a);
+		// typed `/verify @user` keeps its existing direct path
+		// (typed-bypass coexists) and never opens the picker. The
+		// post-resolution step for both paths is `a.verify.Show(ID,
+		// client)` — already a clean ID seam (#3, no refactor needed).
+		if strings.TrimSpace(sc.Arg) == "" {
+			a.openPicker(PickerRequest{
+				Verb:       "/verify",
+				Source:     PickerSourceSlash,
+				Room:       sc.Room,
+				Group:      sc.Group,
+				DM:         sc.DM,
+				ShowFilter: true, // #7: large all-users set
+			})
+			return
+		}
+		if a.client != nil {
 			targetID, ok := a.resolveUserByName(sc.Arg)
 			if !ok {
 				a.statusBar.SetError("unknown user: " + sc.Arg)
@@ -4472,6 +4502,29 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 	case "/admins":
 		a.handleMembersOverlayCommand(sc, true)
 	case "/role":
+		// #1c/§9 step 3: bare `/role` opens the shared picker;
+		// `/role @user` keeps its existing direct path. `/role` is
+		// group-scoped (#9b) and NOT admin-gated. Per the §6
+		// invalid-context rule, BOTH the bare form (handled here)
+		// and the typed form (handled in handleRoleCommand) surface
+		// the same "/role only works inside a group" status when
+		// `sc.Group == ""` — never an empty picker, never a silent
+		// drop. The two branches use the same wording.
+		if strings.TrimSpace(sc.Arg) == "" {
+			if sc.Group == "" {
+				a.statusBar.SetError("/role only works inside a group")
+				return
+			}
+			a.openPicker(PickerRequest{
+				Verb:       "/role",
+				Source:     PickerSourceSlash,
+				Room:       sc.Room,
+				Group:      sc.Group,
+				DM:         sc.DM,
+				ShowFilter: true, // #7: groups can be long
+			})
+			return
+		}
 		a.handleRoleCommand(sc)
 	case "/undo":
 		a.handleUndoCommand(sc)
@@ -4603,7 +4656,16 @@ func (a *App) handleMembersOverlayCommand(sc *SlashCommandMsg, adminsOnly bool) 
 // group via the status bar: "alice — admin" or "bob — member" or
 // "carol is not a member of this group".
 func (a *App) handleRoleCommand(sc *SlashCommandMsg) {
-	if sc.Group == "" || sc.Arg == "" || a.client == nil {
+	if a.client == nil || sc.Arg == "" {
+		return
+	}
+	// Surface the same invalid-context message as the bare-picker
+	// branch when /role is typed outside a group (e.g. `/role @bob`
+	// from a room or 1:1 DM). The previous silent return here meant
+	// typed /role outside a group did nothing at all — the user
+	// asked us to mirror the bare branch's status here.
+	if sc.Group == "" {
+		a.statusBar.SetError("/role only works inside a group")
 		return
 	}
 	targetID, ok := a.resolveGroupMemberByName(sc.Group, sc.Arg)
@@ -4611,9 +4673,23 @@ func (a *App) handleRoleCommand(sc *SlashCommandMsg) {
 		a.statusBar.SetError(strings.TrimPrefix(sc.Arg, "@") + " is not a member of this group")
 		return
 	}
+	a.roleReadout(sc.Group, targetID)
+}
+
+// roleReadout is the post-resolution step for `/role` — shared by the
+// typed path (after name→ID via resolveGroupMemberByName) and the
+// picker selection path (which already has the picked ID). #3
+// entry-vs-post-resolution: neither path re-enters name resolution,
+// so behavior is identical on both. Caller guarantees groupID and
+// targetID are non-empty and that targetID is a member of groupID
+// (the typed path enforces this; the picker only offers members).
+func (a *App) roleReadout(groupID, targetID string) {
+	if a.client == nil || groupID == "" || targetID == "" {
+		return
+	}
 	name := a.client.DisplayName(targetID)
 	role := "member"
-	if a.client.IsGroupAdmin(sc.Group, targetID) {
+	if a.client.IsGroupAdmin(groupID, targetID) {
 		role = "admin"
 	}
 	a.statusBar.SetError(name + " — " + role)
@@ -4966,6 +5042,10 @@ func (a *App) pickerCandidates(req PickerRequest) []PickerItem {
 	switch req.Verb {
 	case "/whois":
 		return a.whoisCandidates()
+	case "/verify":
+		return a.verifyCandidates()
+	case "/role":
+		return a.roleCandidates(req.Group)
 	default:
 		return nil
 	}
@@ -5003,6 +5083,77 @@ func (a *App) whoisCandidates() []PickerItem {
 			Primary:   a.resolveDisplayName(uid),
 			Secondary: "retired",
 		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Primary) < strings.ToLower(items[j].Primary)
+	})
+	return items
+}
+
+// verifyCandidates returns known users not yet verified (#6: any
+// context, exclude retired, exclude self, exclude users without a
+// pinned key — you can't verify someone whose fingerprint isn't
+// pinned yet). Sorted by display name. Per #9a retired accounts are
+// excluded from action verbs.
+func (a *App) verifyCandidates() []PickerItem {
+	if a.client == nil {
+		return nil
+	}
+	self := a.client.UserID()
+	retired := a.client.RetiredUsers()
+	st := a.client.Store()
+	seen := make(map[string]bool)
+	var items []PickerItem
+	a.client.ForEachProfile(func(p *protocol.Profile) {
+		if p == nil || p.User == "" || p.User == self || seen[p.User] {
+			return
+		}
+		if _, isRetired := retired[p.User]; isRetired {
+			return
+		}
+		if st != nil {
+			info, _ := st.GetPinnedKeyInfo(p.User)
+			if info.Fingerprint == "" || info.Verified {
+				return
+			}
+		}
+		seen[p.User] = true
+		items = append(items, PickerItem{
+			ID:      p.User,
+			Primary: a.resolveDisplayName(p.User),
+		})
+	})
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Primary) < strings.ToLower(items[j].Primary)
+	})
+	return items
+}
+
+// roleCandidates returns the current group's members for the `/role`
+// picker (#9b: group-scoped, NOT admin-gated; per #9a mark retired
+// members with Secondary="retired" but keep them in the list — /role
+// is a readout, not an action). Self is excluded for consistency
+// with the other user-target pickers (`/whoami` is the self-readout
+// equivalent). Sorted by display name.
+func (a *App) roleCandidates(groupID string) []PickerItem {
+	if a.client == nil || groupID == "" {
+		return nil
+	}
+	self := a.client.UserID()
+	retired := a.client.RetiredUsers()
+	var items []PickerItem
+	for _, uid := range a.client.GroupMembers(groupID) {
+		if uid == "" || uid == self {
+			continue
+		}
+		item := PickerItem{
+			ID:      uid,
+			Primary: a.resolveDisplayName(uid),
+		}
+		if _, isRetired := retired[uid]; isRetired {
+			item.Secondary = "retired"
+		}
+		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool {
 		return strings.ToLower(items[i].Primary) < strings.ToLower(items[j].Primary)
