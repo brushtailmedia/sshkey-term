@@ -2126,6 +2126,18 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.client != nil && msg.Group != "" && msg.TargetID != "" {
 			if err := a.client.AddToGroup(msg.Group, msg.TargetID, false); err != nil {
 				a.statusBar.SetError("Add failed: " + err.Error())
+				return a, nil
+			}
+			// §9 step 7 UX: focus the target group after a
+			// successful add IF the local user wasn't already viewing
+			// it. Self-correcting across all add paths:
+			//   - typed /add @user in active group        → current == target → no-op
+			//   - bare /add picker (slash + footer `a`)   → current == target → no-op
+			//   - member-panel "Add to existing group..." → current is the source
+			//     room/DM/other-group → switches to the target group, landing the
+			//     admin where the just-added user now is (the natural next action).
+			if a.messages.group != msg.Group {
+				a.focusSidebarGroup(msg.Group)
 			}
 		}
 		return a, nil

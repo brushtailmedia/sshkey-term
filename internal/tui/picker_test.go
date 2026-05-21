@@ -7,6 +7,7 @@ package tui
 // post-resolution step `whoisReadout` (#3/#5).
 
 import (
+	"bytes"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1016,6 +1017,52 @@ func TestAddToGroupAction_OpensPickerWithSubject(t *testing.T) {
 	}
 	if na.picker.req.SubjectUserID != "usr_bob" {
 		t.Fatalf("picker req.SubjectUserID = %q, want usr_bob (carries the user being added)", na.picker.req.SubjectUserID)
+	}
+}
+
+// After a successful /add, the local user is focused on the target
+// group IF they weren't already viewing it. Self-correcting across
+// all add paths: typed /add and the bare-/add pickers leave you in
+// the group you're already in (no-op); the member-panel
+// "Add to existing group" flow lands you in the just-added group.
+func TestAddConfirm_FocusesTargetGroupWhenDifferent(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	var enc bytes.Buffer
+	client.SetEncoderForTesting(c, protocol.NewEncoder(&enc))
+	setupGroupsForAddToGroup(t, c, a,
+		map[string][]string{"g_a": {"usr_self"}},
+		[]string{"g_a"},
+	)
+	a.messages = NewMessages()
+	a.messages.SetContext("room_other", "", "") // user is viewing a ROOM, not g_a
+
+	model, _ := (*a).Update(AddConfirmMsg{Group: "g_a", TargetID: "usr_bob"})
+	na := model.(App)
+	if na.messages.group != "g_a" {
+		t.Fatalf("after AddConfirmMsg, messages.group = %q, want g_a (focus should switch to the target group)", na.messages.group)
+	}
+}
+
+func TestAddConfirm_NoFocusChangeWhenAlreadyInTargetGroup(t *testing.T) {
+	a, c, _ := newPickerWhoisApp(t)
+	var enc bytes.Buffer
+	client.SetEncoderForTesting(c, protocol.NewEncoder(&enc))
+	setupGroupsForAddToGroup(t, c, a,
+		map[string][]string{"g_a": {"usr_self"}},
+		[]string{"g_a"},
+	)
+	a.messages = NewMessages()
+	a.messages.SetContext("", "g_a", "") // already in g_a (typed /add path)
+
+	model, _ := (*a).Update(AddConfirmMsg{Group: "g_a", TargetID: "usr_bob"})
+	na := model.(App)
+	if na.messages.group != "g_a" {
+		t.Fatalf("focus should stay on g_a, got messages.group=%q", na.messages.group)
+	}
+	// And we should not have stepped through an unnecessary
+	// SetContext switch (room/dm fields unchanged).
+	if na.messages.room != "" || na.messages.dm != "" {
+		t.Fatalf("unrelated context fields drifted: room=%q dm=%q", na.messages.room, na.messages.dm)
 	}
 }
 
