@@ -27,25 +27,32 @@ import (
 const undoWindowSeconds int64 = 30
 
 // ServerMsg wraps a protocol message received from the server.
+// gen carries the connection generation that produced this message, so
+// updateInner can drop stale ServerMsg deliveries from a superseded
+// connect attempt (server switch, reconnect race). See
+// fix-cross-server-db-isolation.md.
 type ServerMsg struct {
 	Type string
 	Raw  json.RawMessage
+	gen  uint64
 }
 
-// ErrMsg wraps a connection error.
-type ErrMsg struct{ Err error }
-
-// ConnectedMsg signals successful connection.
-type ConnectedMsg struct{}
+// ErrMsg wraps a connection error. gen carries the connection
+// generation that produced this error so a stale connect-failed for a
+// superseded attempt cannot show the connect-failed modal or schedule
+// reconnect for the current attempt.
+type ErrMsg struct {
+	Err error
+	gen uint64
+}
 
 // passphraseNeededMsg signals that the SSH key needs a passphrase.
-type passphraseNeededMsg struct{}
-
-// ReconnectStatusMsg signals reconnection state changes.
-type ReconnectStatusMsg struct {
-	Status    string // "reconnecting", "connected", "failed"
-	Attempt   int
-	NextRetry time.Duration
+// gen + keyPath bind the request to a specific connection attempt and
+// its target key, so a stale request after a server switch cannot open
+// the passphrase modal for a key the user is no longer connecting to.
+type passphraseNeededMsg struct {
+	gen     uint64
+	keyPath string
 }
 
 // App is the top-level Bubble Tea model.
@@ -185,6 +192,22 @@ type App struct {
 	// suppressed during replay so reconnect hydration does not look like
 	// fresh incoming traffic.
 	replayingSyncBatch bool
+
+	// connGen is the monotonically-increasing connection generation.
+	// Every fresh connect attempt (initial, server switch, reconnect
+	// timer, retry from connect-failed, passphrase retry, refresh
+	// reconnect) bumps this and captures the new value. Events emitted
+	// by that attempt carry the captured gen; updateInner drops events
+	// whose gen no longer matches a.connGen as the first meaningful
+	// operation in each gen-scoped case.
+	//
+	// Seeded to 1 in New() so the initial connection's events are
+	// stamped with a non-zero generation — never use 0 in production.
+	// See fix-cross-server-db-isolation.md for full rationale; the
+	// previous design relied on no-arg connect() and had no event
+	// origin identity, letting slow stale events overwrite a.client or
+	// mutate UI state for a server the user had already left.
+	connGen uint64
 }
 
 // pendingCreateDMState records a create_dm we have sent and are waiting
@@ -314,6 +337,12 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		showHelpHint:    !appCfg.Notifications.HelpShown,
 		focus:           FocusInput,
 		navModeTimeout:  time.Duration(navTimeoutMs) * time.Millisecond,
+		// Seed connGen to 1, not 0. Production code never uses gen 0;
+		// keeping zero out of the valid range means a missing-stamp bug
+		// (struct constructed without setting gen) shows up immediately
+		// as a stale-drop, instead of accidentally looking current. See
+		// fix-cross-server-db-isolation.md §Implementation Risks.
+		connGen: 1,
 	}
 	// Seed the input model's typing-suppression flag from persisted
 	// config so `/typing off` survives a restart. Zero value = false
@@ -326,10 +355,36 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 }
 
 func (a App) Init() tea.Cmd {
+	// Use the gen seeded in New() — Init() has a value receiver, so any
+	// mutation here would be lost (Bubble Tea uses the returned cmd, not
+	// the model). The initial connection therefore reuses the seeded
+	// gen 1 rather than calling nextConnGen.
 	return tea.Batch(
 		a.input.Init(),
-		a.connect(),
+		a.connect(a.connGen),
 	)
+}
+
+// nextConnGen bumps the connection generation and returns the new
+// value. Call this exactly when a fresh non-initial connection attempt
+// is starting (server switch, reconnect timer fire, connect-failed
+// retry, passphrase retry, explicit refresh reconnect).
+func (a *App) nextConnGen() uint64 {
+	a.connGen++
+	return a.connGen
+}
+
+// startConnect bumps the generation and returns a connect command
+// stamped with the new generation. Every non-initial connection
+// attempt should go through this helper; direct `connect(gen)` calls
+// from production code are reserved for the initial Init() path. The
+// compiler-enforced gen argument on connect makes it hard to bypass:
+// future call sites either reach for startConnect or have to pass an
+// explicit gen, which is a readable signal that something connection-
+// scoped is happening.
+func (a *App) startConnect() tea.Cmd {
+	gen := a.nextConnGen()
+	return a.connect(gen)
 }
 
 func (a *App) openQuickSwitch() {
@@ -389,20 +444,24 @@ func (a *App) switchServerByIndex(idx int) tea.Cmd {
 	if a.appConfig == nil || idx < 0 || idx >= len(a.appConfig.Servers) || idx == a.serverIdx {
 		return nil
 	}
-	// Disconnect current server.
-	if a.client != nil {
-		a.client.Close()
-	}
 
-	// Switch to new server.
 	srv := a.appConfig.Servers[idx]
 
-	// Validate host before any path derivation — defense against
-	// hand-edited config.toml. Refuse the switch with a status-bar
-	// error instead of constructing a malformed dataDir or KeyPath.
+	// Validate host BEFORE closing the current client — defense against
+	// hand-edited config.toml. Previously the close ran first, so a
+	// hand-edited invalid host would disconnect the user from the
+	// working server, then refuse the switch, stranding them with no
+	// connection at all. Validate-then-close means an invalid target
+	// surfaces a status-bar error and leaves the current session
+	// untouched.
 	if err := config.ValidateHost(srv.Host); err != nil {
 		a.statusBar.SetError("Cannot switch to " + srv.Name + ": " + err.Error())
 		return nil
+	}
+
+	// Target is valid — disconnect the current server.
+	if a.client != nil {
+		a.client.Close()
 	}
 
 	a.serverIdx = idx
@@ -432,12 +491,23 @@ func (a *App) switchServerByIndex(idx int) tea.Cmd {
 	// over the new server's connect. No-op when not visible, so the
 	// normal connected→switch path is unaffected.
 	a.connectFailed.Hide()
+	// Dismiss the passphrase modal if it was up — it was bound to
+	// the prior server's gen+keyPath, and even if the user typed in
+	// it now the result would be stale-dropped. Hiding ensures the
+	// new server's potential passphraseNeededMsg can re-Show cleanly
+	// without an obviously-wrong dialog from the prior server
+	// flashing through. See fix-cross-server-db-isolation.md
+	// §"Passphrase result ownership".
+	a.passphrase.Hide()
 	a.statusBar.SetError("Switching to " + srv.Name + "...")
 	a.statusBar.SetConnected(false)
 	a.updateTitle()
 
-	// Connect to new server.
-	return a.connect()
+	// Connect to new server. startConnect bumps connGen so any
+	// late-arriving events from the prior server's connection are
+	// dropped as stale by updateInner's per-case gen-checks. See
+	// fix-cross-server-db-isolation.md.
+	return a.startConnect()
 }
 
 func (a *App) enterNavMode() tea.Cmd {
@@ -515,10 +585,28 @@ type KeyChangeEvent struct {
 	User           string
 	OldFingerprint string
 	NewFingerprint string
+	gen            uint64
 }
 
-// connect starts the SSH connection in a goroutine.
-func (a App) connect() tea.Cmd {
+// connect starts the SSH connection in a goroutine. gen is the
+// connection generation that the resulting events should be stamped
+// with — callers pass the value returned by startConnect (or, for
+// the initial connect, the seeded a.connGen from Init). Every
+// possible return (connectedWithClient, ErrMsg, passphraseNeededMsg)
+// and every callback-driven event (ServerMsg, KeyChangeEvent,
+// AttachmentReadyEvent, RoomUpdatedEvent) is stamped with this gen
+// so updateInner can drop stale arrivals after a server switch or
+// reconnect race.
+//
+// The signature deliberately requires gen explicitly: no no-arg
+// connect() exists post-fix, so a future call site either uses
+// startConnect or has to pass a known generation. That removes the
+// implicit "bump-then-call" foot-gun where the bump happens after
+// connect captures its argument and the new connection's events
+// carry the prior (now-stale) generation. See
+// fix-cross-server-db-isolation.md §"Connect command" and §"Bump-
+// order tests".
+func (a App) connect(gen uint64) tea.Cmd {
 	return func() tea.Msg {
 		msgCh := make(chan ServerMsg, 100)
 		errCh := make(chan error, 1)
@@ -549,7 +637,7 @@ func (a App) connect() tea.Cmd {
 
 		cfg := a.cfg
 		cfg.OnMessage = func(msgType string, raw json.RawMessage) {
-			msgCh <- ServerMsg{Type: msgType, Raw: raw}
+			msgCh <- ServerMsg{Type: msgType, Raw: raw, gen: gen}
 		}
 		cfg.OnError = func(err error) {
 			errCh <- err
@@ -562,7 +650,7 @@ func (a App) connect() tea.Cmd {
 			// dropping the modal dispatch is a minor UX
 			// degradation, not a correctness gap.
 			select {
-			case keyWarnCh <- KeyChangeEvent{User: user, OldFingerprint: oldFP, NewFingerprint: newFP}:
+			case keyWarnCh <- KeyChangeEvent{User: user, OldFingerprint: oldFP, NewFingerprint: newFP, gen: gen}:
 			default:
 			}
 		}
@@ -575,13 +663,13 @@ func (a App) connect() tea.Cmd {
 			// at which point the render path's os.Stat picks up the
 			// cache file anyway).
 			select {
-			case attachReadyCh <- AttachmentReadyEvent{FileID: fileID}:
+			case attachReadyCh <- AttachmentReadyEvent{FileID: fileID, gen: gen}:
 			default:
 			}
 		}
 		cfg.OnRoomUpdated = func(room string) {
 			select {
-			case roomUpdatedCh <- RoomUpdatedEvent{Room: room}:
+			case roomUpdatedCh <- RoomUpdatedEvent{Room: room, gen: gen}:
 			default:
 			}
 		}
@@ -607,10 +695,10 @@ func (a App) connect() tea.Cmd {
 		if len(cached) == 0 {
 			needs, err := client.KeyNeedsPassphrase(keyPath)
 			if err != nil {
-				return ErrMsg{Err: err}
+				return ErrMsg{Err: err, gen: gen}
 			}
 			if needs {
-				return passphraseNeededMsg{}
+				return passphraseNeededMsg{gen: gen, keyPath: keyPath}
 			}
 		}
 
@@ -633,9 +721,9 @@ func (a App) connect() tea.Cmd {
 			// error here would still surface the dialog.
 			errStr := err.Error()
 			if strings.Contains(errStr, "passphrase") {
-				return passphraseNeededMsg{}
+				return passphraseNeededMsg{gen: gen, keyPath: keyPath}
 			}
-			return ErrMsg{Err: err}
+			return ErrMsg{Err: err, gen: gen}
 		}
 
 		// The connected event is what drives the App's first
@@ -661,6 +749,7 @@ func (a App) connect() tea.Cmd {
 			downloadResultCh: downloadResultCh,
 			saveResultCh:     saveResultCh,
 			roomUpdatedCh:    roomUpdatedCh,
+			gen:              gen,
 		}
 	}
 }
@@ -675,6 +764,13 @@ type connectedWithClient struct {
 	downloadResultCh chan DownloadResultEvent
 	saveResultCh     chan SaveResultEvent
 	roomUpdatedCh    chan RoomUpdatedEvent
+	// gen identifies which connect attempt produced this client. The
+	// `case connectedWithClient` in updateInner drops stale arrivals
+	// AND closes the stale client first — leaving a slow old connect
+	// to silently win against a newer one would leave a live read
+	// loop, SSH connection, store handle, and keepalive goroutine
+	// behind. See fix-cross-server-db-isolation.md §"Connect command".
+	gen uint64
 }
 
 // saveAttachmentOpenMsg flips the save-as modal open after a
@@ -704,6 +800,7 @@ type saveAttachmentDownloadFailedMsg struct {
 // View pick up the new file.
 type AttachmentReadyEvent struct {
 	FileID string
+	gen    uint64
 }
 
 // RoomUpdatedEvent is the tea.Msg form of a client-layer
@@ -711,6 +808,7 @@ type AttachmentReadyEvent struct {
 // name/topic row was just updated by a room_updated envelope.
 type RoomUpdatedEvent struct {
 	Room string
+	gen  uint64
 }
 
 // UploadResultEvent is the tea.Msg form of an /upload completion
@@ -733,6 +831,7 @@ type RoomUpdatedEvent struct {
 type UploadResultEvent struct {
 	Name string
 	Err  error
+	gen  uint64
 }
 
 // DownloadResultEvent is the tea.Msg form of an attachment-download
@@ -752,6 +851,7 @@ type DownloadResultEvent struct {
 	Action string
 	Name   string
 	Err    error
+	gen    uint64
 }
 
 // SaveResultEvent is the tea.Msg form of the save-as copy step
@@ -770,6 +870,7 @@ type DownloadResultEvent struct {
 type SaveResultEvent struct {
 	Dest string
 	Err  error
+	gen  uint64
 }
 
 // previewRenderReadyMsg is delivered by renderPreviewCmd when an
@@ -810,13 +911,21 @@ func renderPreviewCmd(key previewRenderKey) tea.Cmd {
 // room-updated callbacks. All eight surface via separate channels rather than riding on the
 // ServerMsg envelope because they are TUI-synthetic events, not
 // protocol frames.
-func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChangeEvent, attachReadyCh chan AttachmentReadyEvent, uploadResultCh chan UploadResultEvent, downloadResultCh chan DownloadResultEvent, saveResultCh chan SaveResultEvent, roomUpdatedCh chan RoomUpdatedEvent, done <-chan struct{}) tea.Cmd {
+//
+// gen is the connection generation that armed this wait. Events
+// produced via the channels are already stamped with their producing
+// generation by connect's callbacks (or by the goroutine that wrote
+// to the result channel). Synthetic events created HERE — the error
+// wrapper for errCh and the disconnected wrapper for done — are
+// stamped with gen so updateInner can drop them if the user has
+// since switched servers or kicked off a new connect.
+func waitForMsg(gen uint64, msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChangeEvent, attachReadyCh chan AttachmentReadyEvent, uploadResultCh chan UploadResultEvent, downloadResultCh chan DownloadResultEvent, saveResultCh chan SaveResultEvent, roomUpdatedCh chan RoomUpdatedEvent, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case msg := <-msgCh:
 			return msg
 		case err := <-errCh:
-			return ErrMsg{Err: err}
+			return ErrMsg{Err: err, gen: gen}
 		case kw := <-keyWarnCh:
 			return kw
 		case ar := <-attachReadyCh:
@@ -830,7 +939,7 @@ func waitForMsg(msgCh chan ServerMsg, errCh chan error, keyWarnCh chan KeyChange
 		case ru := <-roomUpdatedCh:
 			return ru
 		case <-done:
-			return ErrMsg{Err: fmt.Errorf("disconnected")}
+			return ErrMsg{Err: fmt.Errorf("disconnected"), gen: gen}
 		}
 	}
 }
@@ -2246,11 +2355,16 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		src := msg.SourcePath
 		dst := msg.DestPath
 		resultCh := a.sidebar.saveResultCh
+		// Capture gen at launch time so the resulting event can be
+		// matched back to this connection generation. A save kicked
+		// off before a server switch should not surface its
+		// completion status against the new server.
+		gen := a.connGen
 		go func() {
 			err := client.SaveFileAs(src, dst)
 			if resultCh != nil {
 				select {
-				case resultCh <- SaveResultEvent{Dest: dst, Err: err}:
+				case resultCh <- SaveResultEvent{Dest: dst, Err: err, gen: gen}:
 				default:
 				}
 			}
@@ -2397,13 +2511,26 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "device_list":
 			a.client.SendListDevices()
 		case "reconnect":
-			// Force reconnect — closing the client triggers the
-			// outer reconnect loop (see reconnect.go). The
-			// refreshing indicator stays visible during the
-			// transition; the SetConnected(true) on successful
-			// re-handshake is what ultimately masks it.
+			// Explicit reconnect: close the old client and bump the
+			// connection generation immediately by calling
+			// startConnect. With gen-gating in effect, the old
+			// client's `done` event (delivered via waitForMsg as
+			// ErrMsg{disconnected}) is now stale and will be
+			// dropped by updateInner — we can't rely on it to
+			// schedule reconnect anymore. The refreshing indicator
+			// stays visible during the transition; the
+			// SetConnected(true) on successful re-handshake is what
+			// ultimately masks it. See
+			// fix-cross-server-db-isolation.md §"Generation bumps".
 			a.statusBar.SetReconnecting(0, 0)
 			_ = a.client.Close()
+			a.statusBar.SetRefreshing(refreshingMinVisibleMs * time.Millisecond)
+			return a, tea.Batch(
+				a.startConnect(),
+				tea.Tick(refreshingMinVisibleMs*time.Millisecond, func(time.Time) tea.Msg {
+					return refreshingTickMsg{}
+				}),
+			)
 		}
 		a.statusBar.SetRefreshing(refreshingMinVisibleMs * time.Millisecond)
 		return a, tea.Tick(refreshingMinVisibleMs*time.Millisecond, func(time.Time) tea.Msg {
@@ -2753,6 +2880,21 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				decryptKey := att.DecryptKey
 				attName := att.Name
 				resultCh := a.sidebar.downloadResultCh
+				// Capture gen at goroutine launch — the status event
+				// is dropped if the user has switched servers by the
+				// time the download finishes. NOTE: the OS-level
+				// OpenFile side effect inside the goroutine fires
+				// even on stale gen (file is downloaded for the
+				// prior server's data, OS handler is invoked). This
+				// is known and accepted, NOT a bug: the user clicked
+				// `o` to open the file — they get the file they
+				// asked for. No data corruption (download lands in
+				// the originating server's files dir), no security
+				// boundary crossed, no UI confusion. See
+				// fix-cross-server-db-isolation.md §"`open_attachment`
+				// OS-level OpenFile — known and accepted" for the
+				// full decision and cost-benefit rationale.
+				gen := a.connGen
 				go func() {
 					path, err := c.DownloadFile(fileID, decryptKey)
 					if err == nil {
@@ -2767,7 +2909,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					if resultCh != nil {
 						select {
-						case resultCh <- DownloadResultEvent{Action: "open", Name: attName, Err: err}:
+						case resultCh <- DownloadResultEvent{Action: "open", Name: attName, Err: err, gen: gen}:
 						default:
 						}
 					}
@@ -2800,11 +2942,12 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					decryptKey := att.DecryptKey
 					attName := att.Name
 					resultCh := a.sidebar.downloadResultCh
+					gen := a.connGen
 					go func() {
 						_, err := c.DownloadFile(fileID, decryptKey)
 						if resultCh != nil {
 							select {
-							case resultCh <- DownloadResultEvent{Action: "preview", Name: attName, Err: err}:
+							case resultCh <- DownloadResultEvent{Action: "preview", Name: attName, Err: err, gen: gen}:
 							default:
 							}
 						}
@@ -2933,6 +3076,20 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.handleMouse(msg)
 
 	case connectedWithClient:
+		// Stale-drop FIRST — before any state mutation. A slow old
+		// connect attempt finishing after a server switch or after a
+		// newer connect already won would otherwise overwrite the
+		// active client, leak a live readLoop + SSH connection +
+		// store handle, and surface the wrong server's data. Close
+		// the stale client here as cleanup of the discarded
+		// connection, not as a current-state mutation. See
+		// fix-cross-server-db-isolation.md §"Connect command".
+		if msg.gen != a.connGen {
+			if msg.client != nil {
+				_ = msg.client.Close()
+			}
+			return a, nil
+		}
 		a.client = msg.client
 		a.connected = true
 		a.reconnectAttempt = 0
@@ -3020,7 +3177,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.updateTitle()
 
 		// Start listening for server messages
-		cmds = append(cmds, waitForMsg(msg.msgCh, msg.errCh, msg.keyWarnCh, msg.attachReadyCh, msg.uploadResultCh, msg.downloadResultCh, msg.saveResultCh, msg.roomUpdatedCh, a.client.Done()))
+		cmds = append(cmds, waitForMsg(a.connGen, msg.msgCh, msg.errCh, msg.keyWarnCh, msg.attachReadyCh, msg.uploadResultCh, msg.downloadResultCh, msg.saveResultCh, msg.roomUpdatedCh, a.client.Done()))
 		// Store channels for future waits
 		a.sidebar.msgCh = msg.msgCh
 		a.sidebar.errCh = msg.errCh
@@ -3037,6 +3194,14 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.messages.SetFilesDir(config.FilesDir(a.cfg.DataDir))
 
 	case ServerMsg:
+		// Stale-drop must precede every side effect — including the
+		// recursive handleServerMessage dispatch, the identity-sync
+		// refresh, the message-content rebuild, and the waitForMsg
+		// re-arm. Stale events are silently discarded with no UI
+		// mutation, no status update, and no wait re-arm.
+		if msg.gen != a.connGen {
+			return a, nil
+		}
 		if cmd := a.handleServerMessage(msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -3054,11 +3219,14 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue listening
 		if a.client != nil {
 			if a.sidebar.msgCh != nil {
-				cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
+				cmds = append(cmds, waitForMsg(a.connGen, a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 			}
 		}
 
 	case RoomUpdatedEvent:
+		if msg.gen != a.connGen {
+			return a, nil
+		}
 		if a.client != nil && msg.Room != "" && msg.Room == a.messages.room {
 			a.messages.SetRoomTopic(a.client.DisplayRoomTopic(msg.Room))
 			if a.statusBar.errorMsg == topicUpdatePendingStatus {
@@ -3066,10 +3234,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.connGen, a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case AttachmentReadyEvent:
+		if msg.gen != a.connGen {
+			return a, nil
+		}
 		// Auto-preview image download completed OR a thumbnail-
 		// generation goroutine just finished. Invalidate cached
 		// render entries for this attachment's path and reset the
@@ -3091,7 +3262,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.connGen, a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case previewRenderReadyMsg:
@@ -3105,6 +3276,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case UploadResultEvent:
+		if msg.gen != a.connGen {
+			return a, nil
+		}
 		// `/upload` goroutine finished. Surface user-visible feedback
 		// via the canonical statusBar (mutating it here works because
 		// updateInner is value-receiver and the returned `a` becomes
@@ -3120,10 +3294,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Continue listening for the next event.
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.connGen, a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case DownloadResultEvent:
+		if msg.gen != a.connGen {
+			return a, nil
+		}
 		// `o` or `p` goroutine finished. Status messages differ by
 		// action because the success-visibility differs: `o` opens
 		// the file in the OS app on success so the user sees the
@@ -3143,10 +3320,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.connGen, a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case SaveResultEvent:
+		if msg.gen != a.connGen {
+			return a, nil
+		}
 		// SaveAttachmentDoMsg's copy goroutine finished. Both
 		// outcomes get explicit feedback because the visible
 		// artifact (the destination file) lives outside the TUI —
@@ -3158,10 +3338,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.statusBar.SetError("Saved: " + msg.Dest)
 		}
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.connGen, a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case KeyChangeEvent:
+		if msg.gen != a.connGen {
+			return a, nil
+		}
 		// Phase 21 F3.a closure 2026-04-19 — StoreProfile detected a
 		// fingerprint mismatch against the pinned value. Under the
 		// no-rotation protocol invariant, this is always an anomaly
@@ -3181,19 +3364,47 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Continue listening for the next event.
 		if a.client != nil && a.sidebar.msgCh != nil {
-			cmds = append(cmds, waitForMsg(a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
+			cmds = append(cmds, waitForMsg(a.connGen, a.sidebar.msgCh, a.sidebar.errCh, a.sidebar.keyWarnCh, a.sidebar.attachReadyCh, a.sidebar.uploadResultCh, a.sidebar.downloadResultCh, a.sidebar.saveResultCh, a.sidebar.roomUpdatedCh, a.client.Done()))
 		}
 
 	case passphraseNeededMsg:
-		a.passphrase.Show("")
+		if msg.gen != a.connGen {
+			return a, nil
+		}
+		// Bind the dialog to this gen + keyPath so the emitted
+		// PassphraseResultMsg can be matched back to the correct
+		// connection + key. Without this, a switch-then-submit can
+		// land the result on the wrong server's cache.
+		a.passphrase.Show("", msg.gen, msg.keyPath)
 		return a, nil
 
 	case PassphraseResultMsg:
+		if msg.gen != a.connGen {
+			// Stale submission — user switched servers (or otherwise
+			// invalidated the original gen) before finishing the
+			// dialog. Drop without caching, without starting a
+			// connect, and without quitting on Cancelled. The
+			// current-gen flow owns its own modal lifecycle.
+			return a, nil
+		}
 		if msg.Cancelled {
 			return a, tea.Quit
 		}
-		// Cache passphrase by key path for reconnects and server switching.
-		a.passphraseCache[a.cfg.KeyPath] = msg.Passphrase
+		// Cache passphrase by the key path the request was issued
+		// for, not by a.cfg.KeyPath. Under the original implementation
+		// a user who opened the dialog for server A's key, switched
+		// to server B, then submitted, would cache A's passphrase
+		// against B's key path. The keyPath carried on the result is
+		// stable across the switch.
+		keyPath := msg.keyPath
+		if keyPath == "" {
+			// Belt-and-braces — current path goes through Show with
+			// non-empty keyPath, but tests can build a result by
+			// hand. Fall back to a.cfg.KeyPath in that case rather
+			// than caching against an empty string.
+			keyPath = a.cfg.KeyPath
+		}
+		a.passphraseCache[keyPath] = msg.Passphrase
 		// Drain any stale buffered value before sending fresh, so a
 		// future OnPassphrase consumer (e.g. a reconnect that cleared
 		// the cache) doesn't pick up a leftover byte slice from a
@@ -3205,27 +3416,29 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 		}
 		a.passphraseCh <- msg.Passphrase
-		return a, a.connect()
+		return a, a.startConnect()
 
 	case reconnectAttemptMsg:
+		if msg.gen != a.connGen {
+			// Stale timer from a prior connect attempt — without
+			// this drop, a stale reconnect tick can fire after a
+			// server switch and start a connect against the current
+			// server's state for the wrong reason.
+			return a, nil
+		}
 		// Try to reconnect
 		a.statusBar.SetReconnecting(msg.attempt, 0)
-		return a, a.connect() // reuse the existing connect logic
-
-	case ReconnectStatusMsg:
-		switch msg.Status {
-		case "reconnecting":
-			a.statusBar.SetReconnecting(msg.Attempt, msg.NextRetry)
-		case "connected":
-			a.statusBar.SetConnected(true)
-			a.connected = true
-		case "failed":
-			a.statusBar.SetError("Reconnection failed")
-			a.statusBar.SetConnected(false)
-		}
-		return a, nil
+		return a, a.startConnect() // bump gen + connect
 
 	case ErrMsg:
+		if msg.gen != a.connGen {
+			// Stale error from a superseded connect attempt — drop
+			// without mutating connected/reconnectAttempt state,
+			// without showing the connect-failed overlay, and
+			// without scheduling a reconnect. The current generation
+			// owns those decisions.
+			return a, nil
+		}
 		a.err = msg.Err
 		a.statusBar.SetConnected(false)
 		if a.connected || a.reconnectAttempt > 0 {
@@ -3247,8 +3460,10 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case ConnectFailedRetryMsg:
-		// User pressed [r] from the connection failed overlay
-		cmds = append(cmds, a.connect())
+		// User pressed [r] from the connection failed overlay —
+		// startConnect bumps the gen so stale events from the
+		// previously-failed attempt are dropped.
+		cmds = append(cmds, a.startConnect())
 	}
 
 	return a, tea.Batch(cmds...)
@@ -3256,8 +3471,8 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // connectFailedKeyInfo returns fingerprint + authorized key for the
 // pending-approval overlay. On first connect failure, a.client is still nil
-// (Connect() failed before ConnectedMsg), so we fall back to reading
-// KeyPath+".pub" directly.
+// (Connect() failed before connectedWithClient was dispatched), so we
+// fall back to reading KeyPath+".pub" directly.
 func (a App) connectFailedKeyInfo() (string, string) {
 	if a.client != nil {
 		fp := strings.TrimSpace(a.client.KeyFingerprint())
@@ -3543,15 +3758,30 @@ func reconnectDelay(attempt int) time.Duration {
 }
 
 // reconnect attempts to reconnect after the backoff delay.
+//
+// gen is captured at schedule time, NOT looked up when the timer
+// fires. When the resulting reconnectAttemptMsg arrives, updateInner
+// drops it if a.connGen has moved on (server switch, manual reconnect,
+// retry-from-overlay). Without this, a stale timer from a prior
+// connect could fire after a switch and start a connect against the
+// new server's state for the wrong reason.
 func (a App) reconnect(attempt int) tea.Cmd {
 	delay := reconnectDelay(attempt)
+	gen := a.connGen
 	return tea.Tick(delay, func(t time.Time) tea.Msg {
-		return reconnectAttemptMsg{attempt: attempt}
+		return reconnectAttemptMsg{attempt: attempt, gen: gen}
 	})
 }
 
 type reconnectAttemptMsg struct {
 	attempt int
+	// gen is the connection generation at the time the reconnect
+	// timer was scheduled. When the timer fires we drop the message
+	// if the generation has moved on — without this, a stale
+	// reconnect timer from a prior connection could fire after a
+	// server switch and start a connection against the new server's
+	// state for the wrong reason.
+	gen uint64
 }
 
 // setUnreadDividerAfter finds the first message after lastReadID and sets the unread divider there.
@@ -4605,6 +4835,10 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		group := sc.Group
 		dm := sc.DM
 		resultCh := a.sidebar.uploadResultCh
+		// Capture gen at launch time so an upload kicked off
+		// against server A doesn't surface its completion status
+		// against server B after a switch.
+		gen := a.connGen
 		go func() {
 			var err error
 			switch {
@@ -4621,7 +4855,7 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			// a wedged channel.
 			if resultCh != nil {
 				select {
-				case resultCh <- UploadResultEvent{Name: body, Err: err}:
+				case resultCh <- UploadResultEvent{Name: body, Err: err, gen: gen}:
 				default:
 				}
 			}

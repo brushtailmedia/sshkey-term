@@ -11,9 +11,9 @@ import (
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 )
 
-// First-connect failures happen before App receives ConnectedMsg, so a.client
-// is still nil. The pending-approval overlay must still have a copyable public
-// key by reading KeyPath+".pub" directly.
+// First-connect failures happen before App receives connectedWithClient,
+// so a.client is still nil. The pending-approval overlay must still have a
+// copyable public key by reading KeyPath+".pub" directly.
 func TestApp_ErrMsg_FirstConnectFailureLoadsPublicKeyFromDisk(t *testing.T) {
 	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
 	wantFP, err := generateEd25519KeyFile(keyPath, "", "wizarduser")

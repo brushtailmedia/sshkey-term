@@ -63,6 +63,9 @@ func newAppForPassphraseTest(t *testing.T, keyPath string) App {
 		},
 		passphraseCache: make(map[string][]byte),
 		passphraseCh:    make(chan []byte, 1),
+		// Match production seeding from New() so tests exercise the
+		// real gen flow rather than the zero-value escape hatch.
+		connGen: 1,
 	}
 }
 
@@ -73,7 +76,7 @@ func newAppForPassphraseTest(t *testing.T, keyPath string) App {
 // instead of hanging the test process.
 func assertPreflightDispatches(t *testing.T, a App) {
 	t.Helper()
-	cmd := a.connect()
+	cmd := a.connect(a.connGen)
 	if cmd == nil {
 		t.Fatal("connect() returned nil cmd")
 	}
@@ -100,7 +103,7 @@ func assertPreflightDispatches(t *testing.T, a App) {
 // exits cleanly without blocking when Connect eventually returns.
 func assertPreflightFallsThrough(t *testing.T, a App) {
 	t.Helper()
-	cmd := a.connect()
+	cmd := a.connect(a.connGen)
 	if cmd == nil {
 		t.Fatal("connect() returned nil cmd")
 	}
@@ -195,7 +198,7 @@ func TestApp_PassphraseDialogRendersWhenNotConnected(t *testing.T) {
 		passphraseCache: make(map[string][]byte),
 		passphraseCh:    make(chan []byte, 1),
 	}
-	a.passphrase.Show("")
+	a.passphrase.Show("", 1, "")
 
 	out := a.viewBody()
 

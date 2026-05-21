@@ -8,16 +8,31 @@ import (
 )
 
 // PassphraseModel shows a TUI dialog for entering a key passphrase.
+//
+// gen + keyPath are stashed across the Show()→Update() cycle so the
+// emitted PassphraseResultMsg can carry the connection generation and
+// target key path the request was issued for. Without this, a stale
+// passphrase result after a server switch could be applied to the
+// wrong connection (cache against the current cfg.KeyPath, or kick
+// off a connect for the now-current server using the previous
+// server's passphrase). See fix-cross-server-db-isolation.md
+// §"Passphrase result ownership".
 type PassphraseModel struct {
 	visible bool
 	input   textinput.Model
 	err     string
+	gen     uint64
+	keyPath string
 }
 
 // PassphraseResultMsg is sent when the user enters a passphrase.
+// gen + keyPath identify which connection attempt + key the result
+// belongs to so updateInner can drop stale submissions.
 type PassphraseResultMsg struct {
 	Passphrase []byte
 	Cancelled  bool
+	gen        uint64
+	keyPath    string
 }
 
 func NewPassphrase() PassphraseModel {
@@ -29,9 +44,15 @@ func NewPassphrase() PassphraseModel {
 	return PassphraseModel{input: ti}
 }
 
-func (p *PassphraseModel) Show(errMsg string) {
+// Show opens the passphrase dialog and binds it to a specific
+// connection generation + target key path. The bound values flow
+// through to the emitted PassphraseResultMsg so updateInner can drop
+// stale submissions and cache against the right key.
+func (p *PassphraseModel) Show(errMsg string, gen uint64, keyPath string) {
 	p.visible = true
 	p.err = errMsg
+	p.gen = gen
+	p.keyPath = keyPath
 	p.input.SetValue("")
 	p.input.Focus()
 }
@@ -49,14 +70,18 @@ func (p PassphraseModel) Update(msg tea.KeyMsg) (PassphraseModel, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		pass := p.input.Value()
+		gen := p.gen
+		keyPath := p.keyPath
 		p.Hide()
 		return p, func() tea.Msg {
-			return PassphraseResultMsg{Passphrase: []byte(pass)}
+			return PassphraseResultMsg{Passphrase: []byte(pass), gen: gen, keyPath: keyPath}
 		}
 	case "esc":
+		gen := p.gen
+		keyPath := p.keyPath
 		p.Hide()
 		return p, func() tea.Msg {
-			return PassphraseResultMsg{Cancelled: true}
+			return PassphraseResultMsg{Cancelled: true, gen: gen, keyPath: keyPath}
 		}
 	}
 
