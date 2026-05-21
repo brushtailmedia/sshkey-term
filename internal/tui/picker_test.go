@@ -1092,6 +1092,181 @@ func TestAddToGroupPicker_SelectionOpensAddConfirm(t *testing.T) {
 	}
 }
 
+// --- /mute (Mode-A fix: previously an empty router case = silent no-op) ---
+
+func TestMute_RouterForwardsWithActiveContext(t *testing.T) {
+	cases := []struct {
+		text, room, group, dm    string
+		wantRoom, wantGroup, wantDM string
+	}{
+		{"/mute", "room_x", "", "", "room_x", "", ""},
+		{"/mute", "", "group_x", "", "", "group_x", ""},
+		{"/mute", "", "", "dm_x", "", "", "dm_x"},
+		{"/mute", "", "", "", "", "", ""}, // no context — App surfaces friendly status
+	}
+	for _, tc := range cases {
+		i := &InputModel{}
+		recognized := i.handleCommand(tc.text, nil, tc.room, tc.group, tc.dm)
+		if !recognized {
+			t.Errorf("%q with context {room=%q group=%q dm=%q} should be RECOGNIZED", tc.text, tc.room, tc.group, tc.dm)
+			continue
+		}
+		sc := i.PendingCommand()
+		if sc == nil || sc.Command != "/mute" || sc.Room != tc.wantRoom || sc.Group != tc.wantGroup || sc.DM != tc.wantDM {
+			t.Errorf("%q in {room=%q group=%q dm=%q} routed as %+v, want context preserved", tc.text, tc.room, tc.group, tc.dm, sc)
+		}
+	}
+}
+
+func TestMute_ToggleInActiveContext(t *testing.T) {
+	a, _, _ := newPickerWhoisApp(t)
+	a.muted = make(map[string]bool)
+
+	// First /mute in a room → muted=true, status confirms.
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/mute", Room: "room_x"})
+	if !a.muted["room_x"] {
+		t.Fatal("first /mute should set muted[room_x]=true")
+	}
+	if !strings.HasPrefix(a.statusBar.errorMsg, "Muted:") {
+		t.Fatalf("status should confirm muted, got %q", a.statusBar.errorMsg)
+	}
+
+	// Second /mute on same context → unmuted=false, status flips.
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/mute", Room: "room_x"})
+	if a.muted["room_x"] {
+		t.Fatal("second /mute on muted target should unmute")
+	}
+	if !strings.HasPrefix(a.statusBar.errorMsg, "Unmuted:") {
+		t.Fatalf("status should confirm unmuted, got %q", a.statusBar.errorMsg)
+	}
+}
+
+func TestMute_NoActiveContextStatusOnly(t *testing.T) {
+	a, _, _ := newPickerWhoisApp(t)
+	a.muted = make(map[string]bool)
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/mute"}) // no room/group/dm
+	if !strings.Contains(a.statusBar.errorMsg, "needs an active") {
+		t.Fatalf("expected friendly status for /mute with no context, got %q", a.statusBar.errorMsg)
+	}
+	if len(a.muted) != 0 {
+		t.Fatalf("no-context /mute must not mutate the muted map, got %v", a.muted)
+	}
+}
+
+// --- /rename (Mode-B fix: bare-no-arg/non-group now surfaces friendly status) ---
+
+func TestRename_RouterForwardsAllForms(t *testing.T) {
+	cases := []struct {
+		text, group, room string
+		wantArg, wantGroup string
+	}{
+		{"/rename", "group_x", "", "", "group_x"},          // bare in group
+		{"/rename NewName", "group_x", "", "NewName", "group_x"}, // typed in group
+		{"/rename", "", "room_x", "", ""},                   // bare in room
+		{"/rename NewName", "", "room_x", "NewName", ""},   // typed in room
+	}
+	for _, tc := range cases {
+		i := &InputModel{}
+		recognized := i.handleCommand(tc.text, nil, tc.room, tc.group, "")
+		if !recognized {
+			t.Errorf("%q must be recognized", tc.text)
+			continue
+		}
+		sc := i.PendingCommand()
+		if sc == nil || sc.Command != "/rename" || sc.Arg != tc.wantArg || sc.Group != tc.wantGroup {
+			t.Errorf("%q in {group=%q room=%q} routed as %+v, want forward-with-context", tc.text, tc.group, tc.room, sc)
+		}
+	}
+}
+
+func TestRename_BareInGroupShowsUsage(t *testing.T) {
+	a, _, _ := newPickerWhoisApp(t)
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/rename", Group: "group_x"})
+	if !strings.Contains(a.statusBar.errorMsg, "Usage: /rename <name>") {
+		t.Fatalf("bare /rename in group should show usage, got %q", a.statusBar.errorMsg)
+	}
+}
+
+func TestRename_NonGroupShowsOnlyWorksInside(t *testing.T) {
+	a, _, _ := newPickerWhoisApp(t)
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/rename", Arg: "NewName", Room: "room_x"})
+	if !strings.Contains(a.statusBar.errorMsg, "only works inside a group") {
+		t.Fatalf("/rename in non-group should surface friendly status, got %q", a.statusBar.errorMsg)
+	}
+}
+
+// --- Mode-A router robustness (the original /typing bug class) ---
+
+func TestRouter_UnknownCommandEmitsUnrecognizedAndReturnsFalse(t *testing.T) {
+	i := &InputModel{}
+	recognized := i.handleCommand("/notarealverb hello", nil, "room_x", "", "")
+	if recognized {
+		t.Fatal("unknown verb must return false from handleCommand")
+	}
+	sc := i.PendingCommand()
+	if sc == nil || sc.Command != "/unrecognized" || sc.Arg != "/notarealverb" {
+		t.Fatalf("unknown verb pendingCmd = %+v, want {/unrecognized, Arg: /notarealverb}", sc)
+	}
+	if sc.Room != "room_x" {
+		t.Errorf("context should be forwarded, got Room=%q", sc.Room)
+	}
+}
+
+func TestRouter_KnownCommandsReturnTrue(t *testing.T) {
+	// Drive a canonical sample of router-known verbs and assert each
+	// is recognized. The list is hand-maintained — the cost is that
+	// a verb added to handleCommand without being added here goes
+	// untested by this drift-guard. The benefit is catching the
+	// classic "verb in completion/help but not in router" bug
+	// (which is precisely how /typing was silently swallowed).
+	for _, text := range []string{
+		"/mute", "/typing", "/typing on", "/leave", "/delete", "/undo", "/whoami",
+		"/info", "/members", "/groupinfo", "/settings", "/pending", "/mykey",
+		"/admins", "/audit", "/help", "/?", "/verify @x", "/unverify @x",
+		"/whois @x", "/role @x", "/role", "/add @x", "/kick @x", "/promote @x",
+		"/demote @x", "/transfer @x", "/rename NewName", "/rename",
+		"/setstatus", "/setstatus away", "/search query", "/upload /tmp/x",
+		"/groupcreate", "/groupcreate @a @b", "/dmcreate", "/dmcreate @a",
+		"/topic", "/topic new text",
+	} {
+		i := &InputModel{}
+		if !i.handleCommand(text, nil, "room_x", "group_x", "dm_x") {
+			t.Errorf("known verb %q should be recognized — router gap?", text)
+		}
+	}
+}
+
+func TestUnrecognized_AppSurfacesStatusWithTypo(t *testing.T) {
+	a, _, _ := newPickerWhoisApp(t)
+	a.handleSlashCommand(&SlashCommandMsg{Command: "/unrecognized", Arg: "/notarealverb"})
+	if !strings.Contains(a.statusBar.errorMsg, "Unknown command: /notarealverb") {
+		t.Fatalf("expected status to name the typo, got %q", a.statusBar.errorMsg)
+	}
+	if !strings.Contains(a.statusBar.errorMsg, "/?") {
+		t.Fatalf("status should point at /? for the list, got %q", a.statusBar.errorMsg)
+	}
+}
+
+func TestRouter_DontResetInputOnUnknownCommand(t *testing.T) {
+	// The `enter` branch in Update reads handleCommand's bool to
+	// decide whether to reset the input. This test asserts the
+	// invariant directly: with the input field populated, processing
+	// an unknown verb leaves the text in place. Drift-guard for
+	// "user has to retype the entire line to fix a typo".
+	i := NewInput()
+	i.textInput.SetValue("/notarealverb hello") // simulate the typed line
+	recognized := i.handleCommand(i.textInput.Value(), nil, "", "", "")
+	if recognized {
+		t.Fatal("precondition: unknown verb should return false")
+	}
+	// The `enter` branch only resets when recognized; this test
+	// codifies that contract at the boolean level so the conditional
+	// reset can be verified without re-running the full key handler.
+	if i.textInput.Value() == "" {
+		t.Fatal("handleCommand must not touch the input itself; the enter branch is responsible (and skips reset on !recognized)")
+	}
+}
+
 // TestInputParser_GroupAdminRoutesToAppInAllForms exercises the REAL
 // router path for /add /kick /promote /demote /transfer — the
 // regression guard for the same router-guard gap that bit /role.

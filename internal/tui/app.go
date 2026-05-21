@@ -1705,37 +1705,10 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case MuteToggleMsg:
-		a.muted[msg.Target] = msg.Muted
-		// Persist to config
-		if a.appConfig != nil {
-			config.SaveMutedMap(a.configDir, a.appConfig, a.muted)
-		}
-		// Resolve the raw nanoid target to a human-readable name for
-		// the status-bar confirmation. Kind selects which resolver
-		// to use; fall back to the raw ID if the client isn't
-		// available or the resolver returns empty.
-		label := msg.Target
-		if a.client != nil {
-			switch msg.Kind {
-			case "room":
-				if name := strings.TrimSpace(a.client.DisplayRoomName(msg.Target)); name != "" {
-					label = name
-				}
-			case "group":
-				if name := strings.TrimSpace(a.client.DisplayGroupName(msg.Target)); name != "" {
-					label = name
-				}
-			case "dm":
-				if name := strings.TrimSpace(a.client.DisplayDMName(msg.Target)); name != "" {
-					label = name
-				}
-			}
-		}
-		if msg.Muted {
-			a.statusBar.SetError("Muted: " + label)
-		} else {
-			a.statusBar.SetError("Unmuted: " + label)
-		}
+		// Info-panel `m` key. Same downstream as the typed `/mute`
+		// slash command (handleSlashCommand case "/mute") — both
+		// route into applyMuteState.
+		a.applyMuteState(msg.Target, msg.Kind, msg.Muted)
 		return a, nil
 
 	case InfoPanelAdminKeyMsg:
@@ -4243,6 +4216,18 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		// /delete, which is fully wired for DMs. Surface a clear
 		// redirect so the user isn't confused about which command to use.
 		a.statusBar.SetError("/leave is not available for 1:1 DMs — use /delete")
+	case "/unrecognized":
+		// Mode-A router robustness (Verb sentinel synthesized by
+		// InputModel.handleCommand's `default:`). sc.Arg carries the
+		// raw verb the user typed; surface it so the message is
+		// actionable. The input box is intentionally NOT reset in
+		// the `enter` branch on this path, so the user can fix the
+		// typo without retyping. /? is the discoverable reference.
+		bad := strings.TrimSpace(sc.Arg)
+		if bad == "" {
+			bad = "(empty)"
+		}
+		a.statusBar.SetError("Unknown command: " + bad + " — type /? for the list")
 	case "/delete":
 		// /delete is context-aware. All three contexts (1:1 DM, group DM,
 		// room) are wired end-to-end with confirmation dialogs and
@@ -4557,6 +4542,24 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		CopyToClipboard(pubKey)
 		a.statusBar.SetError(fingerprint + " — public key copied to clipboard")
 		// Panel will open when pending_keys_list response arrives
+	case "/mute":
+		// Toggle mute on the active context (room/group/dm). Same
+		// downstream as the info-panel `m` key (MuteToggleMsg →
+		// applyMuteState). Fixes the prior empty router case
+		// (Mode-A silent no-op: typed `/mute` did nothing).
+		var target, kind string
+		switch {
+		case sc.Room != "":
+			target, kind = sc.Room, "room"
+		case sc.Group != "":
+			target, kind = sc.Group, "group"
+		case sc.DM != "":
+			target, kind = sc.DM, "dm"
+		default:
+			a.statusBar.SetError("/mute needs an active room, group, or DM")
+			return
+		}
+		a.applyMuteState(target, kind, !a.muted[target])
 	case "/upload":
 		if sc.Arg == "" {
 			a.statusBar.SetError("Usage: /upload <file path>")
@@ -4629,7 +4632,17 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		// which also enforces the gate. Without this pre-check, the
 		// server rejection surfaces as ErrUnknownGroup (byte-identical
 		// privacy), which reads as a confusing "you are not a member".
-		if sc.Group == "" || sc.Arg == "" {
+		//
+		// (2026-05-20) bare-no-arg and non-group cases now surface
+		// friendly status messages instead of the previous silent
+		// drop (Mode-B class fix — matches the /role + group-admin
+		// verbs treatment from the picker work).
+		if sc.Group == "" {
+			a.statusBar.SetError("/rename only works inside a group")
+			return
+		}
+		if strings.TrimSpace(sc.Arg) == "" {
+			a.statusBar.SetError("Usage: /rename <name>")
 			return
 		}
 		if a.client == nil {
@@ -4654,7 +4667,7 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		// (§6 / #10).
 		if strings.TrimSpace(sc.Arg) == "" {
 			if sc.Group == "" {
-				a.statusBar.SetError(sc.Command + " only works inside a group DM")
+				a.statusBar.SetError(sc.Command + " only works inside a group")
 				return
 			}
 			if a.client == nil {
@@ -4784,7 +4797,7 @@ func (a *App) handleTopicCommand(sc *SlashCommandMsg) {
 // /audit 50 for a longer view.
 func (a *App) handleAuditCommand(sc *SlashCommandMsg) {
 	if sc.Group == "" {
-		a.statusBar.SetError("/audit only works inside a group DM")
+		a.statusBar.SetError("/audit only works inside a group")
 		return
 	}
 	if a.client == nil {
@@ -4820,7 +4833,7 @@ func (a *App) handleAuditCommand(sc *SlashCommandMsg) {
 // overlay is one-shot and doesn't update live.
 func (a *App) handleMembersOverlayCommand(sc *SlashCommandMsg, adminsOnly bool) {
 	if sc.Group == "" {
-		a.statusBar.SetError(sc.Command + " only works inside a group DM")
+		a.statusBar.SetError(sc.Command + " only works inside a group")
 		return
 	}
 	if a.client == nil {
@@ -5631,6 +5644,47 @@ func (a *App) roleCandidates(groupID string) []PickerItem {
 	return items
 }
 
+// applyMuteState writes the new mute state for `target` into the
+// canonical `a.muted` map, persists, and surfaces a "Muted: X" /
+// "Unmuted: X" status confirmation (resolving a human-readable label
+// via the kind-appropriate display helper). Shared by:
+//   - the info-panel `m` key (MuteToggleMsg handler)
+//   - the typed `/mute` slash command
+//
+// Both ultimately do the same thing; factoring this out removes the
+// duplication that existed when MuteToggleMsg held the only copy.
+func (a *App) applyMuteState(target, kind string, muted bool) {
+	if target == "" {
+		return
+	}
+	a.muted[target] = muted
+	if a.appConfig != nil {
+		config.SaveMutedMap(a.configDir, a.appConfig, a.muted)
+	}
+	label := target
+	if a.client != nil {
+		switch kind {
+		case "room":
+			if name := strings.TrimSpace(a.client.DisplayRoomName(target)); name != "" {
+				label = name
+			}
+		case "group":
+			if name := strings.TrimSpace(a.client.DisplayGroupName(target)); name != "" {
+				label = name
+			}
+		case "dm":
+			if name := strings.TrimSpace(a.client.DisplayDMName(target)); name != "" {
+				label = name
+			}
+		}
+	}
+	if muted {
+		a.statusBar.SetError("Muted: " + label)
+	} else {
+		a.statusBar.SetError("Unmuted: " + label)
+	}
+}
+
 // lookupGroupName returns the display name of a group, falling back
 // to a comma-joined member list when no explicit name is set.
 func (a *App) lookupGroupName(groupID string) string {
@@ -5659,7 +5713,7 @@ func (a *App) lookupGroupName(groupID string) string {
 // which calls the client.Send* function for the wire verb.
 func (a *App) handleGroupAdminCommand(sc *SlashCommandMsg) {
 	if sc.Group == "" {
-		a.statusBar.SetError(sc.Command + " only works inside a group DM")
+		a.statusBar.SetError(sc.Command + " only works inside a group")
 		return
 	}
 	if sc.Arg == "" {
@@ -6544,12 +6598,21 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			}
 		}
 	case "group_renamed":
+		// Legacy event kept for back-compat — the server emits this
+		// alongside the newer `group_event{Event:"rename"}` (see
+		// sshkey-chat session.go where the legacy broadcast is
+		// flagged for follow-up removal). The inline system message
+		// is now rendered exclusively by the `group_event{rename}`
+		// path above (which also honors `m.Quiet`); rendering it
+		// here too caused a visible duplicate ("renamed the group to
+		// hello" + "renamed the group to \"hello\"" in the same
+		// chat). The sidebar entry update DOES stay here — the
+		// group_event path renders the inline message but doesn't
+		// touch sidebar.RenameGroup, and removing both would leave
+		// the sidebar name stale until reconnect.
 		var m protocol.GroupRenamed
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			a.sidebar.RenameGroup(m.Group, m.Name)
-			if m.Group == a.messages.group {
-				a.messages.AddSystemMessage(a.resolveDisplayName(m.RenamedBy) + " renamed the group to " + m.Name)
-			}
 		}
 	case "room_event":
 		var m protocol.RoomEvent

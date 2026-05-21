@@ -267,8 +267,16 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 
 		// Handle slash commands
 		if strings.HasPrefix(text, "/") {
-			i.handleCommand(text, c, room, group, dm)
-			i.textInput.Reset()
+			recognized := i.handleCommand(text, c, room, group, dm)
+			// Mode-A robustness: don't clear the input box when the
+			// verb was unknown — let the user fix the typo without
+			// retyping the whole line. Recognized verbs (including
+			// the existing /leave_dm_rejected sentinel and the new
+			// /unrecognized one, the latter is only emitted by the
+			// `default` branch above) still reset normally.
+			if recognized {
+				i.textInput.Reset()
+			}
 			i.clearReply()
 			i.didSend = true
 			return i, nil
@@ -477,7 +485,21 @@ type SlashCommandMsg struct {
 	DM      string
 }
 
-func (i *InputModel) handleCommand(text string, c *client.Client, room, group, dm string) {
+// handleCommand routes a slash command. Returns true when the verb
+// is recognized (whether or not it produced a pendingCmd — some
+// recognized verbs like /mute always forward; others like /add could
+// historically guard out, though the picker work removed all such
+// guards). Returns false ONLY when the verb is unknown — in which
+// case it still sets a pendingCmd with sentinel Command
+// "/unrecognized" so App can surface a friendly status; the `enter`
+// branch reads the bool to decide whether to reset the input box
+// (don't reset on unknown — let the user fix the typo).
+//
+// This is the Mode-A router-robustness fix: previously the switch
+// had no `default`, so a typo like `/foo` (or any future verb
+// missing from the router) was silently consumed by the input box.
+// That's the bug class that originally bit /typing.
+func (i *InputModel) handleCommand(text string, c *client.Client, room, group, dm string) bool {
 	parts := strings.SplitN(text, " ", 2)
 	cmd := parts[0]
 	arg := ""
@@ -509,16 +531,21 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		// the dialog wording changes based on IsRoomRetired.
 		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	case "/rename":
-		// Phase 14: route to the app layer so the admin pre-check
-		// runs BEFORE the wire send. Non-admins get a friendly
-		// client-side rejection; admins pass through to the server.
-		// The server also enforces the admin gate — this is purely
-		// a UX improvement.
-		if group != "" && arg != "" {
-			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Group: group}
-		}
+		// Forward ALL forms so App's /rename case can surface
+		// friendly status messages for bare-no-arg / non-group /
+		// non-admin instead of the prior silent input-box drop
+		// (Mode-B class — same fix applied to /role and the five
+		// group-admin mutating verbs in earlier picker steps).
+		// Admin pre-check still runs App-side before the wire send.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
 	case "/mute":
-		// Handled via info panel toggle — just set a flag
+		// Forward to App: it picks target+kind from the active
+		// context (room/group/dm) and toggles via `applyMuteState`
+		// — the same downstream as the info-panel `m` key's
+		// MuteToggleMsg. The previous empty case + stale
+		// "just set a flag" comment was a Mode-A silent no-op
+		// (typed `/mute` did nothing).
+		i.pendingCmd = &SlashCommandMsg{Command: cmd, Room: room, Group: group, DM: dm}
 	case "/verify", "/unverify", "/whois", "/search", "/settings", "/help", "/?", "/pending", "/mykey", "/setstatus", "/typing":
 		// These need to be handled at the app level. `/typing` belongs
 		// here (not its own case) because it is the exact analog of
@@ -624,7 +651,19 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		// mode (status bar showed the OLD topic, never set the new
 		// one). Test in phase18_test.go locks the forwarding in.
 		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
+	default:
+		// Unknown verb (e.g. `/foo` typo, or a verb someone added
+		// to completion/help but forgot to route here). Synthesize
+		// the /unrecognized sentinel — App surfaces a friendly
+		// "Unknown command: X — type /? for the list" status.
+		// Mirrors the existing /leave_dm_rejected sentinel pattern.
+		// Returning false here tells the `enter` branch NOT to
+		// reset the input box, so the user can fix the typo
+		// without retyping the whole line.
+		i.pendingCmd = &SlashCommandMsg{Command: "/unrecognized", Arg: cmd, Room: room, Group: group, DM: dm}
+		return false
 	}
+	return true
 }
 
 // PendingCommand returns and clears a pending slash command that needs app-level handling.

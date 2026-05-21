@@ -121,7 +121,7 @@ func TestApp_AdminsCommandShowsErrorOutsideGroupContext(t *testing.T) {
 		Room:    "room_x",
 	})
 
-	if a.statusBar.errorMsg != "/admins only works inside a group DM" {
+	if a.statusBar.errorMsg != "/admins only works inside a group" {
 		t.Fatalf("expected context error, got %q", a.statusBar.errorMsg)
 	}
 	if a.membersOverlay.IsVisible() {

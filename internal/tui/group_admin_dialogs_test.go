@@ -303,7 +303,7 @@ func TestInputParser_NewAdminVerbsRouteToApp(t *testing.T) {
 func TestInputParser_AdminVerbsWithoutGroupForwardForFriendlyStatus(t *testing.T) {
 	// §9 step 5 (2026-05-20): the router now ALWAYS forwards these
 	// verbs, even from a non-group context — App's handler surfaces
-	// the friendly "only works inside a group DM" status instead of
+	// the friendly "only works inside a group" status instead of
 	// the previous silent input-box drop. (The earlier silent-drop
 	// contract was the same router-guard pattern that bit /role
 	// pre-step 3; same fix applied here.) This test was inverted
