@@ -2497,14 +2497,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// User confirmed /delete on a room. Sends delete_room and waits
 		// for the server's room_deleted echo before touching local state.
 		// The echo arrives via the room_deleted case, which is handled
-		// by both client.go (purge messages, epoch keys, reactions; set
-		// left_at) and here (drop sidebar entry, reset active context).
+		// by both client.go (purge messages, epoch keys, reactions, local
+		// room row) and here (drop sidebar entry, reset active context).
 		//
-		// Idempotent: works on both active and retired rooms. For active
-		// rooms the server performs the leave side-effects first (remove
-		// from room_members, broadcast room_event leave, rotate epoch);
-		// for retired rooms the leave steps are skipped since the room
-		// is already archived and the epoch is already frozen.
+		// For a current member, the server performs the normal leave
+		// side-effects first (remove from room_members, broadcast
+		// room_event leave, echo room_left). Active rooms rotate epoch;
+		// retired rooms are read-only, so only epoch rotation is skipped.
 		if a.client != nil && msg.Room != "" {
 			if err := a.client.DeleteRoom(msg.Room); err != nil {
 				a.statusBar.SetError("Delete failed: " + err.Error())

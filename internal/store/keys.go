@@ -940,11 +940,10 @@ func (s *Store) PurgeGroupMessages(groupID string) ([]string, error) {
 // PurgeGroupMessages.
 //
 // Idempotent: re-running on an already-purged room is a no-op. The
-// local rooms row is preserved (with left_at set by the caller) so
-// that multi-device catchup can detect the state on reconnect and so
-// the TUI app layer can detect the row in its sidebar cleanup. The
-// app-level sidebar entry removal happens separately via
-// sidebar.RemoveRoom.
+// helper itself only removes room-scoped message data; the caller owns the
+// room metadata decision. The current /delete handlers call DeleteRoomRecord
+// immediately after this so deleted rooms do not reappear from archived-row
+// merge logic on reconnect.
 func (s *Store) PurgeRoomMessages(roomID string) ([]string, error) {
 	// Collect attachment file IDs before the rows go away — see
 	// PurgeDMMessages for the rationale.
