@@ -7003,12 +7003,18 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				// system messages matching the group-side UX.
 				switch m.Event {
 				case "join":
-					if m.By != "" && m.By != m.User {
-						a.messages.AddSystemMessage(
-							a.resolveDisplayName(m.By) + " added " + a.resolveDisplayName(m.User) + " to the room")
-					} else {
-						a.messages.AddSystemMessage(a.resolveDisplayName(m.User) + " joined")
-					}
+					// Intentionally NOT rendered for rooms. Rooms are
+					// operator-managed, so the actor is always an opaque
+					// "os:<uid>" admin — "os:0 added X to the room" carries no
+					// useful signal. Room audit events also replay in
+					// sync_batch on every reconnect and render only for the
+					// active room, so this line surfaced repeatedly and
+					// inconsistently across rooms (e.g. shown in the room you
+					// happened to be viewing, dropped in the others). Room
+					// membership is conveyed by the member panel + the room
+					// cache, and the newly-added user gets the room_added_to
+					// toast. Groups still render join in the group_event
+					// handler — peer-admin adds there are meaningful.
 				case "leave":
 					switch m.Reason {
 					case "removed":

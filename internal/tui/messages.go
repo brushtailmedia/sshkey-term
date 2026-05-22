@@ -1413,25 +1413,33 @@ type HistoryRequestMsg struct {
 func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
-		// Cursor-driven up. Snap-then-move: if cursor is unset (-1)
-		// or off the bottom of the viewport (e.g. user wheel-scrolled
-		// up to read history), the first press snaps cursor to the
-		// last message and that becomes the engaged browse position.
-		// Subsequent presses walk up message-by-message; viewport
-		// follows when cursor would go off the top edge.
+		// "Scroll up to see older messages": once the viewport is at the top
+		// of the loaded set and older history is available, Up loads it —
+		// matching the mouse-wheel / pageup / home paths. Previously Up only
+		// requested history at cursor==0 (after walking the cursor message-by-
+		// message to the very first one) and otherwise snapped the cursor to
+		// the bottom, so up-arrow history loading felt broken next to the
+		// mouse. hasMore lets cursor-browse still engage when history is
+		// exhausted; requestHistory is idempotent under loadingHistory.
+		if m.viewport.AtTop() && m.hasMore && len(m.messages) > 0 {
+			if !m.loadingHistory {
+				return m, m.requestHistory()
+			}
+			return m, nil
+		}
+		// Cursor-driven browse: snap to the last message on first engage
+		// (cursor == -1 or off-screen), then walk up; the viewport follows.
 		if m.cursor == -1 && len(m.messages) > 0 {
 			m.cursor = len(m.messages) - 1
 		} else if m.cursor > 0 {
 			m.cursor--
-			// At the top — request history. The hasMore guard inside
-			// requestHistory keeps the call idempotent when there's
-			// nothing left to fetch.
-			if m.cursor == 0 && len(m.messages) > 0 && !m.loadingHistory {
-				m.ensureCursorVisible()
-				return m, m.requestHistory()
-			}
 		}
 		m.ensureCursorVisible()
+		// If walking the cursor up brought the viewport to the top, load
+		// older history on this same press rather than forcing another.
+		if m.viewport.AtTop() && m.hasMore && !m.loadingHistory && len(m.messages) > 0 {
+			return m, m.requestHistory()
+		}
 	case "pageup", "pgup":
 		// Pure viewport scroll, cursor unchanged. Page = viewport height.
 		m.viewport.ScrollUp(m.viewport.Height)
