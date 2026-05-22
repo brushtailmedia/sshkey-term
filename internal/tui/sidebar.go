@@ -336,6 +336,27 @@ func (s *SidebarModel) AddGroup(g protocol.GroupInfo) {
 	s.groups = append(s.groups, g)
 }
 
+// AddRoom inserts a room into the sidebar by ID (deduped) and clears any stale
+// left/retired flags. Used by the V3 room_added_to live handler so a just-
+// added room appears immediately without a room_list refetch. By-ID is
+// sufficient: the row renderer resolves the display name from the ID via
+// resolveRoomName at render time, and the client layer persists the room's
+// name/topic (UpsertRoomWithMembers) before this runs.
+func (s *SidebarModel) AddRoom(roomID string) {
+	if s.leftRooms != nil {
+		delete(s.leftRooms, roomID)
+	}
+	if s.retiredRooms != nil {
+		delete(s.retiredRooms, roomID)
+	}
+	for _, existing := range s.rooms {
+		if existing == roomID {
+			return // already present (dedup) — flags already cleared above
+		}
+	}
+	s.rooms = append(s.rooms, roomID)
+}
+
 // RemoveGroup drops a group DM from the sidebar by ID. Used by the
 // group_deleted handler when /delete completes (any device, this device
 // or another). Clears unread badge, archived flag, and resets the

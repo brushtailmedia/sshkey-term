@@ -565,6 +565,33 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 				}
 			}
 		}
+	case "room_added_to":
+		// V3: an operator added the local user to a room. Mirror
+		// group_added_to — hydrate local state (member cache + persisted
+		// room row) so the sidebar/cache update immediately without a
+		// room_list refetch. Unlike the sibling handlers, log the unmarshal
+		// error rather than silently dropping it. The TUI layer (app.go)
+		// handles the toast + sidebar insertion.
+		var ra protocol.RoomAddedTo
+		if err := json.Unmarshal(raw, &ra); err != nil {
+			c.logger.Warn("room_added_to unmarshal", "error", err)
+			break
+		}
+		c.setRoomMembers(ra.Room, ra.Members)
+		if c.store != nil {
+			// V8's combined helper writes the member-count + member_ids CSV
+			// in one statement, so count and IDs cannot drift.
+			if err := c.store.UpsertRoomWithMembers(ra.Room, ra.Name, ra.Topic, ra.Members); err != nil {
+				c.logger.Warn("UpsertRoomWithMembers on room_added_to",
+					"room", ra.Room, "error", err)
+			}
+			// Un-archive if the user was previously removed/left and is now
+			// being re-added (clears left_at).
+			if err := c.store.MarkRoomRejoined(ra.Room); err != nil {
+				c.logger.Warn("MarkRoomRejoined on room_added_to",
+					"room", ra.Room, "error", err)
+			}
+		}
 	case "room_list":
 		var rl protocol.RoomList
 		if err := json.Unmarshal(raw, &rl); err == nil {

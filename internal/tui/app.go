@@ -7075,6 +7075,35 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			// notifications. Title = the actor, body = the action.
 			SendDesktopNotification(addedBy, "added you to group '"+groupName+"'")
 		}
+	case "room_added_to":
+		// V3: an operator added the local user to a room. The client layer
+		// already wrote the room row + member cache and cleared left_at; here
+		// we surface it in the sidebar + a toast / desktop notification.
+		// Deliberately does NOT steal focus — this is a sidebar update, not a
+		// forced context switch.
+		var m protocol.RoomAddedTo
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.sidebar.AddRoom(m.Room)
+			// If the user is currently viewing this room (e.g. a left room
+			// they still had open), refresh the messages pane's read-only
+			// state so the compose box reactivates without a context switch.
+			if a.messages.room == m.Room {
+				a.syncMessagesLeftState()
+			}
+			roomName := m.Name
+			if roomName == "" {
+				roomName = m.Room
+			}
+			// CLI adds set AddedBy = "os:<uid>"; render a friendly label
+			// rather than the raw os:501. (group_added_to never needs this —
+			// group adds always come from a real user.)
+			addedBy := "server admin"
+			if !strings.HasPrefix(m.AddedBy, "os:") {
+				addedBy = a.resolveDisplayName(m.AddedBy)
+			}
+			a.statusBar.SetError(addedBy + " added you to '" + roomName + "'")
+			SendDesktopNotification(addedBy, "added you to room '"+roomName+"'")
+		}
 	case "add_group_result", "remove_group_result", "promote_admin_result", "demote_admin_result":
 		// Phase 14: server ACKs for the admin verb the local user
 		// just sent. The meaningful state update already arrived via
