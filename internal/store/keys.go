@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -416,6 +417,11 @@ func (s *Store) GetGroupLeftAt(groupID string) int64 {
 }
 
 // UpsertRoom persists room metadata from the server's room_list message.
+//
+// Count-only legacy primitive. Production room_list handling should prefer
+// UpsertRoomWithMembers (V8), which writes the member count and member_ids
+// CSV in one statement so the two cannot drift. UpsertRoom is retained for
+// callers that have no member-ID list (and as a test fixture builder).
 func (s *Store) UpsertRoom(id, name, topic string, members int) error {
 	now := time.Now().Unix()
 	_, err := s.db.Exec(`
@@ -425,6 +431,111 @@ func (s *Store) UpsertRoom(id, name, topic string, members int) error {
 		id, name, topic, members, now,
 	)
 	return err
+}
+
+// UpsertRoomWithMembers persists room metadata AND the full member-ID
+// snapshot in a single statement (V8). The `members` count and the
+// `member_ids` CSV are written together from the same normalized slice, so
+// they cannot drift across a partial write. Used by the room_list handler.
+func (s *Store) UpsertRoomWithMembers(id, name, topic string, memberIDs []string) error {
+	now := time.Now().Unix()
+	norm := normalizeMemberIDs(memberIDs)
+	csv := strings.Join(norm, ",")
+	_, err := s.db.Exec(`
+		INSERT INTO rooms (id, name, topic, members, member_ids, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET name = excluded.name, topic = excluded.topic,
+			members = excluded.members, member_ids = excluded.member_ids, updated_at = excluded.updated_at`,
+		id, name, topic, len(norm), csv, now,
+	)
+	return err
+}
+
+// SetRoomMembers replaces the persisted member list for an existing room
+// (UPDATE-only). Writes both the count and the member_ids CSV from one
+// normalized slice so they stay consistent. Used by the explicit `r`
+// refresh handler, whose room_members_list response carries members but no
+// name/topic. Normalizes: trims and drops blank IDs, de-dupes keeping first
+// occurrence, preserves server order.
+func (s *Store) SetRoomMembers(roomID string, members []string) error {
+	norm := normalizeMemberIDs(members)
+	csv := strings.Join(norm, ",")
+	_, err := s.db.Exec(`UPDATE rooms SET members = ?, member_ids = ? WHERE id = ?`,
+		len(norm), csv, roomID)
+	return err
+}
+
+// GetRoomMembers returns the persisted member list for a room. loaded is
+// false when member_ids IS NULL (not yet loaded) or the room row is absent.
+// A loaded-but-empty room ("" CSV) returns an empty non-nil slice with
+// loaded=true. The returned slice is a fresh copy — callers may mutate it.
+func (s *Store) GetRoomMembers(roomID string) (members []string, loaded bool, err error) {
+	var mi sql.NullString
+	err = s.db.QueryRow(`SELECT member_ids FROM rooms WHERE id = ?`, roomID).Scan(&mi)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if !mi.Valid {
+		return nil, false, nil // NULL = not loaded
+	}
+	return splitMemberIDs(mi.String), true, nil
+}
+
+// GetAllLoadedRoomMembers returns the member lists for every room with a
+// non-NULL member_ids column. Used for startup cache hydration. Each slice
+// is a fresh copy.
+func (s *Store) GetAllLoadedRoomMembers() (map[string][]string, error) {
+	rows, err := s.db.Query(`SELECT id, member_ids FROM rooms WHERE member_ids IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][]string)
+	for rows.Next() {
+		var id string
+		var mi sql.NullString
+		if err := rows.Scan(&id, &mi); err != nil {
+			return nil, err
+		}
+		out[id] = splitMemberIDs(mi.String)
+	}
+	return out, rows.Err()
+}
+
+// ClearRoomMembers sets member_ids back to NULL (not loaded). Used by the
+// retire / leave / removed / delete paths. On a hard-deleted row this is a
+// harmless no-op UPDATE.
+func (s *Store) ClearRoomMembers(roomID string) error {
+	_, err := s.db.Exec(`UPDATE rooms SET member_ids = NULL WHERE id = ?`, roomID)
+	return err
+}
+
+// normalizeMemberIDs trims, drops empty/blank IDs, and de-dupes (keeping the
+// first occurrence) while preserving server order. Returns a fresh slice.
+func normalizeMemberIDs(members []string) []string {
+	seen := make(map[string]bool, len(members))
+	out := make([]string, 0, len(members))
+	for _, m := range members {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	return out
+}
+
+// splitMemberIDs parses a stored member_ids CSV. An empty string is a
+// loaded-but-empty room and returns a non-nil empty slice. Always returns a
+// fresh slice (defensive copy).
+func splitMemberIDs(csv string) []string {
+	if csv == "" {
+		return []string{}
+	}
+	return strings.Split(csv, ",")
 }
 
 // UpdateRoomNameTopic updates only the name and topic columns on an
@@ -548,6 +659,25 @@ func (s *Store) MarkRoomRetired(roomID, newDisplayName string, retiredAt int64) 
 	return err
 }
 
+// EnsureRetiredRoom creates or updates the local metadata row for a retired
+// room (V8). Unlike MarkRoomRetired (UPDATE-only), this INSERTs a minimal
+// row when absent — needed when a retired_rooms catchup entry arrives on a
+// fresh local DB for a room never seen active (retired rooms are omitted
+// from active room_list, so no row would otherwise exist). Does not touch
+// member_ids: retired rooms have no member-list UI; the caller pairs this
+// with ClearRoomMembers to null any stale cached list.
+func (s *Store) EnsureRetiredRoom(roomID, displayName string, retiredAt int64) error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(`
+		INSERT INTO rooms (id, name, topic, members, updated_at, retired_at)
+		VALUES (?, ?, '', 0, ?, ?)
+		ON CONFLICT (id) DO UPDATE SET name = excluded.name,
+			retired_at = excluded.retired_at, updated_at = excluded.updated_at`,
+		roomID, displayName, now, retiredAt,
+	)
+	return err
+}
+
 // IsRoomRetired returns true if the room has been retired server-side
 // and the client has recorded the retirement locally. Used by the TUI
 // to render the correct state label and by the /delete command flow
@@ -607,6 +737,43 @@ func (s *Store) GetLeftRooms() ([]LeftRoom, error) {
 	for rows.Next() {
 		var r LeftRoom
 		if err := rows.Scan(&r.ID, &r.Name, &r.Topic, &r.Members, &r.LeftAt, &r.LeaveReason); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// RetiredRoom is a room that has been retired server-side. Returned by
+// GetRetiredRooms so the sidebar can keep showing it as read-only history
+// after the server stops sending it in room_list. Mirrors LeftRoom with
+// RetiredAt replacing LeftAt; there is no retirement-reason column.
+type RetiredRoom struct {
+	ID        string
+	Name      string
+	Topic     string
+	Members   int
+	RetiredAt int64
+}
+
+// GetRetiredRooms returns every retired room (retired_at > 0). Used by the
+// TUI to merge retired entries back into the sidebar on connect/reconnect —
+// the server omits retired rooms from room_list, so without this they would
+// vanish on restart. Ordered by id for stable sidebar rendering. Does not
+// expose member_ids: retired rooms have no member-list UI.
+func (s *Store) GetRetiredRooms() ([]RetiredRoom, error) {
+	rows, err := s.db.Query(
+		`SELECT id, name, topic, members, retired_at FROM rooms WHERE retired_at > 0 ORDER BY id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []RetiredRoom
+	for rows.Next() {
+		var r RetiredRoom
+		if err := rows.Scan(&r.ID, &r.Name, &r.Topic, &r.Members, &r.RetiredAt); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

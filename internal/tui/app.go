@@ -410,14 +410,31 @@ func (a *App) openNewConversation() {
 	a.membersPanelCreateSource = false
 }
 
+// commandAllowedInReadOnlyRoom reports whether the input text is one of the
+// commands permitted in a retired/left room. Allow-list: /delete, /search,
+// /help, /?. Normalization: trim leading/trailing whitespace, match only the
+// first token (the verb), case-insensitively. So "/DELETE", "  /delete", and
+// "/delete confirm" all pass (arg parsing is the command handler's job);
+// "/deletex" and "/foo" do not. Normal (non-slash) text is never allowed.
+func commandAllowedInReadOnlyRoom(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "/") {
+		return false
+	}
+	verb := strings.ToLower(strings.SplitN(trimmed, " ", 2)[0])
+	switch verb {
+	case "/delete", "/search", "/help", "/?":
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *App) toggleMemberPanel() {
 	a.memberPanel.Toggle()
 	if a.memberPanel.IsVisible() {
+		// V8: Refresh renders room members from the local cache; no fetch.
 		a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
-		// Request actual room membership from server (lazy).
-		if a.messages.room != "" && a.client != nil {
-			a.client.RequestRoomMembers(a.messages.room)
-		}
 		a.input.SetMembers(a.activeMemberEntries())
 		a.input.SetNonMembers(a.activeNonMemberEntries())
 	}
@@ -1401,6 +1418,10 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.infoPanel.IsVisible() {
 			var cmd tea.Cmd
 			a.infoPanel.SetViewport(a.width, a.height)
+			// Finding 1: refresh the live member set + display state before
+			// Update reads i.members, so cursor nav and Enter/r/p/x act on the
+			// current membership (persistent — updateInner returns the model).
+			a.refreshInfoPanelLiveRows()
 			a.infoPanel, cmd = a.infoPanel.Update(msg)
 			if !a.infoPanel.IsVisible() {
 				a.focus = FocusInput
@@ -1655,9 +1676,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.refreshMessageContent()
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
-					if a.messages.room != "" && a.client != nil {
-						a.client.RequestRoomMembers(a.messages.room)
-					}
+					// V8: Refresh renders from the local cache; no fetch.
 					a.input.SetMembers(a.activeMemberEntries())
 					a.input.SetNonMembers(a.activeNonMemberEntries())
 				}
@@ -1671,6 +1690,11 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case FocusMembers:
 			var cmd tea.Cmd
+			// Finding 1: refresh live membership (preserving the selected user)
+			// + @-completion sources before Update reads a.memberPanel.members,
+			// so nav / Enter / m act on the current set. Persistent path
+			// (updateInner returns the model).
+			a.refreshMemberPanelLiveRowsAndCompletion()
 			a.memberPanel, cmd = a.memberPanel.Update(msg)
 			if cmd != nil {
 				cmds = append(cmds, cmd)
@@ -1742,26 +1766,40 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "tab", "shift+tab", "up", "down", "left", "right":
 					// fall through
 				case "enter":
-					// Only allow slash commands (start with /), block normal sends
 					text := strings.TrimSpace(a.input.Value())
-					if !strings.HasPrefix(text, "/") {
-						if a.messages.IsRoomRetired() {
-							a.statusBar.SetError("This room was archived by an admin — type /delete to remove from your view")
-						} else {
+					// V8 scope-lock: the narrow read-only allow-list applies
+					// to ROOMS only (retired or left). Left groups keep their
+					// prior behavior (block normal sends, allow all slash
+					// commands) so this change can't regress group UX.
+					readOnlyRoom := a.messages.room != "" &&
+						(a.messages.IsRoomRetired() || a.messages.IsLeft())
+					if readOnlyRoom {
+						// Only /delete, /search, /help, /? work in a read-only
+						// room. Everything else (normal text + other slash
+						// commands) is rejected with the exact status message.
+						if !commandAllowedInReadOnlyRoom(text) {
+							a.statusBar.SetError(`"/delete", "/search", and "/help" are available`)
+							return a, nil
+						}
+						// fall through for allow-listed commands
+					} else {
+						// Left group (or other archived non-room context):
+						// block normal sends, allow all slash commands.
+						if !strings.HasPrefix(text, "/") {
 							label := "context"
 							switch {
-							case a.messages.room != "":
-								label = "room"
 							case a.messages.group != "":
 								label = "group"
+							case a.messages.room != "":
+								label = "room"
 							}
 							a.statusBar.SetError("You left this " + label + " — type /delete to remove from your view")
+							return a, nil
 						}
-						return a, nil
+						// fall through for slash commands
 					}
-					// fall through for slash commands
 				default:
-					// Allow typing so the user can compose /delete
+					// Allow typing so the user can compose a command
 					// fall through
 				}
 			}
@@ -2505,8 +2543,18 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.Kind {
 		case "room_members":
+			// V8: the explicit `r` refresh — the single remaining
+			// RequestRoomMembers call site. Read-only rooms (retired/left)
+			// have no member list, so refresh is a render-layer no-op: do
+			// not fetch, just surface the read-only status.
 			if a.messages.room != "" {
-				a.client.RequestRoomMembers(a.messages.room)
+				if a.messages.IsRoomRetired() {
+					a.statusBar.SetError("room retired")
+				} else if a.messages.IsLeft() {
+					a.statusBar.SetError("you are not a member of this room")
+				} else {
+					a.client.RequestRoomMembers(a.messages.room)
+				}
 			}
 		case "device_list":
 			a.client.SendListDevices()
@@ -3658,9 +3706,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				a.refreshMessageContent()
 				if a.memberPanel.IsVisible() {
 					a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
-					if a.messages.room != "" && a.client != nil {
-						a.client.RequestRoomMembers(a.messages.room)
-					}
+					// V8: Refresh renders from the local cache; no fetch.
 					a.input.SetMembers(a.activeMemberEntries())
 					a.input.SetNonMembers(a.activeNonMemberEntries())
 				}
@@ -3730,6 +3776,10 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 		if a.memberPanel.IsVisible() {
 			a.focus = FocusMembers
 			a.memberPanel.SetFocused(true)
+			// Finding 1: refresh live membership before mapping the click to a
+			// row, so a click can't select a stale row when the rendered set
+			// changed. Persistent path (handleMouseClick returns the model).
+			a.refreshMemberPanelLiveRowsAndCompletion()
 			idx := layout.MemberItemAt(y)
 			if idx >= 0 && idx < len(a.memberPanel.members) {
 				a.memberPanel.cursor = idx
@@ -3980,6 +4030,47 @@ func (a *App) syncMessagesLeftState() {
 	a.messages.SetRoomRetired(false)
 }
 
+// refreshInfoPanelLiveRows re-reads the current member-ID set + live display
+// state into the open info panel for its active context (Finding 1). App owns
+// the client + sidebar presence/status + context, so the refresh lives here —
+// the panel does not reach outward into global state. Called immediately
+// before the panel's Update and View; SetLiveMemberIDs preserves
+// cursor/scroll and the selected user. On the View path (viewBody is a value
+// receiver) this only refreshes the rendered copy, which is fine for paint —
+// the Update + mouse paths handle persistent action state.
+func (a *App) refreshInfoPanelLiveRows() {
+	if a.client == nil || !a.infoPanel.IsVisible() {
+		return
+	}
+	a.infoPanel.SetLiveMemberIDs(a.client, a.sidebar.online, a.sidebar.status)
+}
+
+// refreshMemberPanelLiveRows re-reads live membership into the visible member
+// panel for the current context, preserving the selected user (Finding 1).
+// Mirrors refreshInfoPanelLiveRows. View-path use only: it does NOT refresh the
+// @-completion sources, because viewBody is a value receiver and must stay
+// side-effect free for persistent App state. Persistent paths (keyboard Update,
+// mouse row hit) use refreshMemberPanelLiveRowsAndCompletion instead.
+func (a *App) refreshMemberPanelLiveRows() {
+	if a.client == nil || !a.memberPanel.IsVisible() {
+		return
+	}
+	a.memberPanel.RefreshPreservingSelection(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
+}
+
+// refreshMemberPanelLiveRowsAndCompletion is the persistent-path variant: it
+// refreshes the member rows AND the @-completion sources (which read from the
+// now-refreshed member panel, so order matters). Use only on paths that return
+// the model (Update, mouse hit) — never the View path.
+func (a *App) refreshMemberPanelLiveRowsAndCompletion() {
+	if a.client == nil || !a.memberPanel.IsVisible() {
+		return
+	}
+	a.memberPanel.RefreshPreservingSelection(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
+	a.input.SetMembers(a.activeMemberEntries())
+	a.input.SetNonMembers(a.activeNonMemberEntries())
+}
+
 // syncPinnedBarForContext applies the cached pin IDs for the active room to
 // the pinned bar. Non-room contexts (group / DM / empty) clear the pinned bar.
 func (a *App) syncPinnedBarForContext() {
@@ -4118,9 +4209,7 @@ func (a *App) switchToSidebarSelection() {
 	a.refreshMessageContent()
 	if a.memberPanel.IsVisible() {
 		a.memberPanel.Refresh(a.messages.room, a.messages.group, a.messages.dm, a.client, a.sidebar.online, a.sidebar.status)
-		if a.messages.room != "" && a.client != nil {
-			a.client.RequestRoomMembers(a.messages.room)
-		}
+		// V8: Refresh renders from the local cache; no fetch.
 		a.input.SetMembers(a.activeMemberEntries())
 		a.input.SetNonMembers(a.activeNonMemberEntries())
 	}
@@ -4247,11 +4336,8 @@ func (a *App) showInfoPanelForContext(room, group, dm string) {
 		return
 	}
 	if room != "" {
+		// V8: ShowRoom populates from the local member cache; no fetch.
 		a.infoPanel.ShowRoom(room, a.client, a.sidebar.online, a.sidebar.status)
-		// Request actual room membership from server (lazy).
-		if a.client.Enc() != nil {
-			_ = a.client.RequestRoomMembers(room)
-		}
 		return
 	}
 	if group != "" {
@@ -4285,12 +4371,8 @@ func (a *App) showMemberPanelForContext(room, group, dm string) {
 		return
 	}
 	a.memberPanel.Toggle()
+	// V8: Refresh renders room members from the local cache; no fetch.
 	a.memberPanel.Refresh(room, group, dm, a.client, a.sidebar.online, a.sidebar.status)
-	if room != "" {
-		if a.client.Enc() != nil {
-			_ = a.client.RequestRoomMembers(room)
-		}
-	}
 	a.input.SetMembers(a.activeMemberEntries())
 	a.input.SetNonMembers(a.activeNonMemberEntries())
 	// Member panel visibility changes pane widths; re-wrap content.
@@ -4400,6 +4482,20 @@ func (a *App) currentDMRetiredPartner() (bool, string) {
 
 // handleSlashCommand processes slash commands that need app-level handling.
 func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
+	// V8 dispatch-layer read-only gate — the authoritative single source of
+	// truth. The keypress path gates too (for immediate feedback), but any
+	// SlashCommandMsg that reaches dispatch via another emitter (picker,
+	// menu, future programmatic path) is still held to the allow-list in a
+	// read-only ROOM. Scope-locked to rooms (a.messages.room != "") so left
+	// groups keep their own behavior. sc.Command is already lowercased by
+	// handleCommand, so commandAllowedInReadOnlyRoom matches case-insensitively.
+	readOnlyRoom := a.messages.room != "" &&
+		(a.messages.IsRoomRetired() || a.messages.IsLeft())
+	if readOnlyRoom && !commandAllowedInReadOnlyRoom(sc.Command) {
+		a.statusBar.SetError(`"/delete", "/search", and "/help" are available`)
+		return
+	}
+
 	switch sc.Command {
 	case "/leave":
 		// Branches on context. Group DM and room each get their own
@@ -6301,18 +6397,17 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 
 		if a.client != nil {
 			if st := a.client.Store(); st != nil {
-				// Re-add case: if the server sends a room we had marked
-				// archived, the user must have been re-added to it via
-				// admin CLI. Clear the archive flag so the sidebar renders
-				// it as active.
-				for _, r := range m.Rooms {
-					if st.IsRoomLeft(r.ID) {
-						if err := st.MarkRoomRejoined(r.ID); err != nil {
-							a.statusBar.SetError("Failed to clear archived room flag: " + err.Error())
-						}
-					}
-				}
-
+				// Re-add reconciliation: the client-layer room_list handler
+				// (client.go) already cleared left_at for every room the
+				// server still reports as active, and it runs BEFORE this TUI
+				// handler (handleInternal precedes the UI forward). So the
+				// store flag is already current here — the only stale state
+				// left to reconcile is in-memory: the sidebar grey (marker
+				// loop's else, below) and the messages pane's read-only flags
+				// (syncMessagesLeftState, below). Do NOT clear those here: a
+				// per-room "if IsRoomLeft" guard at this point is always false
+				// (the store was just cleared) and would never fire.
+				//
 				// Merge in any locally-archived rooms the server no longer
 				// sends. These persist (greyed, read-only) until /delete.
 				seen := make(map[string]bool, len(ids))
@@ -6324,7 +6419,21 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 						if seen[ar.ID] {
 							continue
 						}
+						seen[ar.ID] = true
 						ids = append(ids, ar.ID)
+					}
+				}
+				// V8: retired rooms are omitted from the server room_list
+				// (GetUserRoomIDs filters retired = 0), so merge locally-
+				// retired rooms back in the same way as left rooms. Without
+				// this they vanish from the sidebar on reconnect/restart.
+				if retired, err := st.GetRetiredRooms(); err == nil {
+					for _, rr := range retired {
+						if seen[rr.ID] {
+							continue
+						}
+						seen[rr.ID] = true
+						ids = append(ids, rr.ID)
 					}
 				}
 			}
@@ -6339,10 +6448,31 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				for _, id := range ids {
 					if st.IsRoomLeft(id) {
 						a.sidebar.MarkRoomLeft(id)
+					} else {
+						// Finding 2 Gap A: clear stale in-memory grey for a
+						// re-added room. The store left_at was already cleared
+						// (client.go, before this handler), so IsRoomLeft is
+						// false — but sidebar.leftRooms can still carry the flag
+						// from an earlier same-session leave, and SetRooms does
+						// not clear it. Without this else the row stays greyed.
+						a.sidebar.MarkRoomRejoined(id)
+					}
+					// V8: retired rooms render with the retired marker.
+					// Forgetting this leaves the merged row present but
+					// unstyled. A room can be both left and retired.
+					if st.IsRoomRetired(id) {
+						a.sidebar.MarkRoomRetired(id)
 					}
 				}
 			}
 		}
+
+		// Finding 2 Gap B: if the user is currently viewing a room whose
+		// left/retired state just changed in this room_list (e.g. a re-added
+		// room), refresh the messages pane's read-only flags so the compose
+		// box reactivates without requiring a context switch. Self-guards on
+		// nil client/store and non-room contexts.
+		a.syncMessagesLeftState()
 	case "group_list":
 		// Reconcile the server's active-group list with any locally-archived
 		// groups. The server drops groups from group_list as soon as the user
@@ -6526,14 +6656,31 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		// Response to room_members — update info panel and member panel.
 		// Phase 17c Step 6: signal the status bar that the refresh
 		// completed (200ms floor still applies via View check).
+		// V8: the client layer has already written the keyed cache +
+		// persisted member_ids; here we unmarshal the payload directly to
+		// learn which room/members to repaint (the old RoomMembersList()
+		// singleton accessor is gone).
 		a.statusBar.ClearRefreshing()
 		if a.client != nil {
-			room, members := a.client.RoomMembersList()
-			a.infoPanel.SetRoomMembers(room, members, a.client, a.sidebar.online, a.sidebar.status)
-			if a.memberPanel.IsVisible() && a.messages.room == room {
-				a.memberPanel.SetRoomMembers(members, a.client, a.sidebar.online, a.sidebar.status)
-				a.input.SetMembers(a.activeMemberEntries())
-				a.input.SetNonMembers(a.activeNonMemberEntries())
+			var rml protocol.RoomMembersList
+			if err := json.Unmarshal(msg.Raw, &rml); err == nil {
+				// V8: ignore a stale response for a room that has since become
+				// read-only (race: user hit `r`, then left / the room was
+				// retired before the response arrived). Re-populating the
+				// panels would re-surface member rows for a room that should
+				// show no member-list UI.
+				readOnly := false
+				if st := a.client.Store(); st != nil {
+					readOnly = st.IsRoomRetired(rml.Room) || st.IsRoomLeft(rml.Room)
+				}
+				if !readOnly {
+					a.infoPanel.SetRoomMembers(rml.Room, rml.Members, a.client, a.sidebar.online, a.sidebar.status)
+					if a.memberPanel.IsVisible() && a.messages.room == rml.Room {
+						a.memberPanel.SetRoomMembers(rml.Members, a.client, a.sidebar.online, a.sidebar.status)
+						a.input.SetMembers(a.activeMemberEntries())
+						a.input.SetNonMembers(a.activeNonMemberEntries())
+					}
+				}
 			}
 		}
 	case "device_revoked":
@@ -7545,6 +7692,10 @@ func (a App) viewBody() string {
 
 	var body string
 	if a.memberPanel.IsVisible() {
+		// Finding 1: refresh live rows for render. viewBody is a value
+		// receiver, so this mutates only the render copy (paint-fresh); the
+		// persistent Update/mouse paths own action state + @-completion.
+		a.refreshMemberPanelLiveRows()
 		// See comment on sidebar.View above — same -2 to account for
 		// the rounded border's 2-row vertical frame.
 		members := a.memberPanel.View(memberWidth, a.height-statusBarHeight-2)
@@ -7574,6 +7725,10 @@ func (a App) viewBody() string {
 		return a.pendingPanel.View(a.width)
 	}
 	if a.infoPanel.IsVisible() {
+		// Finding 1: refresh live rows for render. viewBody is a value
+		// receiver, so this mutates only the render copy (paint-fresh) — the
+		// persistent Update/mouse paths own action state.
+		a.refreshInfoPanelLiveRows()
 		return a.infoPanel.ViewWithHeight(a.width, a.height)
 	}
 	if a.settings.IsVisible() {

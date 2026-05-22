@@ -339,12 +339,15 @@ func TestApp_MemberPanelMouseClickSelectsOnly_NoMenuOpen(t *testing.T) {
 	a, _ := newEditAppHarness(t)
 	a.width = 120
 	a.height = 40
+	a.sidebar = NewSidebar()
 	a.memberPanel = NewMemberPanel()
 	a.memberPanel.visible = true
-	a.memberPanel.members = []memberPanelEntry{
-		{User: "usr_a", DisplayName: "Alice"},
-		{User: "usr_b", DisplayName: "Bob"},
-	}
+	// Seed the room context + member cache so the mouse-path live refresh
+	// (Finding 1) reproduces these two members in this order — the click then
+	// hit-tests against the same rows that are rendered.
+	a.messages.SetContext("rm_x", "", "")
+	client.SetRoomMembersForTesting(a.client, "rm_x", []string{"usr_a", "usr_b"})
+	a.memberPanel.Refresh("rm_x", "", "", a.client, a.sidebar.online, a.sidebar.status)
 	a.memberMenu = NewMemberMenu()
 
 	layout := computeLayout(a.width, a.height, true)
@@ -373,13 +376,17 @@ func TestApp_MemberPanelMouseClick_SelectsVisualRowWithLongNames(t *testing.T) {
 	a.width = 120
 	a.height = 40
 	a.connected = true
+	a.sidebar = NewSidebar()
 	a.memberPanel = NewMemberPanel()
 	a.memberPanel.visible = true
 	a.memberPanel.focused = true
-	a.memberPanel.members = []memberPanelEntry{
-		{User: "usr_long", DisplayName: "usr_X39baHmKonsL4SyQVUmbU"},
-		{User: "usr_bob", DisplayName: "bob_target"},
-	}
+	// Seed context + cache + profiles so the live refresh (Finding 1) on the
+	// render and mouse paths reproduces these members with their display names.
+	a.messages.SetContext("rm_x", "", "")
+	client.SetProfileForTesting(a.client, &protocol.Profile{User: "usr_long", DisplayName: "usr_X39baHmKonsL4SyQVUmbU"})
+	client.SetProfileForTesting(a.client, &protocol.Profile{User: "usr_bob", DisplayName: "bob_target"})
+	client.SetRoomMembersForTesting(a.client, "rm_x", []string{"usr_long", "usr_bob"})
+	a.memberPanel.Refresh("rm_x", "", "", a.client, a.sidebar.online, a.sidebar.status)
 
 	// Find the rendered row where bob_target is visible, then click that row.
 	rendered := stripANSI(a.View())

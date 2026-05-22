@@ -820,10 +820,10 @@ type RoomList struct {
 }
 
 type RoomInfo struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Topic   string `json:"topic"`
-	Members int    `json:"members"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Topic   string   `json:"topic"`
+	Members []string `json:"members"` // full member user IDs
 }
 
 // RoomEvent is the protocol type for room audit events. Phase 20

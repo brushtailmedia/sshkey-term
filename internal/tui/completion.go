@@ -148,6 +148,50 @@ func CompleteWithContext(input string, cursorPos int, groupMembers []MemberEntry
 	return nil
 }
 
+// completeReadOnlyRoomCommands builds the V8 typing-time hint for a
+// retired/left room: a completion popup limited to the allow-list (/delete,
+// /search, /help, /?). It is built directly from the allow-list rather than
+// post-filtering completeCommands — completeCommands caps its result at 5
+// items BEFORE any filter could run, so a post-filter on "/" would drop most
+// of the allow-list. Building directly guarantees all four appear on "/" and
+// that "/d" narrows to "/delete".
+//
+// Command position only (first token, leading slash); @-mention / member
+// completion is intentionally suppressed in read-only rooms (returns nil).
+// Unlike the general completer there is no 2-char minimum: the allow-list is
+// tiny, so a bare "/" usefully lists all four.
+func completeReadOnlyRoomCommands(input string, cursorPos int) *CompletionModel {
+	if cursorPos == 0 || len(input) == 0 {
+		return nil
+	}
+	start := cursorPos - 1
+	for start > 0 && input[start-1] != ' ' {
+		start--
+	}
+	word := input[start:cursorPos]
+	if start != 0 || !strings.HasPrefix(word, "/") {
+		return nil // not a first-token command — no member completion here
+	}
+
+	allow := []CompletionItem{
+		{Text: "/delete ", Display: "/delete", Description: "remove from your view"},
+		{Text: "/search ", Display: "/search", Description: "search local history"},
+		{Text: "/help", Display: "/help", Description: "show help"},
+		{Text: "/?", Display: "/?", Description: "show help"},
+	}
+	query := strings.ToLower(word)
+	var items []CompletionItem
+	for _, it := range allow {
+		if strings.HasPrefix(it.Display, query) {
+			items = append(items, it)
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return &CompletionModel{items: items, cursor: 0, visible: true, prefix: word}
+}
+
 // leadingCommand extracts the leading slash command from an input
 // line, or returns "" if the line doesn't start with one. Used by
 // CompleteWithContext to detect admin-verb completion contexts.

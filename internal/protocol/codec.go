@@ -35,9 +35,16 @@ type Decoder struct {
 	scanner *bufio.Scanner
 }
 
+// MaxInboundLineBytes caps a single decoded NDJSON line. The term client
+// decodes server→client frames, including room_list which now carries full
+// member ID lists, so this is larger than the server's client-input cap
+// (8 MiB vs 1 MiB) to accommodate large room sets without a handshake
+// failure. See fix-member-panel-refetch-storm-v8.md §Frame-size guard.
+const MaxInboundLineBytes = 8 * 1024 * 1024 // 8 MiB
+
 func NewDecoder(r io.Reader) *Decoder {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxInboundLineBytes)
 	return &Decoder{scanner: scanner}
 }
 

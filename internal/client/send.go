@@ -1106,9 +1106,59 @@ func (c *Client) RequestRoomMembers(room string) error {
 	return c.enc.Encode(envelope)
 }
 
-// RoomMembersList returns the most recently received room members list.
-func (c *Client) RoomMembersList() (string, []string) {
+// RoomMembers returns the cached member list for a room and whether the
+// cache holds an entry for it. The returned slice is a fresh copy — callers
+// may mutate it without affecting the cache. This is the render/completion
+// accessor (V8); it never triggers a fetch.
+func (c *Client) RoomMembers(roomID string) ([]string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.roomMembersRoom, c.roomMembers
+	members, ok := c.roomMemberCache[roomID]
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, len(members))
+	copy(out, members)
+	return out, true
+}
+
+// setRoomMembers replaces the cached member list for a room. It trims/drops
+// blank IDs, de-dupes by keeping the first occurrence, preserves input order,
+// and stores a fresh slice so callers cannot mutate cache state afterward.
+// Writers: room_list, room_members_list refresh, startup hydration. Takes c.mu.
+func (c *Client) setRoomMembers(roomID string, members []string) {
+	cp := normalizeRoomMemberIDs(members)
+	c.mu.Lock()
+	c.roomMemberCache[roomID] = cp
+	c.mu.Unlock()
+}
+
+func normalizeRoomMemberIDs(members []string) []string {
+	seen := make(map[string]bool, len(members))
+	out := make([]string, 0, len(members))
+	for _, member := range members {
+		member = strings.TrimSpace(member)
+		if member == "" || seen[member] {
+			continue
+		}
+		seen[member] = true
+		out = append(out, member)
+	}
+	return out
+}
+
+// clearRoomMembers drops the in-memory cache entry for a room AND (if a
+// local store is open) sets the persisted rooms.member_ids column to NULL.
+// Single call, two effects — used by the clear paths (room_left,
+// left_rooms, room_retired, retired_rooms, room_deleted, deleted_rooms) so
+// they don't have to remember to do both. Takes c.mu.
+func (c *Client) clearRoomMembers(roomID string) {
+	c.mu.Lock()
+	delete(c.roomMemberCache, roomID)
+	c.mu.Unlock()
+	if c.store != nil {
+		if err := c.store.ClearRoomMembers(roomID); err != nil {
+			c.logger.Warn("ClearRoomMembers", "room", roomID, "error", err)
+		}
+	}
 }

@@ -101,16 +101,21 @@ type Client struct {
 	// server and the client refetches on reconnect. The LOCAL user's
 	// admin flag IS persisted (groups.is_admin column) for pre-check
 	// survival across restart.
-	groupAdmins     map[string]map[string]bool  // group DM ID -> set of admin userIDs
-	dms             map[string][2]string        // 1:1 DM ID -> [userA, userB]
-	retired         map[string]string           // retired userID -> retired_at timestamp
-	epochKeys       map[string]map[int64][]byte // room -> epoch -> unwrapped key
-	currentEpoch    map[string]int64            // room -> current epoch number
-	seqCounters     map[string]int64            // "room:x" or "group:x" or "dm:x" -> next seq
-	hasPendingKeys  bool                        // true when admin_notify arrived (cleared on list refresh)
-	pendingKeys     []protocol.PendingKeyEntry  // populated by pending_keys_list
-	roomMembersRoom string                      // room for latest room_members_list
-	roomMembers     []string                    // member usernames from room_members_list
+	groupAdmins    map[string]map[string]bool  // group DM ID -> set of admin userIDs
+	dms            map[string][2]string        // 1:1 DM ID -> [userA, userB]
+	retired        map[string]string           // retired userID -> retired_at timestamp
+	epochKeys      map[string]map[int64][]byte // room -> epoch -> unwrapped key
+	currentEpoch   map[string]int64            // room -> current epoch number
+	seqCounters    map[string]int64            // "room:x" or "group:x" or "dm:x" -> next seq
+	hasPendingKeys bool                        // true when admin_notify arrived (cleared on list refresh)
+	pendingKeys    []protocol.PendingKeyEntry  // populated by pending_keys_list
+	// roomMemberCache (V8) holds full room membership keyed by room ID.
+	// Written by room_list (snapshot), room_members_list (r-refresh
+	// snapshot), startup hydration, and room_event{join|leave} (in-memory
+	// deltas). Protected by c.mu. Replaces the old single-latest-response
+	// roomMembersRoom/roomMembers fields. See
+	// fix-member-panel-refetch-storm-v8.md.
+	roomMemberCache map[string][]string // room ID -> member user IDs
 	privKey         ed25519.PrivateKey
 	signer          ssh.Signer
 	lastSynced      string
@@ -133,18 +138,19 @@ func New(cfg Config) *Client {
 		cfg.Logger = slog.Default()
 	}
 	return &Client{
-		cfg:          cfg,
-		logger:       cfg.Logger,
-		profiles:     make(map[string]*protocol.Profile),
-		groupMembers: make(map[string][]string),
-		groupAdmins:  make(map[string]map[string]bool),
-		dms:          make(map[string][2]string),
-		retired:      make(map[string]string),
-		epochKeys:    make(map[string]map[int64][]byte),
-		currentEpoch: make(map[string]int64),
-		seqCounters:  make(map[string]int64),
-		sendQueue:    NewQueue(),
-		done:         make(chan struct{}),
+		cfg:             cfg,
+		logger:          cfg.Logger,
+		profiles:        make(map[string]*protocol.Profile),
+		groupMembers:    make(map[string][]string),
+		groupAdmins:     make(map[string]map[string]bool),
+		dms:             make(map[string][2]string),
+		retired:         make(map[string]string),
+		epochKeys:       make(map[string]map[int64][]byte),
+		currentEpoch:    make(map[string]int64),
+		seqCounters:     make(map[string]int64),
+		roomMemberCache: make(map[string][]string),
+		sendQueue:       NewQueue(),
+		done:            make(chan struct{}),
 	}
 }
 
@@ -153,6 +159,53 @@ func New(cfg Config) *Client {
 // for the quit-confirmation prompt.
 func (c *Client) SendQueue() *Queue {
 	return c.sendQueue
+}
+
+// hydrateLocalCache loads durable conversation/member metadata from the local
+// DB into in-memory maps before the fresh server lists arrive. It never sends
+// network requests; server snapshots replace these warm-start values later.
+func (c *Client) hydrateLocalCache(st *store.Store) {
+	if st == nil {
+		return
+	}
+
+	// Load cached groups so sidebar is populated before the server sends a
+	// fresh group_list.
+	if groups, err := st.GetAllGroups(); err == nil {
+		c.mu.Lock()
+		for id, info := range groups {
+			if _, ok := c.groupMembers[id]; !ok {
+				c.groupMembers[id] = strings.Split(info[1], ",")
+			}
+		}
+		c.mu.Unlock()
+	}
+
+	// Load cached 1:1 DMs.
+	if dms, err := st.GetAllDMs(); err == nil {
+		c.mu.Lock()
+		for _, dm := range dms {
+			if _, ok := c.dms[dm.ID]; !ok {
+				c.dms[dm.ID] = [2]string{dm.UserA, dm.UserB}
+			}
+		}
+		c.mu.Unlock()
+	}
+
+	// V8: hydrate the in-memory room-member cache from local rows whose
+	// member_ids column is loaded. This is what makes panel opens render from
+	// cache on a warm start without firing RequestRoomMembers.
+	if loaded, err := st.GetAllLoadedRoomMembers(); err == nil {
+		c.mu.Lock()
+		for roomID, members := range loaded {
+			if _, ok := c.roomMemberCache[roomID]; !ok {
+				c.roomMemberCache[roomID] = members
+			}
+		}
+		c.mu.Unlock()
+	} else {
+		c.logger.Warn("hydrate room member cache", "error", err)
+	}
 }
 
 // Connect establishes the SSH connection and performs the protocol handshake.
@@ -242,28 +295,7 @@ func (c *Client) Connect() error {
 				c.lastSynced = synced
 			}
 
-			// Load cached groups so sidebar is populated
-			// before the server sends a fresh group_list
-			if groups, err := st.GetAllGroups(); err == nil {
-				c.mu.Lock()
-				for id, info := range groups {
-					if _, ok := c.groupMembers[id]; !ok {
-						c.groupMembers[id] = strings.Split(info[1], ",")
-					}
-				}
-				c.mu.Unlock()
-			}
-
-			// Load cached 1:1 DMs
-			if dms, err := st.GetAllDMs(); err == nil {
-				c.mu.Lock()
-				for _, dm := range dms {
-					if _, ok := c.dms[dm.ID]; !ok {
-						c.dms[dm.ID] = [2]string{dm.UserA, dm.UserB}
-					}
-				}
-				c.mu.Unlock()
-			}
+			c.hydrateLocalCache(st)
 		}
 	}
 
@@ -535,23 +567,34 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		}
 	case "room_list":
 		var rl protocol.RoomList
-		if err := json.Unmarshal(raw, &rl); err == nil && c.store != nil {
+		if err := json.Unmarshal(raw, &rl); err == nil {
+			// V8: in-memory cache write happens regardless of store
+			// state, so storage-disabled deployments still get the
+			// membership cache. setRoomMembers copies the slice.
 			for _, r := range rl.Rooms {
-				if err := c.store.UpsertRoom(r.ID, r.Name, r.Topic, r.Members); err != nil {
-					c.logger.Warn("failed to cache room", "room_id", r.ID, "error", err)
-				}
+				c.setRoomMembers(r.ID, r.Members)
 			}
 
-			// Phase 20: clear stale left_at / leave_reason for every
-			// room the server still reports as active. This is the
-			// replacement for the old reconciliation walk — server is
-			// now authoritative via left_rooms catchup (delivered
-			// BEFORE room_list on the handshake), so any room present
-			// in this list is by definition active.
-			for _, r := range rl.Rooms {
-				if err := c.store.MarkRoomRejoined(r.ID); err != nil {
-					c.logger.Warn("MarkRoomRejoined on room_list",
-						"room", r.ID, "error", err)
+			if c.store != nil {
+				// Persist room metadata + the full member-ID snapshot
+				// together (count + member_ids in one statement, no drift).
+				for _, r := range rl.Rooms {
+					if err := c.store.UpsertRoomWithMembers(r.ID, r.Name, r.Topic, r.Members); err != nil {
+						c.logger.Warn("failed to cache room", "room_id", r.ID, "error", err)
+					}
+				}
+
+				// Phase 20: clear stale left_at / leave_reason for every
+				// room the server still reports as active. This is the
+				// replacement for the old reconciliation walk — server is
+				// now authoritative via left_rooms catchup (delivered
+				// BEFORE room_list on the handshake), so any room present
+				// in this list is by definition active.
+				for _, r := range rl.Rooms {
+					if err := c.store.MarkRoomRejoined(r.ID); err != nil {
+						c.logger.Warn("MarkRoomRejoined on room_list",
+							"room", r.ID, "error", err)
+					}
 				}
 			}
 		}
@@ -610,13 +653,48 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		// live broadcasts produce identical local state. The TUI layer
 		// (app.go) handles inline rendering and coalescing.
 		var re protocol.RoomEvent
-		if err := json.Unmarshal(raw, &re); err == nil && c.store != nil {
+		if err := json.Unmarshal(raw, &re); err != nil {
+			break
+		}
+		if c.store != nil {
 			if err := c.store.RecordRoomEvent(
 				re.Room, re.Event, re.User, re.By, re.Reason, re.Name, time.Now().Unix(),
 			); err != nil {
 				c.logger.Warn("RecordRoomEvent",
 					"room", re.Room, "event", re.Event, "error", err)
 			}
+		}
+		// V8: maintain the in-memory room-member cache for join/leave
+		// deltas. Mutate ONLY a loaded room (entry present); never
+		// synthesize a partial cache from a single delta — the next
+		// room_list provides the baseline + persisted snapshot. Deltas are
+		// in-memory only (no DB write), mirroring the group_event pattern.
+		if re.Event == "join" || re.Event == "leave" {
+			c.mu.Lock()
+			if existing, loaded := c.roomMemberCache[re.Room]; loaded {
+				switch re.Event {
+				case "join":
+					found := false
+					for _, u := range existing {
+						if u == re.User {
+							found = true
+							break
+						}
+					}
+					if !found {
+						c.roomMemberCache[re.Room] = append(existing, re.User)
+					}
+				case "leave":
+					filtered := existing[:0]
+					for _, u := range existing {
+						if u != re.User {
+							filtered = append(filtered, u)
+						}
+					}
+					c.roomMemberCache[re.Room] = filtered
+				}
+			}
+			c.mu.Unlock()
 		}
 	case "group_event":
 		var ge protocol.GroupEvent
@@ -813,12 +891,16 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		// per room for this user (with reason code) BEFORE room_list,
 		// so the sidebar can render the right archived state.
 		var lr protocol.LeftRoomsList
-		if err := json.Unmarshal(raw, &lr); err == nil && c.store != nil {
+		if err := json.Unmarshal(raw, &lr); err == nil {
 			for _, entry := range lr.Rooms {
-				if err := c.store.MarkRoomLeft(entry.Room, entry.LeftAt, entry.Reason); err != nil {
-					c.logger.Warn("MarkRoomLeft on left_rooms catchup",
-						"room", entry.Room, "error", err)
+				if c.store != nil {
+					if err := c.store.MarkRoomLeft(entry.Room, entry.LeftAt, entry.Reason); err != nil {
+						c.logger.Warn("MarkRoomLeft on left_rooms catchup",
+							"room", entry.Room, "error", err)
+					}
 				}
+				// V8: a left room has no member-list UI — drop cache + null member_ids.
+				c.clearRoomMembers(entry.Room)
 			}
 		}
 	case "left_groups":
@@ -846,6 +928,8 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 					c.logger.Warn("failed to mark room left", "room", rl.Room, "error", err)
 				}
 			}
+			// V8: a left room has no member-list UI — drop cache + null member_ids.
+			c.clearRoomMembers(rl.Room)
 		}
 	case "room_retired":
 		// Phase 12: broadcast from the server's runRoomRetirementProcessor
@@ -857,10 +941,16 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		var rr protocol.RoomRetired
 		if err := json.Unmarshal(raw, &rr); err == nil {
 			if c.store != nil {
-				if err := c.store.MarkRoomRetired(rr.Room, rr.DisplayName, time.Now().Unix()); err != nil {
-					c.logger.Warn("MarkRoomRetired on room_retired", "room", rr.Room, "error", err)
+				// V8: EnsureRetiredRoom (INSERT-or-update) replaces the old
+				// UPDATE-only MarkRoomRetired so a fresh device still records
+				// the retirement even with no prior local row. Idempotent on
+				// an existing row.
+				if err := c.store.EnsureRetiredRoom(rr.Room, rr.DisplayName, time.Now().Unix()); err != nil {
+					c.logger.Warn("EnsureRetiredRoom on room_retired", "room", rr.Room, "error", err)
 				}
 			}
+			// V8: retired rooms have no member-list UI — drop cache + null member_ids.
+			c.clearRoomMembers(rr.Room)
 			c.logger.Info("room retired", "room", rr.Room, "display_name", rr.DisplayName)
 		}
 	case "room_updated":
@@ -896,14 +986,21 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		// each entry. Idempotent on already-marked rooms.
 		var rrl protocol.RetiredRoomsList
 		if err := json.Unmarshal(raw, &rrl); err == nil {
-			if c.store != nil {
-				now := time.Now().Unix()
-				for _, rr := range rrl.Rooms {
-					if err := c.store.MarkRoomRetired(rr.Room, rr.DisplayName, now); err != nil {
-						c.logger.Warn("MarkRoomRetired on retired_rooms catchup",
+			now := time.Now().Unix()
+			for _, rr := range rrl.Rooms {
+				if c.store != nil {
+					// V8: EnsureRetiredRoom (INSERT-or-update) handles the
+					// fresh-device case where no local row exists yet —
+					// retired rooms are omitted from room_list, so a never-
+					// seen-active room would otherwise be silently dropped by
+					// the old UPDATE-only MarkRoomRetired.
+					if err := c.store.EnsureRetiredRoom(rr.Room, rr.DisplayName, now); err != nil {
+						c.logger.Warn("EnsureRetiredRoom on retired_rooms catchup",
 							"room", rr.Room, "error", err)
 					}
 				}
+				// V8: retired rooms have no member-list UI — drop cache + null member_ids.
+				c.clearRoomMembers(rr.Room)
 			}
 		}
 	case "room_deleted":
@@ -929,6 +1026,10 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 					c.logger.Warn("DeleteRoomRecord on room_deleted", "room", rd.Room, "error", err)
 				}
 			}
+			// V8: drop the in-memory cache entry. The row is hard-deleted, so
+			// the persisted member_ids goes with it (clearRoomMembers' store
+			// UPDATE is a harmless no-op).
+			c.clearRoomMembers(rd.Room)
 			c.logger.Info("room deleted", "room", rd.Room)
 		}
 	case "deleted_rooms":
@@ -939,8 +1040,8 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		// already-purged entries. Parallel to deleted_groups handler.
 		var drl protocol.DeletedRoomsList
 		if err := json.Unmarshal(raw, &drl); err == nil {
-			if c.store != nil {
-				for _, roomID := range drl.Rooms {
+			for _, roomID := range drl.Rooms {
+				if c.store != nil {
 					fileIDs, err := c.store.PurgeRoomMessages(roomID)
 					if err != nil {
 						c.logger.Warn("PurgeRoomMessages on deleted_rooms", "room", roomID, "error", err)
@@ -951,6 +1052,8 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 						c.logger.Warn("DeleteRoomRecord on deleted_rooms", "room", roomID, "error", err)
 					}
 				}
+				// V8: drop the in-memory cache entry (row hard-deleted).
+				c.clearRoomMembers(roomID)
 			}
 		}
 	case "dm_list":
@@ -1064,12 +1167,26 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			c.mu.Unlock()
 		}
 	case "room_members_list":
+		// Explicit `r` refresh response (V8). Full snapshot for one room:
+		// replace the in-memory cache and the persisted member_ids.
 		var rml protocol.RoomMembersList
 		if err := json.Unmarshal(raw, &rml); err == nil {
-			c.mu.Lock()
-			c.roomMembersRoom = rml.Room
-			c.roomMembers = rml.Members
-			c.mu.Unlock()
+			// Ignore a stale response for a room that became read-only
+			// (retired/left) between the `r` request and this reply.
+			// Re-populating the cache + member_ids would violate the
+			// read-only invariant (no member-list state). This is the
+			// authoritative guard; the TUI repaint handler guards too.
+			readOnly := c.store != nil &&
+				(c.store.IsRoomRetired(rml.Room) || c.store.IsRoomLeft(rml.Room))
+			if !readOnly {
+				c.setRoomMembers(rml.Room, rml.Members)
+				if c.store != nil {
+					if err := c.store.SetRoomMembers(rml.Room, rml.Members); err != nil {
+						c.logger.Warn("SetRoomMembers on room_members_list",
+							"room", rml.Room, "error", err)
+					}
+				}
+			}
 		}
 	case "reaction":
 		c.storeReaction(raw)
@@ -1410,6 +1527,20 @@ func SetProfileForTesting(c *Client, p *protocol.Profile) {
 	c.profiles[p.User] = p
 }
 
+// SetGroupAdminForTesting marks userID as an admin of groupID in the
+// in-memory group admin set — the same state group_event{promote} would
+// produce. Exists for tui-layer tests that exercise group-admin-dependent
+// rendering (e.g. info-panel derive-at-render) without driving a full
+// group_list / group_event sequence.
+func SetGroupAdminForTesting(c *Client, groupID, userID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.groupAdmins[groupID] == nil {
+		c.groupAdmins[groupID] = make(map[string]bool)
+	}
+	c.groupAdmins[groupID][userID] = true
+}
+
 // SetUserIDForTesting sets the authenticated local user ID from an
 // external package. Production code assigns c.userID during handshake;
 // this helper exists for tui-layer tests that need self-identity
@@ -1496,11 +1627,37 @@ func SetRetiredForTesting(c *Client, userID, ts string) {
 	c.retired[userID] = ts
 }
 
+// SetRoomMembersForTesting seeds the in-memory room member cache so TUI tests
+// can exercise live membership refresh (Finding 1) without driving room_list.
+// Goes through the normal cache writer (normalize + lock). Mirrors
+// SetGroupMembersForTesting.
+func SetRoomMembersForTesting(c *Client, room string, members []string) {
+	c.setRoomMembers(room, members)
+}
+
+// SetDMForTesting seeds the cached 1:1 DM pair so tests can exercise DM info-
+// panel hydration (Finding 1): the "other" participant appearing once the pair
+// is cached, without reopening the panel.
+func SetDMForTesting(c *Client, dmID string, pair [2]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dms == nil {
+		c.dms = make(map[string][2]string)
+	}
+	c.dms[dmID] = pair
+}
+
 // GroupMembers returns the member list for a group DM.
 func (c *Client) GroupMembers(groupID string) []string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.groupMembers[groupID]
+	// Return a defensive copy (matching RoomMembers): the info-panel live
+	// refresh (Finding 1) reads group membership on every Update/View cycle,
+	// so callers must never receive the client's backing slice.
+	members := c.groupMembers[groupID]
+	out := make([]string, len(members))
+	copy(out, members)
+	return out
 }
 
 // GroupAdmins returns the admin user IDs for a group DM, sorted for

@@ -300,6 +300,9 @@ func (s *Store) init() error {
 	if err := s.ensureDirectMessageSchema(); err != nil {
 		return err
 	}
+	if err := s.ensureRoomMembersSchema(); err != nil {
+		return err
+	}
 
 	// FTS5 search index — optional, may not be available in all SQLite builds.
 	// Only create the triggers if the VIRTUAL TABLE was created successfully —
@@ -335,6 +338,48 @@ func (s *Store) ensureDirectMessageSchema() error {
 
 func (s *Store) dmColumnExists(name string) bool {
 	rows, err := s.db.Query(`PRAGMA table_info(direct_messages)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var colName, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &dflt, &pk); err != nil {
+			return false
+		}
+		if colName == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureRoomMembersSchema adds the rooms.member_ids column on first run
+// (V8). Column semantics:
+//
+//	NULL          = not loaded (no room_list received for this room yet)
+//	""            = loaded with zero members (edge case)
+//	"a,b,c,..."   = CSV of loaded member user IDs
+//
+// SetRoomMembers normalizes input before storing (trims and drops blank IDs,
+// de-dupes keeping first occurrence, preserves server order). GetRoomMembers
+// / GetAllLoadedRoomMembers return defensive copies. Retired rooms keep
+// member_ids NULL (cleared by the retire path) — they have no member-list UI.
+func (s *Store) ensureRoomMembersSchema() error {
+	if s.roomsColumnExists("member_ids") {
+		return nil
+	}
+	if _, err := s.db.Exec(`ALTER TABLE rooms ADD COLUMN member_ids TEXT`); err != nil {
+		return fmt.Errorf("migrate rooms.member_ids: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) roomsColumnExists(name string) bool {
+	rows, err := s.db.Query(`PRAGMA table_info(rooms)`)
 	if err != nil {
 		return false
 	}

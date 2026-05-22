@@ -32,6 +32,13 @@ type InfoPanelModel struct {
 	viewportHeight  int                 // terminal height at last key-handling pass
 	resolveRoomName func(string) string // room nanoid → display name
 
+	// memberNotice (V8) is set for an ACTIVE room whose member cache is
+	// unexpectedly empty (a bug state — startup hydration + room_list should
+	// have populated it). Rendered in place of the Members section so an
+	// empty cache doesn't read as a zero-member room. Empty for groups/DMs
+	// and for healthy rooms. Read-only rooms use the short-circuit instead.
+	memberNotice string
+
 	// User-profile mode — set by ShowUser when the panel is opened
 	// for a single-user view (via /whois or member-panel "profile"
 	// action) instead of a room/group/DM context. When isUser is
@@ -117,11 +124,6 @@ type RefreshRequestMsg struct {
 }
 
 func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[string]bool, status map[string]string) {
-	// status is unused here (members are populated later via
-	// SetRoomMembers when the server responds), but accepted in
-	// the signature for symmetry with the other Show* methods so
-	// callers don't need to special-case which params to pass.
-	_ = status
 	i.visible = true
 	i.room = room
 	i.group = ""
@@ -149,9 +151,21 @@ func (i *InfoPanelModel) ShowRoom(room string, c *client.Client, online map[stri
 		i.topic = c.DisplayRoomTopic(room)
 	}
 
-	// Start with an empty member list — populated by SetRoomMembers when
-	// the server responds to room_members. The caller sends the request.
+	// V8: populate members straight from the client's local cache (no
+	// RequestRoomMembers fetch). SetRoomMembers remains for the explicit
+	// `r` refresh response. Retired/left rooms have no member-list UI, so
+	// skip the cache read for them (read-only short-circuit handles render).
 	i.members = nil
+	i.memberNotice = ""
+	if c != nil && !i.left && !i.retired {
+		if members, ok := c.RoomMembers(room); ok {
+			i.SetRoomMembers(room, members, c, online, status)
+		} else {
+			// Active room with no cache entry — bug signal, not a zero-member
+			// room. (SetRoomMembers above also clears memberNotice on success.)
+			i.memberNotice = "(members unavailable — press r to refresh)"
+		}
+	}
 }
 
 // SetRoomMembers populates the member list from a server room_members_list response.
@@ -160,6 +174,7 @@ func (i *InfoPanelModel) SetRoomMembers(room string, members []string, c *client
 		return
 	}
 	i.members = nil
+	i.memberNotice = "" // a populated response clears the cache-miss signal
 	for _, user := range members {
 		p := c.Profile(user)
 		displayName := user
@@ -184,8 +199,137 @@ func (i *InfoPanelModel) SetRoomMembers(room string, members []string, c *client
 	sortMembersAdminsFirst(i.members)
 }
 
+// SetLiveMemberIDs rebuilds member rows from the live cache for the active
+// context (Finding 1). Unlike ShowRoom/ShowGroup/ShowDM it does NOT reset
+// visibility/cursor/scroll — it preserves the selected USER (so admin
+// re-sorting or a membership change does not move the highlight to the wrong
+// person) and re-clamps the cursor. The App bridge calls this immediately
+// before the panel's Update and View so an open panel reflects live
+// membership-set changes (join/leave/promote/demote), not just display
+// fields. Rooms/groups sort admins-first; DMs keep self/other order.
+func (i *InfoPanelModel) SetLiveMemberIDs(c *client.Client, online map[string]bool, status map[string]string) {
+	if c == nil || !i.visible || i.isUser {
+		return
+	}
+	selectedUser := ""
+	if i.cursor >= 0 && i.cursor < len(i.members) {
+		selectedUser = i.members[i.cursor].User
+	}
+	i.memberNotice = ""
+
+	// Re-derive read-only flags so a room retired/left WHILE the panel is
+	// open transitions live (ShowRoom froze these at open time).
+	if i.room != "" {
+		i.left = false
+		i.retired = false
+		if st := c.Store(); st != nil {
+			i.left = st.IsRoomLeft(i.room)
+			i.retired = st.IsRoomRetired(i.room)
+		}
+		if i.left || i.retired {
+			i.members = nil // read-only short-circuit handles render
+			i.cursor = 0
+			i.scroll = 0
+			return
+		}
+	}
+
+	var ids []string
+	switch {
+	case i.room != "":
+		var ok bool
+		ids, ok = c.RoomMembers(i.room)
+		if !ok {
+			i.members = nil
+			i.memberNotice = "(members unavailable — press r to refresh)"
+			i.cursor = 0
+			i.scroll = 0
+			return
+		}
+	case i.group != "":
+		// Refresh the LOCAL user's group-admin gate too — it controls the
+		// footer/admin action keys (a/r/p/x), not just per-row badges. Without
+		// this, a live promote/demote of self leaves stale admin actions until
+		// close/reopen.
+		i.isGroupAdmin = c.IsGroupAdmin(i.group, c.UserID())
+		ids = c.GroupMembers(i.group)
+	case i.isDM:
+		// Fixed 2-member set, but re-pull the cached pair when available so a
+		// panel opened before dm_list hydration can fill in the "other"
+		// participant later. Fall back to the existing rows otherwise.
+		self := c.UserID()
+		other := c.DMOther(i.dm)
+		ids = []string{self}
+		if other != "" && other != self {
+			ids = append(ids, other)
+		} else if existing := userIDs(i.members); len(existing) > 0 {
+			ids = existing
+		}
+	}
+
+	rows := make([]memberInfo, 0, len(ids))
+	for _, user := range ids {
+		if user == "" {
+			continue
+		}
+		row := memberInfo{
+			User:        user,
+			DisplayName: user, // fallback until Profile(user) is known
+			Online:      online[user],
+			Status:      status[user],
+		}
+		p := c.Profile(user)
+		if p != nil {
+			row.DisplayName = p.DisplayName
+		}
+		if i.group != "" {
+			row.Admin = c.IsGroupAdmin(i.group, user)
+		} else if p != nil {
+			row.Admin = p.Admin
+		}
+		if st := c.Store(); st != nil {
+			_, row.Verified, _ = st.GetPinnedKey(user)
+		}
+		rows = append(rows, row)
+	}
+	if !i.isDM {
+		sortMembersAdminsFirst(rows) // DMs keep self/other order for the header
+	}
+	i.members = rows
+	if selectedUser != "" {
+		for idx, row := range i.members {
+			if row.User == selectedUser {
+				i.cursor = idx
+				i.syncScrollToSelection()
+				return
+			}
+		}
+	}
+	if i.cursor >= len(i.members) {
+		i.cursor = len(i.members) - 1
+	}
+	if i.cursor < 0 {
+		i.cursor = 0
+	}
+	i.syncScrollToSelection()
+}
+
+// userIDs extracts the User field from each member row (skipping empties).
+// Local helper for SetLiveMemberIDs' DM fallback, which reuses the existing
+// rows when the cached DM pair is not yet available.
+func userIDs(members []memberInfo) []string {
+	out := make([]string, 0, len(members))
+	for _, m := range members {
+		if m.User != "" {
+			out = append(out, m.User)
+		}
+	}
+	return out
+}
+
 func (i *InfoPanelModel) ShowGroup(groupID string, c *client.Client, online map[string]bool, status map[string]string) {
 	i.visible = true
+	i.memberNotice = "" // cache-miss notice is room-only
 	i.room = ""
 	i.group = groupID
 	i.dm = ""
@@ -256,6 +400,7 @@ func (i *InfoPanelModel) ShowGroup(groupID string, c *client.Client, online map[
 // with their verification and retired status.
 func (i *InfoPanelModel) ShowDM(dmID string, c *client.Client, online map[string]bool, status map[string]string) {
 	i.visible = true
+	i.memberNotice = "" // cache-miss notice is room-only
 	i.room = ""
 	i.group = ""
 	i.dm = dmID
@@ -587,6 +732,12 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 			}
 		}
 	case "m":
+		// V8: a read-only room (retired/left) has no Muted: line and no
+		// m=mute footer hint — the key is inert here too, matching the
+		// render-layer short-circuit.
+		if i.room != "" && (i.retired || i.left) {
+			return i, nil
+		}
 		i.ToggleMute()
 		// Pick the active context: room, group, or DM. Previous code
 		// only checked room/group, leaving DM-mode mute presses with
@@ -615,6 +766,12 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 		//     (group-infopanel-picker-rework.md §1 step 6 re-enable).
 		// The contexts are mutually exclusive (i.room=="" in groups,
 		// i.isGroup=false in rooms), so the two branches never collide.
+		// V8: a read-only room has no member list to refresh — inert here
+		// (the footer hides r=refresh; the app-level RefreshRequestMsg gate
+		// is the backstop for any other emitter).
+		if i.room != "" && (i.retired || i.left) {
+			return i, nil
+		}
 		if i.room != "" {
 			return i, func() tea.Msg {
 				return RefreshRequestMsg{Kind: "room_members"}
@@ -731,6 +888,12 @@ func (i InfoPanelModel) renderContextContent() ([]string, int) {
 		lines = append(lines, "")
 	}
 
+	// Finding 1: i.members is kept live by the App bridge
+	// (refreshInfoPanelLiveRows → SetLiveMemberIDs), called before both Update
+	// and View, so the rows already reflect the current membership set +
+	// display state. Read it directly.
+	members := i.members
+
 	if i.room != "" {
 		roomDisplay := i.room
 		if i.resolveRoomName != nil {
@@ -739,8 +902,8 @@ func (i InfoPanelModel) renderContextContent() ([]string, int) {
 		appendLine(searchHeaderStyle.Render(fmt.Sprintf(" #%s — info", roomDisplay)))
 	} else if i.isDM {
 		other := ""
-		if len(i.members) > 0 {
-			other = i.members[len(i.members)-1].DisplayName
+		if len(members) > 0 {
+			other = members[len(members)-1].DisplayName
 		}
 		if other == "" {
 			other = "conversation"
@@ -785,6 +948,18 @@ func (i InfoPanelModel) renderContextContent() ([]string, int) {
 		appendBlank()
 	}
 
+	// V8 read-only-room short-circuit (rooms only — left groups/DMs keep
+	// their normal panels). Retired/left rooms have no member-list UI:
+	// drop the Muted: line, the Members section, and the member-action
+	// footer; render a close-only footer. The status lines above already
+	// state which read-only condition applies. Left groups are intentionally
+	// NOT short-circuited here.
+	if i.room != "" && (i.retired || i.left) {
+		appendBlank()
+		appendLine(helpDescStyle.Render(" Esc=close"))
+		return lines, selectedLine
+	}
+
 	muteLabel := "off"
 	if i.muted {
 		muteLabel = "on"
@@ -793,7 +968,7 @@ func (i InfoPanelModel) renderContextContent() ([]string, int) {
 	appendBlank()
 
 	var adminCount int
-	for _, m := range i.members {
+	for _, m := range members {
 		if m.Admin {
 			adminCount++
 		}
@@ -812,17 +987,22 @@ func (i InfoPanelModel) renderContextContent() ([]string, int) {
 	}
 
 	if i.isDM {
-		for idx, m := range i.members {
+		for idx, m := range members {
 			if idx == i.cursor {
 				selectedLine = len(lines)
 			}
 			appendLine(renderMember(idx, m))
 		}
+	} else if i.memberNotice != "" {
+		// V8: active room with an unexpectedly empty member cache — show the
+		// bug signal instead of "Members (0):" so it doesn't read as a
+		// zero-member room.
+		appendLine(" " + helpDescStyle.Render(i.memberNotice))
 	} else {
-		appendLine(fmt.Sprintf(" Members (%d):", len(i.members)))
+		appendLine(fmt.Sprintf(" Members (%d):", len(members)))
 		if adminCount > 0 {
 			appendLine(sidebarHeaderStyle.Render("  [Admins]"))
-			for idx, m := range i.members {
+			for idx, m := range members {
 				if !m.Admin {
 					continue
 				}
@@ -832,9 +1012,9 @@ func (i InfoPanelModel) renderContextContent() ([]string, int) {
 				appendLine(renderMember(idx, m))
 			}
 		}
-		if adminCount < len(i.members) {
+		if adminCount < len(members) {
 			appendLine(sidebarHeaderStyle.Render("  [Members]"))
-			for idx, m := range i.members {
+			for idx, m := range members {
 				if m.Admin {
 					continue
 				}

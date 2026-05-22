@@ -251,7 +251,23 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 		// /transfer, /role; non-members for /add).
 		text := i.textInput.Value()
 		pos := i.textInput.Position()
-		i.completion = CompleteWithContext(text, pos, i.members, i.nonMembers)
+		// V8 typing-time hint: in a read-only room (retired/left) completion
+		// is limited to the allow-list, built directly so all four always
+		// appear (no dependency on completeCommands' 5-item cap) and member/
+		// @-mention completion is suppressed. The runtime gate
+		// (commandAllowedInReadOnlyRoom) is the correctness backstop; this is
+		// discoverability.
+		readOnlyRoom := false
+		if room != "" && c != nil {
+			if st := c.Store(); st != nil {
+				readOnlyRoom = st.IsRoomRetired(room) || st.IsRoomLeft(room)
+			}
+		}
+		if readOnlyRoom {
+			i.completion = completeReadOnlyRoomCommands(text, pos)
+		} else {
+			i.completion = CompleteWithContext(text, pos, i.members, i.nonMembers)
+		}
 		return i, nil
 	case "alt+enter":
 		// Insert a draft-only newline marker. We keep the input widget
@@ -501,7 +517,10 @@ type SlashCommandMsg struct {
 // That's the bug class that originally bit /typing.
 func (i *InputModel) handleCommand(text string, c *client.Client, room, group, dm string) bool {
 	parts := strings.SplitN(text, " ", 2)
-	cmd := parts[0]
+	// Lowercase only the verb so "/DELETE" and "  /Help" route the same as
+	// their canonical lowercase forms (V8 parser normalization). The arg
+	// string is preserved verbatim — user-supplied arguments keep their case.
+	cmd := strings.ToLower(parts[0])
 	arg := ""
 	if len(parts) > 1 {
 		arg = parts[1]
