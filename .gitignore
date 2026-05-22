@@ -45,35 +45,3 @@ Thumbs.db
 .env
 
 # Local planning / scratch docs (not for public repo)
-image_fix.md
-log_fix.md
-nav-keys.md
-async-render.md 
-multi-server.md
-path-centralization.md
-multi-server-v2.md
-passphrase-prompt-fix.md
-unread-epoch-leak-fix.md
-presence-dot-self-leak-fix.md
-connectfailed-classification-fix.md
-fix-server-switching.md
-fix-cross-server-db-isolation.md
-fix-member-panel-refetch-storm.md
-fix-member-panel-refetch-storm-v2.md
-fix-member-panel-refetch-storm-v3.md
-fix-member-panel-refetch-storm-v4.md
-fix-member-panel-refetch-storm-v5.md
-fix-member-panel-refetch-storm-v6.md
-fix-member-panel-refetch-storm-v7.md
-fix-member-panel-refetch-storm-v8.md
-fix-pending-add-to-room-bypass.md
-group-infopanel-picker-rework.md
-member-panel-add-to-group.md
-slash-command-argless-model.md
-shared-picker-widget.md
-release-notes.md
-missing.md
-
-fix-pending-add-to-room-bypass-v2.md
-fix-pending-add-to-room-bypass-v3.md
-fix-v8-panel-liveness-and-rejoin-followups.md
