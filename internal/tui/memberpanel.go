@@ -219,6 +219,8 @@ func (m *MemberPanelModel) refreshRows(room, group, dm string, c *client.Client,
 // SetRoomMembers populates the member list from a server room_members_list response.
 func (m *MemberPanelModel) SetRoomMembers(members []string, c *client.Client, online map[string]bool, status map[string]string) {
 	m.members = nil
+	m.noticeMessage = ""
+	m.readOnly = false
 	for _, user := range members {
 		p := c.Profile(user)
 		displayName := user

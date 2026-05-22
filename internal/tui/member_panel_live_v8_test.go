@@ -123,6 +123,26 @@ func TestMemberPanel_SetRoomMembers_ClampsCursor(t *testing.T) {
 	}
 }
 
+func TestMemberPanel_SetRoomMembersClearsNoticeState(t *testing.T) {
+	c := client.New(client.Config{})
+	m := MemberPanelModel{
+		noticeMessage: "(members unavailable — press r to refresh)",
+		readOnly:      true,
+	}
+
+	m.SetRoomMembers([]string{"usr_a"}, c, map[string]bool{}, map[string]string{})
+
+	if m.noticeMessage != "" {
+		t.Fatalf("SetRoomMembers should clear noticeMessage, got %q", m.noticeMessage)
+	}
+	if m.readOnly {
+		t.Fatal("SetRoomMembers should clear readOnly")
+	}
+	if len(m.members) != 1 || m.members[0].User != "usr_a" {
+		t.Fatalf("SetRoomMembers should populate fresh rows, got %+v", m.members)
+	}
+}
+
 // App-level persistent path: refreshMemberPanelLiveRowsAndCompletion updates
 // both the visible member panel AND the @-completion source (activeMemberEntries
 // reads the refreshed panel).

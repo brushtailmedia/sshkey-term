@@ -412,6 +412,41 @@ func TestApp_MemberPanelMouseClick_SelectsVisualRowWithLongNames(t *testing.T) {
 	}
 }
 
+func TestApp_MemberPanelMouseClickRefreshesStaleRowsBeforeSelect(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.width = 120
+	a.height = 40
+	a.sidebar = NewSidebar()
+	a.memberPanel = NewMemberPanel()
+	a.memberPanel.visible = true
+	a.memberPanel.focused = true
+	a.messages.SetContext("rm_x", "", "")
+
+	client.SetRoomMembersForTesting(a.client, "rm_x", []string{"usr_a", "usr_stale"})
+	a.memberPanel.Refresh("rm_x", "", "", a.client, a.sidebar.online, a.sidebar.status)
+	if got := a.memberPanel.members[1].User; got != "usr_stale" {
+		t.Fatalf("precondition: second row = %q, want usr_stale", got)
+	}
+
+	// The cache changes while the panel is open. The mouse path must refresh
+	// before mapping the clicked visual row, otherwise it selects usr_stale.
+	client.SetRoomMembersForTesting(a.client, "rm_x", []string{"usr_a", "usr_fresh"})
+
+	layout := computeLayout(a.width, a.height, true)
+	x := layout.MemberX0 + 1
+	y := layout.MemberY0 + 3 // first member row is +2, second is +3
+
+	model, _ := a.handleMouseClick(x, y)
+	updated := model.(App)
+
+	if got := updated.memberPanel.SelectedUser(); got != "usr_fresh" {
+		t.Fatalf("click should select refreshed second row usr_fresh, got %q", got)
+	}
+	if len(updated.input.members) != 2 || updated.input.members[1].UserID != "usr_fresh" {
+		t.Fatalf("mouse refresh should update @completion members, got %+v", updated.input.members)
+	}
+}
+
 func TestApp_PresenceMessageUpdatesOpenMemberPanelStatusInPlace(t *testing.T) {
 	a, _ := newEditAppHarness(t)
 	a.sidebar = NewSidebar()
