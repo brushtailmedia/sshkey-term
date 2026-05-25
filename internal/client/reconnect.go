@@ -101,11 +101,7 @@ func (c *Client) doConnect() error {
 	}
 
 	addr := fmt.Sprintf("%s:%d", c.cfg.Host, c.cfg.Port)
-	sshCfg := &ssh.ClientConfig{
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKeyCallback(c.cfg.DataDir, c.cfg.Host),
-		Timeout:         10 * time.Second,
-	}
+	sshCfg := c.buildSSHClientConfig(signer)
 
 	conn, err := ssh.Dial("tcp", addr, sshCfg)
 	if err != nil {

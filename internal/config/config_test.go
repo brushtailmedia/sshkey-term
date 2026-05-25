@@ -38,8 +38,8 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	original := &Config{
 		Device: DeviceConfig{ID: "dev_V1StGXR8_Z5jdHi6B-myT"},
 		Servers: []ServerConfig{
-			{Name: "Personal", Host: "chat.example.com", Port: 2222},
-			{Name: "Work", Host: "work.example.com", Port: 2223},
+			{Name: "Personal", Host: "chat.example.com", Port: 2222, RequestedDisplayName: "Alice"},
+			{Name: "Work", Host: "work.example.com", Port: 2223, RequestedDisplayName: "Alice Work"},
 		},
 		Notifications: NotificationConfig{
 			Desktop:       "mentions",
@@ -65,6 +65,9 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	}
 	if loaded.Servers[0].Name != "Personal" || loaded.Servers[1].Host != "work.example.com" {
 		t.Errorf("server details lost: %+v", loaded.Servers)
+	}
+	if loaded.Servers[0].RequestedDisplayName != "Alice" || loaded.Servers[1].RequestedDisplayName != "Alice Work" {
+		t.Errorf("requested display names lost: %+v", loaded.Servers)
 	}
 	if loaded.Notifications.Desktop != "mentions" {
 		t.Errorf("desktop = %q", loaded.Notifications.Desktop)
@@ -138,17 +141,23 @@ func TestAddServer_FirstServer(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{}
 
-	srv := ServerConfig{Name: "Home", Host: "home.example.com", Port: 2222}
+	srv := ServerConfig{Name: "Home", Host: "home.example.com", Port: 2222, RequestedDisplayName: "Alice"}
 	if err := AddServer(dir, cfg, srv); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	if len(cfg.Servers) != 1 {
 		t.Errorf("expected 1 server, got %d", len(cfg.Servers))
 	}
+	if cfg.Servers[0].RequestedDisplayName != "Alice" {
+		t.Errorf("requested display name = %q, want Alice", cfg.Servers[0].RequestedDisplayName)
+	}
 	// Saved to disk
 	loaded, _ := Load(dir)
 	if len(loaded.Servers) != 1 {
 		t.Errorf("not persisted: %d servers", len(loaded.Servers))
+	}
+	if loaded.Servers[0].RequestedDisplayName != "Alice" {
+		t.Errorf("persisted requested display name = %q, want Alice", loaded.Servers[0].RequestedDisplayName)
 	}
 }
 

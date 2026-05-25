@@ -80,6 +80,14 @@ type ServerConfig struct {
 	Name string `toml:"name"`
 	Host string `toml:"host"`
 	Port int    `toml:"port"`
+	// RequestedDisplayName is the advisory display name the user wants on this
+	// server, sent as the SSH username (ClientConfig.User) so an unapproved key
+	// shows up in the operator's pending list with a name to approve. It is a
+	// pre-approval *hint* only — never the confirmed profile name, which the
+	// server assigns and broadcasts after login. Distinct from Name, which is
+	// the local server *label* ("Home", "Work"). Empty = no hint. Omitted from
+	// TOML when empty so legacy configs round-trip unchanged.
+	RequestedDisplayName string `toml:"requested_display_name,omitempty"`
 }
 
 // Load reads the config file. Returns a default config if the file doesn't exist.

@@ -30,6 +30,14 @@ func ValidateDisplayName(name string) (string, error) {
 		if isRejectChar(r) {
 			return "", fmt.Errorf("name contains invalid character")
 		}
+		if r == '+' {
+			// DP9: '+' is banned in display names system-wide — reserved as the
+			// future invite-code delimiter, kept out of the name policy so the
+			// parser can own it explicitly. Mirrors the authoritative server-side
+			// ban (sshkey-chat/internal/config/displayname.go); this client copy
+			// is UX-only fast feedback, never the contract.
+			return "", fmt.Errorf("name may not contain '+'")
+		}
 	}
 
 	return name, nil

@@ -14,21 +14,24 @@ import (
 )
 
 // TestAddServerZxcvbnContext_IncludesNameAndHost verifies that the
-// helper returns both the display name and hostname fields as zxcvbn
-// context strings so passphrases containing either get penalized.
+// helper returns the REQUESTED DISPLAY NAME and hostname fields as zxcvbn
+// context strings so passphrases containing either get penalized. The server
+// label (Name) is deliberately NOT used — it's an arbitrary "Home"/"Work" tag,
+// not the user's display name.
 func TestAddServerZxcvbnContext_IncludesNameAndHost(t *testing.T) {
 	a := NewAddServer(nil)
-	a.inputs[0].SetValue("My Server")
-	a.inputs[1].SetValue("chat.example.com")
-	a.inputs[2].SetValue("2222")
-	a.inputs[3].SetValue("~/.ssh/id_ed25519")
+	a.inputs[fieldName].SetValue("Work") // server label — must be ignored
+	a.inputs[fieldHost].SetValue("chat.example.com")
+	a.inputs[fieldPort].SetValue("2222")
+	a.inputs[fieldDisplayName].SetValue("Alice") // requested display name — used
+	a.inputs[fieldKey].SetValue("~/.ssh/id_ed25519")
 
 	ctx := addServerZxcvbnContext(a)
 	if len(ctx) != 2 {
-		t.Fatalf("context len = %d, want 2 (name + host)", len(ctx))
+		t.Fatalf("context len = %d, want 2 (display name + host)", len(ctx))
 	}
-	if ctx[0] != "My Server" {
-		t.Errorf("ctx[0] = %q, want 'My Server'", ctx[0])
+	if ctx[0] != "Alice" {
+		t.Errorf("ctx[0] = %q, want 'Alice' (requested display name, not the server label)", ctx[0])
 	}
 	if ctx[1] != "chat.example.com" {
 		t.Errorf("ctx[1] = %q, want 'chat.example.com'", ctx[1])
@@ -40,8 +43,8 @@ func TestAddServerZxcvbnContext_IncludesNameAndHost(t *testing.T) {
 // strings that zxcvbn would no-op against.
 func TestAddServerZxcvbnContext_SkipsEmptyFields(t *testing.T) {
 	a := NewAddServer(nil)
-	a.inputs[0].SetValue("")
-	a.inputs[1].SetValue("   ")
+	a.inputs[fieldDisplayName].SetValue("")
+	a.inputs[fieldHost].SetValue("   ")
 
 	ctx := addServerZxcvbnContext(a)
 	if len(ctx) != 0 {

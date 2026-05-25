@@ -44,6 +44,12 @@ func TestValidateDisplayName_Invalid(t *testing.T) {
 		{"test\uFEFFname", "BOM"},
 		{"test\u202Aname", "bidi override"},
 		{"test\u2060name", "word joiner"},
+		// DP9: '+' banned system-wide (reserved invite-code delimiter).
+		// Mirrors the authoritative server-side ban.
+		{"alice+inv_x", "plus (invite-code shape)"},
+		{"a+b", "plus (interior)"},
+		{"+x", "plus (leading)"},
+		{"alice+", "plus (trailing)"},
 	}
 	for _, tc := range tests {
 		_, err := ValidateDisplayName(tc.input)

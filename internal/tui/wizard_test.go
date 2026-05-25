@@ -202,6 +202,12 @@ func TestWizard_GenerateAndShare(t *testing.T) {
 	if result.ServerHost != "localhost" {
 		t.Errorf("result host = %q", result.ServerHost)
 	}
+	// The wizard's chosen display name flows out via Result().PreferredName,
+	// which main.go maps into ServerConfig.RequestedDisplayName (the SSH-username
+	// hint sent on connect). advanceToKeySelect set the name to "testuser".
+	if result.PreferredName != "testuser" {
+		t.Errorf("result preferred name = %q, want testuser (the wizard's chosen display name)", result.PreferredName)
+	}
 	if result.ServerPort != 2222 {
 		t.Errorf("result port = %d", result.ServerPort)
 	}
@@ -414,9 +420,9 @@ func TestConnectFailed_View(t *testing.T) {
 	checks := []string{
 		"Pending Approval",
 		"isn't authorized",
-		"pending-keys queue",
-		"server operator",
-		"approve",
+		"queued for approval",
+		"pending list",
+		"operator",
 		"SHA256:xK9m",
 		"ssh-ed25519",
 		"[r] Retry",

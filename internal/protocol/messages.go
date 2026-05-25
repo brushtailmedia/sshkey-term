@@ -1100,6 +1100,11 @@ type AdminNotify struct {
 	Fingerprint string `json:"fingerprint"`
 	Attempts    int    `json:"attempts"`
 	FirstSeen   string `json:"first_seen"`
+	// RequestedUsername mirrors the server's first-attempt pending_key
+	// notify hint. The term UX treats admin_notify as a binary
+	// "you have pending keys" indicator, so this is unused for render
+	// today; the field exists so server/term wire drift is caught.
+	RequestedUsername string `json:"requested_username,omitempty"`
 }
 
 // AdminNotifyQuota mirrors the server's per-user upload quota notify
@@ -1131,6 +1136,14 @@ type PendingKeyEntry struct {
 	Attempts    int    `json:"attempts"`
 	FirstSeen   string `json:"first_seen"`
 	LastSeen    string `json:"last_seen"`
+	// PubKey is the full authorized-keys line for the pending key, so an
+	// admin can copy it for `sshkey-ctl approve`. May be empty for legacy
+	// rows recorded before the server stored it.
+	PubKey string `json:"pubkey,omitempty"`
+	// RequestedUsername is the advisory display-name hint the connecting
+	// client supplied as its SSH username (server-sanitized). Pre-approval
+	// only — never a confirmed profile name. Empty when none was sent.
+	RequestedUsername string `json:"requested_username,omitempty"`
 }
 
 type PendingKeysList struct {

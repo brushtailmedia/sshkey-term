@@ -6,8 +6,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/config"
@@ -26,7 +28,8 @@ func run() error {
 	hostFlag := flag.String("host", "", "server hostname (bypasses wizard)")
 	portFlag := flag.Int("port", 2222, "server port")
 	keyFlag := flag.String("key", "", "path to Ed25519 SSH key (bypasses wizard)")
-	nameFlag := flag.String("name", "", "server display name")
+	nameFlag := flag.String("name", "", "local server label (e.g. Home, Work)")
+	displayNameFlag := flag.String("display-name", "", "your requested display name on this server (sent as the SSH username hint)")
 	debugFlag := flag.Bool("debug", false, "enable verbose client logs in terminal")
 	flag.Parse()
 
@@ -55,7 +58,7 @@ func run() error {
 		// parsing stays in run() (Option B-lite); only the branch
 		// body is extracted for testability.
 		var err error
-		server, ephemeral, err = runBypassMode(configDir, cfg, *hostFlag, *keyFlag, *nameFlag, *portFlag)
+		server, ephemeral, err = runBypassMode(configDir, cfg, *hostFlag, *keyFlag, *nameFlag, *displayNameFlag, *portFlag)
 		if err != nil {
 			return err
 		}
@@ -88,6 +91,11 @@ func run() error {
 			Name: result.ServerName,
 			Host: result.ServerHost,
 			Port: result.ServerPort,
+			// The wizard's chosen display name (also embedded in the managed
+			// .pub comment) becomes the persisted requested-name hint, sent as
+			// the SSH username on connect so an unapproved key surfaces in the
+			// operator's pending list with a name.
+			RequestedDisplayName: result.PreferredName,
 		}
 
 		// Save config (uses AddServer which validates again as
@@ -129,6 +137,11 @@ func run() error {
 		DataDir:                  dataDir,
 		Logger:                   logger,
 		ImageAutoPreviewMaxBytes: cfg.Attachments.ImageAutoPreviewMaxBytes,
+		// User carries the requested display-name hint as the SSH username.
+		// This is the single sink for all three ServerConfig producers
+		// (wizard, existing-config, CLI bypass) — server is resolved by the
+		// time we reach here, so the field flows through uniformly.
+		User: server.RequestedDisplayName,
 		// OnPassphrase is handled by the TUI passphrase dialog
 	}
 
@@ -187,9 +200,10 @@ func buildClientLogger(dataDir string, debug bool) (*slog.Logger, func()) {
 // invocation into a persistent server entry whose key bytes are
 // owned by the new server's folder.
 //
-// Phase 2 inline implementation; mirrors what Phase 3's wizard
-// rewrite will do for the wizard flow.
-func copyKeyBytesIntoManaged(configDir, host, srcKeyPath string) error {
+// When displayName is non-empty, the managed .pub comment is rewritten to match
+// the requested display-name hint. This mirrors Add Server and keeps
+// `sshkey-ctl approve --key "<copied pubkey>"` aligned with the pending hint.
+func copyKeyBytesIntoManaged(configDir, host, srcKeyPath, displayName string) error {
 	if srcKeyPath == "" {
 		return fmt.Errorf("source key path is empty")
 	}
@@ -201,6 +215,13 @@ func copyKeyBytesIntoManaged(configDir, host, srcKeyPath string) error {
 	// Read the .pub sibling if present (optional — some users
 	// might point -key at a private-only file).
 	pub, pubErr := os.ReadFile(srcKeyPath + ".pub")
+	if pubErr == nil {
+		var rewriteErr error
+		pub, rewriteErr = cliPubLineWithComment(pub, displayName)
+		if rewriteErr != nil {
+			return rewriteErr
+		}
+	}
 
 	// Prepare destination paths.
 	keysDir := config.ServerKeysDir(configDir, host)
@@ -219,6 +240,19 @@ func copyKeyBytesIntoManaged(configDir, host, srcKeyPath string) error {
 	return nil
 }
 
+func cliPubLineWithComment(pubData []byte, displayName string) ([]byte, error) {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return pubData, nil
+	}
+	pubKey, _, _, _, err := ssh.ParseAuthorizedKey(pubData)
+	if err != nil {
+		return nil, fmt.Errorf("parse public key for display-name rewrite: %w", err)
+	}
+	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pubKey))) + " " + displayName + "\n"
+	return []byte(line), nil
+}
+
 // runBypassMode handles the -host / -key CLI bypass branch. Two
 // modes split on whether any servers are already configured:
 //
@@ -233,24 +267,38 @@ func copyKeyBytesIntoManaged(configDir, host, srcKeyPath string) error {
 //     value (via ExpandUserPath) for this run only.
 //
 // Both modes share: ValidateHost gate, Name fallback to Host if
-// the -name flag was empty, and Port carried through verbatim.
+// the -name flag was empty, -display-name validation into the requested-name
+// hint, and Port carried through verbatim.
 //
 // Extracted from run() in Phase 4 (Option B-lite) so the bypass
 // contract is unit-testable without exercising flag parsing,
 // tea.NewProgram wiring, or the wizard branch. See
 // path-centralization.md §"Decision — CLI bypass test strategy
 // (Option B-lite)" for the rationale.
-func runBypassMode(configDir string, cfg *config.Config, host, keyPath, name string, port int) (config.ServerConfig, bool, error) {
+func runBypassMode(configDir string, cfg *config.Config, host, keyPath, name, displayName string, port int) (config.ServerConfig, bool, error) {
 	if err := config.ValidateHost(host); err != nil {
 		return config.ServerConfig{}, false, fmt.Errorf("invalid -host: %w", err)
 	}
 	if name == "" {
 		name = host
 	}
+	// -display-name is the requested display-name hint, distinct from -name
+	// (the local label). Validate it with the same policy the wizard and Add
+	// Server use so a bad value fails fast rather than being persisted; empty
+	// means no hint. Bootstrap-persist saves it onto the ServerConfig; ephemeral
+	// returns it in-memory for that run only (never written to config.toml).
+	if displayName != "" {
+		validated, err := tui.ValidateDisplayName(displayName)
+		if err != nil {
+			return config.ServerConfig{}, false, fmt.Errorf("invalid -display-name: %w", err)
+		}
+		displayName = validated
+	}
 	server := config.ServerConfig{
-		Name: name,
-		Host: host,
-		Port: port,
+		Name:                 name,
+		Host:                 host,
+		Port:                 port,
+		RequestedDisplayName: displayName,
 	}
 
 	if len(cfg.Servers) == 0 {
@@ -258,7 +306,7 @@ func runBypassMode(configDir string, cfg *config.Config, host, keyPath, name str
 		// Copy the source key into the per-server managed location,
 		// save the server entry (no Key field — Phase 3e deleted it).
 		keySrc := config.ExpandUserPath(keyPath)
-		if err := copyKeyBytesIntoManaged(configDir, host, keySrc); err != nil {
+		if err := copyKeyBytesIntoManaged(configDir, host, keySrc, displayName); err != nil {
 			return config.ServerConfig{}, false, fmt.Errorf("bootstrap-persist copy: %w", err)
 		}
 		if err := config.AddServer(configDir, cfg, server); err != nil {

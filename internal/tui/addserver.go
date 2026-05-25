@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/keygen"
@@ -22,20 +23,34 @@ const (
 	addServerGenerate
 )
 
+// Add Server form field indices. Key is LAST on purpose: the "Down enters the
+// scanned-keys list / Shift+Tab from the list returns here" navigation and the
+// layout (the list sits directly below the key field) all key off the final
+// input. The display-name field is inserted at index 3 (before key) so the
+// host/port indices stay stable.
+const (
+	fieldName        = 0 // local server label ("Home", "Work")
+	fieldHost        = 1
+	fieldPort        = 2
+	fieldDisplayName = 3 // requested display name on this server (SSH username hint)
+	fieldKey         = 4 // MUST stay last (adjacent to the scanned-keys list)
+)
+
 // AddServerModel manages the add server dialog.
 type AddServerModel struct {
 	visible bool
 	mode    addServerMode
 	inputs  []textinput.Model
 	// focused tracks input focus across two zones:
-	//   0..3                    — the four form fields (name/host/port/key)
-	//   len(inputs) (i.e. 4)    — sentinel meaning "selection is in the
+	//   0..4                    — the five form fields
+	//                             (name/host/port/display-name/key)
+	//   len(inputs) (i.e. 5)    — sentinel meaning "selection is in the
 	//                             scanned-keys list below the form"; the
 	//                             active list row lives in keyCursor.
-	// Tab/Shift+Tab cycle within 0..3 only. Down from field 3 enters
-	// the list (focused=4, keyCursor=0); Up at the top of the list
-	// returns to field 3. Mouse click on a list row jumps directly to
-	// focused=3 with the path filled — same end-state as keyboard
+	// Tab/Shift+Tab cycle within 0..4 only. Down from the key field (last)
+	// enters the list (focused=len(inputs), keyCursor=0); Up at the top of the
+	// list returns to the key field. Mouse click on a list row jumps directly
+	// to focused=fieldKey with the path filled — same end-state as keyboard
 	// Enter on a row, just without the intermediate "in list" focus.
 	focused int
 	labels  []string
@@ -90,6 +105,10 @@ type AddServerMsg struct {
 	Name string
 	Host string
 	Port int
+	// RequestedDisplayName is the user's chosen display name on this server,
+	// persisted to ServerConfig and sent as the SSH username hint on connect.
+	// Distinct from Name (the local label). Empty = no hint.
+	RequestedDisplayName string
 }
 
 // keyCopyFn is the function the submit handler uses to copy keys
@@ -102,11 +121,12 @@ var keyCopyFn = copyKeyForServer
 // copyKeyForServer copies an SSH key (private + .pub) into the
 // app-managed folder under a host-derived filename, returning the
 // final destination path. Pattern parallels the wizard's
-// copyKeyToManagedStoreAndRewriteName, but doesn't rewrite the
-// .pub comment — the user's display name on this server isn't
-// known at add-server time (the server assigns / user picks it
-// during the first connect, separate from the .pub comment which
-// is purely cosmetic at the protocol level).
+// copyKeyToManagedStoreAndRewriteName: when displayName is non-empty it
+// rewrites the MANAGED destination .pub comment to that name (matching the
+// wizard's generate/import behavior) so the operator sees a recognizable
+// comment. It never mutates the user's original source key or comment — only
+// the app-managed copy. An empty displayName preserves the source .pub
+// verbatim.
 //
 // The point of always copying — even when the source is already
 // in the managed folder — is per-server file separation: each
@@ -131,7 +151,7 @@ var keyCopyFn = copyKeyForServer
 // path). Destination-already-exists is an error rather than a
 // silent overwrite. Host validation runs first — defense in depth
 // against malformed values reaching the filesystem layer.
-func copyKeyForServer(srcKeyPath, host string) (string, error) {
+func copyKeyForServer(srcKeyPath, host, displayName string) (string, error) {
 	if err := config.ValidateHost(host); err != nil {
 		return "", err
 	}
@@ -146,6 +166,14 @@ func copyKeyForServer(srcKeyPath, host string) (string, error) {
 		return "", fmt.Errorf("read public key (%s.pub): %w", src, err)
 	}
 
+	// Destination .pub bytes: comment rewritten to the requested display name
+	// when one was given, else the source .pub verbatim. Computed before any
+	// write so a malformed source .pub fails before we touch the filesystem.
+	pubOut, err := pubLineWithComment(pubData, displayName)
+	if err != nil {
+		return "", err
+	}
+
 	configDir := config.DefaultConfigDir()
 	keysDir := config.ServerKeysDir(configDir, host)
 	if err := os.MkdirAll(keysDir, 0700); err != nil {
@@ -154,8 +182,16 @@ func copyKeyForServer(srcKeyPath, host string) (string, error) {
 
 	dst := config.ServerKeyPath(configDir, host)
 
-	// Idempotent: if user typed the exact target path, no-op.
+	// Idempotent: user pointed -key at the already-managed file. Still rewrite
+	// the managed .pub comment when a display name is present (the source IS
+	// the managed copy here, so this only touches app-managed data); otherwise
+	// no-op.
 	if filepath.Clean(src) == filepath.Clean(dst) {
+		if strings.TrimSpace(displayName) != "" {
+			if err := os.WriteFile(dst+".pub", pubOut, 0644); err != nil {
+				return "", fmt.Errorf("rewrite managed .pub (%s.pub): %w", dst, err)
+			}
+		}
 		return dst, nil
 	}
 
@@ -168,7 +204,7 @@ func copyKeyForServer(srcKeyPath, host string) (string, error) {
 	if err := os.WriteFile(dst, privData, 0600); err != nil {
 		return "", fmt.Errorf("write private key (%s): %w", dst, err)
 	}
-	if err := os.WriteFile(dst+".pub", pubData, 0644); err != nil {
+	if err := os.WriteFile(dst+".pub", pubOut, 0644); err != nil {
 		// Roll back the partial private-key write so we don't
 		// leave a private-only orphan on disk.
 		_ = os.Remove(dst)
@@ -178,20 +214,38 @@ func copyKeyForServer(srcKeyPath, host string) (string, error) {
 	return dst, nil
 }
 
+// pubLineWithComment returns authorized-keys bytes for pubData with its comment
+// replaced by displayName. An empty/whitespace displayName returns pubData
+// unchanged (preserving any existing comment). Mirrors the wizard's managed
+// .pub rewrite (copyKeyToManagedStoreAndRewriteName).
+func pubLineWithComment(pubData []byte, displayName string) ([]byte, error) {
+	if strings.TrimSpace(displayName) == "" {
+		return pubData, nil
+	}
+	pubKey, _, _, _, err := ssh.ParseAuthorizedKey(pubData)
+	if err != nil {
+		return nil, fmt.Errorf("parse public key: %w", err)
+	}
+	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pubKey))) + " " + strings.TrimSpace(displayName) + "\n"
+	return []byte(line), nil
+}
+
 // addServerZxcvbnContext collects form-field values to pass to zxcvbn
-// as context strings, so a passphrase containing the display name or
-// hostname the user just typed gets penalized. Mirrors the wizard's
-// ValidateUserPassphraseWithContext call which passes the chosen
-// display name. Port is omitted (low signal; usually just digits).
+// as context strings, so a passphrase containing the requested display name
+// or hostname the user just typed gets penalized. Mirrors the wizard's
+// ValidateUserPassphraseWithContext call which passes the chosen display name.
+// Uses the requested-display-name field (NOT the server label, which is an
+// arbitrary "Home"/"Work" tag and poor passphrase context) plus the host. Port
+// is omitted (low signal; usually just digits).
 //
 // Empty / whitespace-only values are skipped — zxcvbn does exact
 // substring matching, so empty strings would be no-ops but noisy.
 func addServerZxcvbnContext(a AddServerModel) []string {
 	var ctx []string
-	if name := strings.TrimSpace(a.inputs[0].Value()); name != "" {
+	if name := strings.TrimSpace(a.inputs[fieldDisplayName].Value()); name != "" {
 		ctx = append(ctx, name)
 	}
-	if host := strings.TrimSpace(a.inputs[1].Value()); host != "" {
+	if host := strings.TrimSpace(a.inputs[fieldHost].Value()); host != "" {
 		ctx = append(ctx, host)
 	}
 	return ctx
@@ -204,20 +258,21 @@ func addServerZxcvbnContext(a AddServerModel) []string {
 // only, which is the natural default for tests and for the first-run
 // case where no servers exist yet.
 func NewAddServer(scanDirsFn func() []string) AddServerModel {
-	labels := []string{"Name", "Host", "Port", "SSH key path"}
+	labels := []string{"Name", "Host", "Port", "Your display name", "SSH key path"}
 
-	inputs := make([]textinput.Model, 4)
+	inputs := make([]textinput.Model, 5)
 	for i := range inputs {
 		inputs[i] = textinput.New()
 		inputs[i].Prompt = ""
 		inputs[i].CharLimit = 256
 	}
 
-	inputs[0].Placeholder = "My Server"
-	inputs[1].Placeholder = "chat.example.com"
-	inputs[2].Placeholder = "2222"
-	inputs[2].SetValue("2222")
-	inputs[3].Placeholder = "~/.ssh/id_ed25519"
+	inputs[fieldName].Placeholder = "My Server"
+	inputs[fieldHost].Placeholder = "chat.example.com"
+	inputs[fieldPort].Placeholder = "2222"
+	inputs[fieldPort].SetValue("2222")
+	inputs[fieldDisplayName].Placeholder = "e.g. Alice"
+	inputs[fieldKey].Placeholder = "~/.ssh/id_ed25519"
 
 	// Generate inputs
 	genInputs := make([]textinput.Model, 3)
@@ -255,7 +310,7 @@ func (a *AddServerModel) Show() {
 	a.weakPassConfirmed = ""
 	a.strengthHint = keygen.LiveHint{}
 	for i := range a.inputs {
-		if i == 2 {
+		if i == fieldPort {
 			a.inputs[i].SetValue("2222")
 		} else {
 			a.inputs[i].SetValue("")
@@ -269,7 +324,7 @@ func (a *AddServerModel) Show() {
 	// belt-and-suspenders.
 	a.genInputs[1].SetValue("")
 	a.genInputs[2].SetValue("")
-	a.inputs[0].Focus()
+	a.inputs[fieldName].Focus()
 
 	a.rescanEd25519Keys()
 }
@@ -361,7 +416,7 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		// back into the form range — Esc-back from generate calls
 		// inputs[focused].Focus() and would panic on out-of-bounds.
 		if a.focused >= len(a.inputs) {
-			a.focused = 3
+			a.focused = fieldKey
 		}
 		host := strings.TrimSpace(a.inputs[1].Value())
 		if host == "" {
@@ -419,8 +474,8 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		if a.focused >= len(a.inputs) {
 			// From the list, Shift+Tab returns to field 3 — the
 			// natural "above the list" target.
-			a.focused = 3
-			a.inputs[3].Focus()
+			a.focused = fieldKey
+			a.inputs[fieldKey].Focus()
 			return a, nil
 		}
 		a.inputs[a.focused].Blur()
@@ -444,8 +499,8 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 			}
 			return a, nil
 		}
-		if a.focused == 3 && len(a.scannedKeys) > 0 {
-			a.inputs[3].Blur()
+		if a.focused == fieldKey && len(a.scannedKeys) > 0 {
+			a.inputs[fieldKey].Blur()
 			a.focused = len(a.inputs)
 			a.keyCursor = 0
 			return a, nil
@@ -464,8 +519,8 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 				a.keyCursor--
 				return a, nil
 			}
-			a.focused = 3
-			a.inputs[3].Focus()
+			a.focused = fieldKey
+			a.inputs[fieldKey].Focus()
 			return a, nil
 		}
 		a.inputs[a.focused].Blur()
@@ -484,18 +539,19 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		// Enter again to submit.
 		if a.focused >= len(a.inputs) {
 			if a.keyCursor >= 0 && a.keyCursor < len(a.scannedKeys) {
-				a.inputs[3].SetValue(a.scannedKeys[a.keyCursor].Path)
+				a.inputs[fieldKey].SetValue(a.scannedKeys[a.keyCursor].Path)
 			}
-			a.focused = 3
-			a.inputs[3].Focus()
+			a.focused = fieldKey
+			a.inputs[fieldKey].Focus()
 			return a, nil
 		}
 		// Validate and submit
 		a.formErr = "" // clear any prior submit error
-		name := strings.TrimSpace(a.inputs[0].Value())
-		host := strings.TrimSpace(a.inputs[1].Value())
-		portStr := strings.TrimSpace(a.inputs[2].Value())
-		key := strings.TrimSpace(a.inputs[3].Value())
+		name := strings.TrimSpace(a.inputs[fieldName].Value())
+		host := strings.TrimSpace(a.inputs[fieldHost].Value())
+		portStr := strings.TrimSpace(a.inputs[fieldPort].Value())
+		displayName := strings.TrimSpace(a.inputs[fieldDisplayName].Value())
+		key := strings.TrimSpace(a.inputs[fieldKey].Value())
 
 		// Submit-time host validation: rejects empty/whitespace,
 		// path separators, traversal segments, control bytes. The
@@ -508,6 +564,18 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		}
 		if name == "" {
 			name = host
+		}
+
+		// Validate the requested display name with the same policy as the
+		// wizard (incl. the DP9 '+' ban) so a bad value is caught before we
+		// copy the key or emit the add message. Empty is allowed — no hint.
+		if displayName != "" {
+			validated, err := ValidateDisplayName(displayName)
+			if err != nil {
+				a.formErr = "Display name: " + err.Error()
+				return a, nil
+			}
+			displayName = validated
 		}
 
 		port := 2222
@@ -526,7 +594,7 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		// Source-equals-destination is idempotent (no-op). See
 		// copyKeyForServer for the rationale. Indirection via
 		// keyCopyFn is so tests can swap in a passthrough.
-		if _, err := keyCopyFn(key, host); err != nil {
+		if _, err := keyCopyFn(key, host, displayName); err != nil {
 			a.formErr = err.Error()
 			return a, nil
 		}
@@ -534,9 +602,10 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		a.Hide()
 		return a, func() tea.Msg {
 			return AddServerMsg{
-				Name: name,
-				Host: host,
-				Port: port,
+				Name:                 name,
+				Host:                 host,
+				Port:                 port,
+				RequestedDisplayName: displayName,
 			}
 		}
 	}
@@ -565,7 +634,7 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 			a.genInputs[i].Blur()
 		}
 		if a.focused >= len(a.inputs) {
-			a.focused = 3
+			a.focused = fieldKey
 		}
 		a.inputs[a.focused].Focus()
 		a.genErr = ""
@@ -590,6 +659,7 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 		path := strings.TrimSpace(a.genInputs[0].Value())
 		pass := a.genInputs[1].Value()
 		confirm := a.genInputs[2].Value()
+		displayName := strings.TrimSpace(a.inputs[fieldDisplayName].Value())
 
 		if path == "" {
 			a.genErr = "Path is required"
@@ -598,6 +668,14 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 		if pass != confirm {
 			a.genErr = "Passphrases don't match"
 			return a, nil
+		}
+		if displayName != "" {
+			validated, err := ValidateDisplayName(displayName)
+			if err != nil {
+				a.genErr = "Display name: " + err.Error()
+				return a, nil
+			}
+			displayName = validated
 		}
 
 		// Phase 16 Gap 4: zxcvbn passphrase strength check. Same
@@ -641,21 +719,25 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 			return a, nil
 		}
 
-		fingerprint, err := generateEd25519KeyFile(path, pass)
+		// Embed the requested display name (if the field is filled) as the
+		// .pub comment so a generated managed key matches the wizard's
+		// behavior. The submit step re-affirms this via copyKeyForServer, but
+		// writing it now keeps the generated .pub correct even before submit.
+		fingerprint, err := generateEd25519KeyFile(path, pass, displayName)
 		if err != nil {
 			a.genErr = "Generation failed: " + err.Error()
 			return a, nil
 		}
 
 		// Success: fill key path in main form, return to form view
-		a.inputs[3].SetValue(expanded)
+		a.inputs[fieldKey].SetValue(expanded)
 		a.genNotice = "✓ Key generated (" + fingerprint + ") — back it up"
 		a.mode = addServerForm
 		for i := range a.genInputs {
 			a.genInputs[i].Blur()
 		}
-		a.focused = 3
-		a.inputs[3].Focus()
+		a.focused = fieldKey
+		a.inputs[fieldKey].Focus()
 		a.genErr = ""
 
 		// Rescan keys so the newly-generated one can appear in the list
@@ -699,7 +781,8 @@ func (a AddServerModel) HandleMouse(msg tea.MouseMsg) (AddServerModel, tea.Cmd) 
 	//   Y=4..5: Name label + input (input on Y=4)
 	//   Y=6..7: Host
 	//   Y=8..9: Port
-	//   Y=10..11: SSH key path
+	//   Y=10..11: Your display name
+	//   Y=12..13: SSH key path
 	fieldStartY := 4
 	for i := range a.inputs {
 		fieldY := fieldStartY + i*2
@@ -721,13 +804,13 @@ func (a AddServerModel) HandleMouse(msg tea.MouseMsg) (AddServerModel, tea.Cmd) 
 	for i, entry := range a.scannedKeys {
 		if msg.Y == keyStartY+i {
 			// Select this key — fill the key path input
-			a.inputs[3].SetValue(entry.Path)
+			a.inputs[fieldKey].SetValue(entry.Path)
 			if a.focused < len(a.inputs) {
 				a.inputs[a.focused].Blur()
 			}
-			a.focused = 3
+			a.focused = fieldKey
 			a.keyCursor = i
-			a.inputs[3].Focus()
+			a.inputs[fieldKey].Focus()
 			return a, nil
 		}
 	}
@@ -739,8 +822,9 @@ func (a AddServerModel) HandleMouse(msg tea.MouseMsg) (AddServerModel, tea.Cmd) 
 // rendered form view. Must match viewForm()'s layout exactly — change both
 // together.
 func (a AddServerModel) keyListStartY() int {
-	// Border(1) + padding(1) + header(1) + blank(1) + 4 fields * 2 = 12
-	y := 12
+	// Border(1) + padding(1) + header(1) + blank(1) + len(inputs) fields * 2.
+	// Derived from len(inputs) so it tracks the field count (5 fields → 14).
+	y := 4 + len(a.inputs)*2
 	if a.genNotice != "" {
 		y += 2 // notice line + blank
 	}

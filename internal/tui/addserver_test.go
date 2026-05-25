@@ -1,12 +1,17 @@
 package tui
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"golang.org/x/crypto/ssh"
+
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 )
 
 // withPassthroughKeyCopy swaps keyCopyFn for a no-op passthrough
@@ -16,7 +21,7 @@ import (
 func withPassthroughKeyCopy(t *testing.T) {
 	t.Helper()
 	prev := keyCopyFn
-	keyCopyFn = func(src, host string) (string, error) { return src, nil }
+	keyCopyFn = func(src, host, displayName string) (string, error) { return src, nil }
 	t.Cleanup(func() { keyCopyFn = prev })
 }
 
@@ -31,7 +36,7 @@ func withRecordingKeyCopy(t *testing.T) *string {
 	t.Helper()
 	var captured string
 	prev := keyCopyFn
-	keyCopyFn = func(src, host string) (string, error) {
+	keyCopyFn = func(src, host, displayName string) (string, error) {
 		captured = src
 		return src, nil
 	}
@@ -81,7 +86,7 @@ func TestAddServer_TabCyclesFields(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 
-	for want := 1; want < 4; want++ {
+	for want := 1; want < 5; want++ {
 		a, _ = a.Update(keyMsg("tab"))
 		if a.focused != want {
 			t.Errorf("after tab: focused = %d, want %d", a.focused, want)
@@ -221,6 +226,38 @@ func TestAddServer_GeneratePassphraseMismatch(t *testing.T) {
 	}
 }
 
+func TestAddServer_GenerateRejectsInvalidDisplayName(t *testing.T) {
+	a := NewAddServer(nil)
+	a.Show()
+	a.inputs[fieldHost].SetValue("chat.example.com")
+	a.inputs[fieldDisplayName].SetValue("bad+name") // DP9: '+' is banned.
+	a, _ = a.Update(keyMsg("ctrl+g"))
+
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "generated_key")
+	a.genInputs[0].SetValue(keyPath)
+	a.genInputs[1].SetValue("")
+	a.genInputs[2].SetValue("")
+
+	a, _ = a.Update(keyMsg("enter"))
+	if a.mode != addServerGenerate {
+		t.Errorf("invalid display name should stay in generate mode, got %d", a.mode)
+	}
+	if !strings.Contains(a.genErr, "Display name") {
+		t.Errorf("genErr should mention Display name, got %q", a.genErr)
+	}
+	if _, err := os.Stat(keyPath); err == nil {
+		t.Fatal("invalid display name must not write generated private key")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat generated key: %v", err)
+	}
+	if _, err := os.Stat(keyPath + ".pub"); err == nil {
+		t.Fatal("invalid display name must not write generated public key")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat generated pubkey: %v", err)
+	}
+}
+
 func TestAddServer_GenerateExistingFileRejected(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
@@ -258,11 +295,11 @@ func TestAddServer_GenerateSuccessReturnsToForm(t *testing.T) {
 	if a.mode != addServerForm {
 		t.Errorf("after successful generation, mode = %d, want addServerForm", a.mode)
 	}
-	if a.focused != 3 {
-		t.Errorf("focus should be on key path field (3), got %d", a.focused)
+	if a.focused != fieldKey {
+		t.Errorf("focus should be on key path field (key field), got %d", a.focused)
 	}
-	if a.inputs[3].Value() != newPath {
-		t.Errorf("key path input = %q, want %q", a.inputs[3].Value(), newPath)
+	if a.inputs[fieldKey].Value() != newPath {
+		t.Errorf("key path input = %q, want %q", a.inputs[fieldKey].Value(), newPath)
 	}
 	if a.genNotice == "" {
 		t.Error("success notice should be set")
@@ -297,10 +334,11 @@ func TestAddServer_SubmitValidReturnsMsg(t *testing.T) {
 	gotSrc := withRecordingKeyCopy(t)
 	a := NewAddServer(nil)
 	a.Show()
-	a.inputs[0].SetValue("Test Server")
-	a.inputs[1].SetValue("chat.example.com")
+	a.inputs[fieldName].SetValue("Test Server")
+	a.inputs[fieldHost].SetValue("chat.example.com")
 	// port default "2222" already set
-	a.inputs[3].SetValue("~/.ssh/id_ed25519")
+	a.inputs[fieldDisplayName].SetValue("Alice")
+	a.inputs[fieldKey].SetValue("~/.ssh/id_ed25519")
 
 	a, cmd := a.Update(keyMsg("enter"))
 	if cmd == nil {
@@ -320,6 +358,11 @@ func TestAddServer_SubmitValidReturnsMsg(t *testing.T) {
 	if addMsg.Port != 2222 {
 		t.Errorf("Port = %d, want 2222", addMsg.Port)
 	}
+	// The requested display name (distinct from the server label Name) flows
+	// through to the message so it can be persisted + sent as the SSH username.
+	if addMsg.RequestedDisplayName != "Alice" {
+		t.Errorf("RequestedDisplayName = %q, want Alice", addMsg.RequestedDisplayName)
+	}
 	// Phase 3e dropped AddServerMsg.Key; assert via the recording
 	// keyCopyFn spy that the user-typed source path reached the
 	// copy step. Caller-side behavior (config.AddServer writes
@@ -338,7 +381,7 @@ func TestAddServer_SubmitDefaultsName(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
-	a.inputs[3].SetValue("~/.ssh/id_ed25519")
+	a.inputs[fieldKey].SetValue("~/.ssh/id_ed25519")
 
 	_, cmd := a.Update(keyMsg("enter"))
 	if cmd == nil {
@@ -369,6 +412,155 @@ func TestAddServer_SubmitDefaultsKey(t *testing.T) {
 	}
 }
 
+func TestPubLineWithComment(t *testing.T) {
+	// Build a real authorized-keys line carrying an existing comment.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	base := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	withComment := []byte(base + " old-comment\n")
+
+	// Empty display name → input returned unchanged (existing comment kept).
+	out, err := pubLineWithComment(withComment, "")
+	if err != nil {
+		t.Fatalf("empty name: %v", err)
+	}
+	if string(out) != string(withComment) {
+		t.Errorf("empty name should return input unchanged, got %q", string(out))
+	}
+
+	// Non-empty display name → comment replaced with the name.
+	out, err = pubLineWithComment(withComment, "Alice Smith")
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(string(out)), " Alice Smith") {
+		t.Errorf("comment not rewritten to the display name: %q", string(out))
+	}
+	if strings.Contains(string(out), "old-comment") {
+		t.Errorf("old comment should be gone: %q", string(out))
+	}
+
+	// Invalid pub + non-empty name → error (never write garbage to the .pub).
+	if _, err := pubLineWithComment([]byte("not a valid key"), "Alice"); err == nil {
+		t.Error("invalid pub data with a display name should error")
+	}
+	// Invalid pub + empty name → returned as-is (no parse attempted).
+	if _, err := pubLineWithComment([]byte("not a valid key"), ""); err != nil {
+		t.Errorf("empty name should not parse/err on bad input: %v", err)
+	}
+}
+
+// TestCopyKeyForServer_RewritesManagedPubComment exercises the REAL copy
+// (not the keyCopyFn passthrough the submit tests use): the managed
+// destination .pub comment is rewritten to the requested display name, the
+// user's original source .pub is left untouched, and the source-equals-
+// destination case still rewrites the managed .pub. DefaultConfigDir keys off
+// $HOME, so t.Setenv redirects the managed tree into a temp dir.
+func TestCopyKeyForServer_RewritesManagedPubComment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Source key pair outside the managed tree, carrying an existing comment.
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "id_ed25519")
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	signer, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	srcPubLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey()))) + " old-comment\n"
+	if err := os.WriteFile(src, []byte("PRIVATE KEY BYTES\n"), 0o600); err != nil {
+		t.Fatalf("write src priv: %v", err)
+	}
+	if err := os.WriteFile(src+".pub", []byte(srcPubLine), 0o644); err != nil {
+		t.Fatalf("write src pub: %v", err)
+	}
+
+	const host = "copytest.example.com"
+	dst, err := copyKeyForServer(src, host, "Alice Smith")
+	if err != nil {
+		t.Fatalf("copyKeyForServer: %v", err)
+	}
+
+	// Destination is the canonical per-server managed location.
+	if want := config.ServerKeyPath(config.DefaultConfigDir(), host); dst != want {
+		t.Errorf("dst = %q, want managed path %q", dst, want)
+	}
+
+	// Managed .pub comment rewritten to the display name; the source comment
+	// is gone from the managed copy.
+	managedPub, err := os.ReadFile(dst + ".pub")
+	if err != nil {
+		t.Fatalf("read managed .pub: %v", err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(string(managedPub)), " Alice Smith") {
+		t.Errorf("managed .pub comment = %q, want suffix ' Alice Smith'", string(managedPub))
+	}
+	if strings.Contains(string(managedPub), "old-comment") {
+		t.Errorf("managed .pub should not keep the source comment: %q", string(managedPub))
+	}
+
+	// The user's ORIGINAL source .pub must be untouched.
+	srcPubAfter, err := os.ReadFile(src + ".pub")
+	if err != nil {
+		t.Fatalf("read src .pub after copy: %v", err)
+	}
+	if string(srcPubAfter) != srcPubLine {
+		t.Errorf("source .pub was mutated: %q, want %q", string(srcPubAfter), srcPubLine)
+	}
+
+	// Source-equals-destination: re-copy from the managed path itself with a
+	// new name → the managed .pub is rewritten in place.
+	if _, err := copyKeyForServer(dst, host, "Bob"); err != nil {
+		t.Fatalf("copyKeyForServer (src==dst): %v", err)
+	}
+	managedPub2, err := os.ReadFile(dst + ".pub")
+	if err != nil {
+		t.Fatalf("re-read managed .pub: %v", err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(string(managedPub2)), " Bob") {
+		t.Errorf("src==dst rewrite: managed .pub = %q, want suffix ' Bob'", string(managedPub2))
+	}
+}
+
+func TestAddServer_SubmitRejectsInvalidDisplayName(t *testing.T) {
+	called := false
+	prev := keyCopyFn
+	keyCopyFn = func(src, host, displayName string) (string, error) { called = true; return src, nil }
+	t.Cleanup(func() { keyCopyFn = prev })
+
+	a := NewAddServer(nil)
+	a.Show()
+	a.inputs[fieldHost].SetValue("chat.example.com")
+	a.inputs[fieldDisplayName].SetValue("bad+name") // DP9: '+' is banned
+	a.inputs[fieldKey].SetValue("~/.ssh/id_ed25519")
+
+	a, cmd := a.Update(keyMsg("enter"))
+	if cmd != nil {
+		t.Error("invalid display name should block submit (no AddServerMsg emitted)")
+	}
+	if !a.IsVisible() {
+		t.Error("dialog should stay visible on invalid display name")
+	}
+	if !strings.Contains(a.formErr, "Display name") {
+		t.Errorf("formErr should mention Display name, got %q", a.formErr)
+	}
+	// Validation must run BEFORE the key copy, so a bad name never touches
+	// the filesystem.
+	if called {
+		t.Error("keyCopyFn must NOT run when the display name is rejected")
+	}
+}
+
 func TestAddServer_KeyListStartY_NoNotice(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
@@ -376,10 +568,11 @@ func TestAddServer_KeyListStartY_NoNotice(t *testing.T) {
 	a.scannedKeys = nil
 	a.genNotice = ""
 
-	// With no keys, keyListStartY returns the base (form takes rows 0..11)
+	// With no keys, keyListStartY returns the base (form takes rows 0..13:
+	// header rows 0..3 + 5 fields * 2)
 	y := a.keyListStartY()
-	if y != 12 {
-		t.Errorf("keyListStartY with no keys = %d, want 12", y)
+	if y != 14 {
+		t.Errorf("keyListStartY with no keys = %d, want 14", y)
 	}
 }
 
@@ -389,10 +582,10 @@ func TestAddServer_KeyListStartY_WithKeys(t *testing.T) {
 	a.scannedKeys = []keyEntry{{Path: "/tmp/k1", Type: "ed25519"}}
 	a.genNotice = ""
 
-	// With keys, header adds 2 lines (label + blank) → first key at 14
+	// With keys, header adds 2 lines (label + blank) → first key at 16
 	y := a.keyListStartY()
-	if y != 14 {
-		t.Errorf("keyListStartY with 1 key, no notice = %d, want 14", y)
+	if y != 16 {
+		t.Errorf("keyListStartY with 1 key, no notice = %d, want 16", y)
 	}
 }
 
@@ -402,10 +595,10 @@ func TestAddServer_KeyListStartY_WithNoticeAndKeys(t *testing.T) {
 	a.scannedKeys = []keyEntry{{Path: "/tmp/k1", Type: "ed25519"}}
 	a.genNotice = "✓ Key generated — back it up"
 
-	// Notice adds 2 lines (line + blank) + keys header 2 lines → 12 + 2 + 2 = 16
+	// Notice adds 2 lines (line + blank) + keys header 2 lines → 14 + 2 + 2 = 18
 	y := a.keyListStartY()
-	if y != 16 {
-		t.Errorf("keyListStartY with notice + keys = %d, want 16", y)
+	if y != 18 {
+		t.Errorf("keyListStartY with notice + keys = %d, want 18", y)
 	}
 }
 
@@ -445,11 +638,11 @@ func TestAddServer_HandleMouse_ClickOnKeyEntry(t *testing.T) {
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionRelease,
 	})
-	if a.inputs[3].Value() != "/home/me/.ssh/work_key" {
-		t.Errorf("clicking second key should fill path input, got: %q", a.inputs[3].Value())
+	if a.inputs[fieldKey].Value() != "/home/me/.ssh/work_key" {
+		t.Errorf("clicking second key should fill path input, got: %q", a.inputs[fieldKey].Value())
 	}
-	if a.focused != 3 {
-		t.Errorf("focus should be on key path input after click (3), got %d", a.focused)
+	if a.focused != fieldKey {
+		t.Errorf("focus should be on key path input after click (key field), got %d", a.focused)
 	}
 }
 
@@ -587,9 +780,9 @@ func setupAddServerWithScannedKeys(t *testing.T) AddServerModel {
 		{Path: "/home/me/.ssh/id_ed25519", Type: "ed25519"},
 		{Path: "/home/me/.ssh/id_ed25519_alt", Type: "ed25519"},
 	}
-	// Position focus on field 3 (the key-path input) — the natural
+	// Position focus on the key field (the key-path input) — the natural
 	// jumping-off point for entering the list.
-	a.focused = 3
+	a.focused = fieldKey
 	return a
 }
 
@@ -598,7 +791,7 @@ func TestAddServer_DownFromKeyPathEntersKeyList(t *testing.T) {
 	a, _ = a.Update(keyMsg("down"))
 
 	if a.focused != len(a.inputs) {
-		t.Errorf("Down from field 3 should enter list (focused=%d), got %d", len(a.inputs), a.focused)
+		t.Errorf("Down from the key field should enter list (focused=%d), got %d", len(a.inputs), a.focused)
 	}
 	if a.keyCursor != 0 {
 		t.Errorf("entering list should set keyCursor=0, got %d", a.keyCursor)
@@ -609,12 +802,12 @@ func TestAddServer_DownFromKeyPathNoListWrapsToFirstField(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.scannedKeys = nil // explicit: no keys to enter
-	a.focused = 3
+	a.focused = fieldKey
 
 	a, _ = a.Update(keyMsg("down"))
 
 	if a.focused != 0 {
-		t.Errorf("Down from field 3 with empty list should wrap to field 0, got %d", a.focused)
+		t.Errorf("Down from the key field with empty list should wrap to field 0, got %d", a.focused)
 	}
 }
 
@@ -662,10 +855,10 @@ func TestAddServer_UpInKeyListDecrementsCursor(t *testing.T) {
 func TestAddServer_UpAtTopOfKeyListReturnsToKeyPath(t *testing.T) {
 	a := setupAddServerWithScannedKeys(t)
 	a, _ = a.Update(keyMsg("down")) // enter list at cursor=0
-	a, _ = a.Update(keyMsg("up"))   // exit back to field 3
+	a, _ = a.Update(keyMsg("up"))   // exit back to the key field
 
-	if a.focused != 3 {
-		t.Errorf("Up at top of list should return to field 3, got %d", a.focused)
+	if a.focused != fieldKey {
+		t.Errorf("Up at top of list should return to the key field, got %d", a.focused)
 	}
 }
 
@@ -676,12 +869,12 @@ func TestAddServer_EnterInKeyListSelectsKey(t *testing.T) {
 
 	a, _ = a.Update(keyMsg("enter"))
 
-	if a.focused != 3 {
-		t.Errorf("Enter in list should return focus to field 3, got %d", a.focused)
+	if a.focused != fieldKey {
+		t.Errorf("Enter in list should return focus to the key field, got %d", a.focused)
 	}
 	want := "/home/me/.ssh/id_ed25519_alt"
-	if a.inputs[3].Value() != want {
-		t.Errorf("Enter on cursor=1 should fill inputs[3] with %q, got %q", want, a.inputs[3].Value())
+	if a.inputs[fieldKey].Value() != want {
+		t.Errorf("Enter on cursor=1 should fill inputs[fieldKey] with %q, got %q", want, a.inputs[fieldKey].Value())
 	}
 }
 
@@ -700,27 +893,27 @@ func TestAddServer_ShiftTabFromKeyListReturnsToKeyPath(t *testing.T) {
 	a, _ = a.Update(keyMsg("down"))      // enter list
 	a, _ = a.Update(keyMsg("shift+tab")) // exit upward
 
-	if a.focused != 3 {
-		t.Errorf("Shift+Tab from list should return to field 3, got %d", a.focused)
+	if a.focused != fieldKey {
+		t.Errorf("Shift+Tab from list should return to the key field, got %d", a.focused)
 	}
 }
 
 func TestAddServer_TabCyclesFieldsSkipsKeyList(t *testing.T) {
-	// Tab cycles 0..3 even when the list has entries — the list is
+	// Tab cycles 0..4 even when the list has entries — the list is
 	// only reachable via Down.
 	a := setupAddServerWithScannedKeys(t)
 	a.focused = 0
 	a.inputs[0].Focus()
-	for want := 1; want <= 3; want++ {
+	for want := 1; want <= 4; want++ {
 		a, _ = a.Update(keyMsg("tab"))
 		if a.focused != want {
 			t.Errorf("Tab cycle: focused=%d, want %d", a.focused, want)
 		}
 	}
-	// One more Tab from field 3: should wrap to field 0, not enter list.
+	// One more Tab from the key field should wrap to field 0, not enter list.
 	a, _ = a.Update(keyMsg("tab"))
 	if a.focused != 0 {
-		t.Errorf("Tab from field 3 should wrap to 0 (not enter list), got %d", a.focused)
+		t.Errorf("Tab from key field should wrap to 0 (not enter list), got %d", a.focused)
 	}
 }
 
@@ -730,12 +923,12 @@ func TestAddServer_FormKeystrokeIgnoredInKeyList(t *testing.T) {
 	// editable target and the fall-through guard skips Update().
 	a := setupAddServerWithScannedKeys(t)
 	a, _ = a.Update(keyMsg("down")) // enter list
-	before := a.inputs[3].Value()
+	before := a.inputs[fieldKey].Value()
 
 	a, _ = a.Update(keyMsg("x"))
 
-	if a.inputs[3].Value() != before {
-		t.Errorf("typing in list should not modify inputs[3]: before=%q after=%q", before, a.inputs[3].Value())
+	if a.inputs[fieldKey].Value() != before {
+		t.Errorf("typing in list should not modify inputs[fieldKey]: before=%q after=%q", before, a.inputs[fieldKey].Value())
 	}
 	if a.focused != len(a.inputs) {
 		t.Errorf("typing in list should not change focus, got %d", a.focused)

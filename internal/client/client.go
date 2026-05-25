@@ -32,6 +32,13 @@ type Config struct {
 	DeviceID string
 	DataDir  string // per-server data directory (e.g., ~/.sshkey-term/chat.example.com/)
 
+	// User is the SSH username sent on dial (ssh.ClientConfig.User). It carries
+	// the requested display-name hint for an unapproved key (server records it
+	// as pending_keys.requested_username). Advisory and pre-approval only —
+	// never an auth/identity input. Empty means no hint. Sourced from the
+	// active ServerConfig.RequestedDisplayName.
+	User string
+
 	// Callbacks
 	OnMessage    func(msgType string, raw json.RawMessage)
 	OnError      func(err error)
@@ -208,6 +215,20 @@ func (c *Client) hydrateLocalCache(st *store.Store) {
 	}
 }
 
+// buildSSHClientConfig assembles the ssh.ClientConfig used by BOTH the initial
+// Connect and the reconnect path (doConnect), so User, auth method, host-key
+// callback, and timeout cannot drift between the two dial sites. User is the
+// requested display-name hint (c.cfg.User) — advisory and pre-approval only;
+// an empty value sends no SSH username, which the server treats as "no hint".
+func (c *Client) buildSSHClientConfig(signer ssh.Signer) *ssh.ClientConfig {
+	return &ssh.ClientConfig{
+		User:            c.cfg.User,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: hostKeyCallback(c.cfg.DataDir, c.cfg.Host),
+		Timeout:         10 * time.Second,
+	}
+}
+
 // Connect establishes the SSH connection and performs the protocol handshake.
 func (c *Client) Connect() error {
 	// Parse SSH key (with passphrase support)
@@ -225,11 +246,7 @@ func (c *Client) Connect() error {
 
 	// SSH dial
 	addr := net.JoinHostPort(c.cfg.Host, fmt.Sprintf("%d", c.cfg.Port))
-	sshCfg := &ssh.ClientConfig{
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: hostKeyCallback(c.cfg.DataDir, c.cfg.Host),
-		Timeout:         10 * time.Second,
-	}
+	sshCfg := c.buildSSHClientConfig(signer)
 
 	c.logger.Info("connecting", "addr", addr)
 	conn, err := ssh.Dial("tcp", addr, sshCfg)

@@ -114,10 +114,11 @@ func (c ConnectFailedModel) View(width int) string {
 		b.WriteString(searchHeaderStyle.Render(" Pending Approval"))
 		b.WriteString("\n\n")
 		b.WriteString("  Your key isn't authorized on this server yet.\n")
-		b.WriteString("  Your fingerprint has been added to the server's\n")
-		b.WriteString("  pending-keys queue. Send your public key (below)\n")
-		b.WriteString("  to the server operator and ask them to approve it.\n\n")
-		b.WriteString("  Once approved, press [r] to retry.\n\n")
+		b.WriteString("  It's been queued for approval — the operator can\n")
+		b.WriteString("  see it (and your requested name, if you set one)\n")
+		b.WriteString("  in the server's pending list.\n\n")
+		b.WriteString("  If the operator asks for it, copy your public key\n")
+		b.WriteString("  below. Once approved, press [r] to retry.\n\n")
 	}
 
 	// Fingerprint + public key + [c] are only meaningful when the

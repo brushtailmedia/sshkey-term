@@ -495,6 +495,10 @@ func (a *App) switchServerByIndex(idx int) tea.Cmd {
 	// or Add Server flow before this code runs.
 	a.cfg.KeyPath = config.ServerKeyPath(a.configDir, srv.Host)
 	a.cfg.DataDir = config.ServerDataDirForHost(a.configDir, srv.Host)
+	// Carry the per-server requested display-name hint as the SSH username
+	// so a runtime switch (incl. switching to a freshly Added server) dials
+	// with the right pre-approval name. Empty = no hint.
+	a.cfg.User = srv.RequestedDisplayName
 
 	// Clear UI state.
 	a.messages.SetContext("", "", "")
@@ -2630,9 +2634,10 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case AddServerMsg:
 		if a.appConfig != nil {
 			srv := config.ServerConfig{
-				Name: msg.Name,
-				Host: msg.Host,
-				Port: msg.Port,
+				Name:                 msg.Name,
+				Host:                 msg.Host,
+				Port:                 msg.Port,
+				RequestedDisplayName: msg.RequestedDisplayName,
 			}
 			// AddServer validates srv.Host (Phase 2 addition); the
 			// error path surfaces a clear status-bar message
@@ -7756,7 +7761,7 @@ func (a App) viewBody() string {
 		return a.emojiPicker.View()
 	}
 	if a.pendingPanel.IsVisible() {
-		return a.pendingPanel.View(a.width)
+		return a.pendingPanel.View(a.width, a.height)
 	}
 	if a.infoPanel.IsVisible() {
 		// Finding 1: refresh live rows for render. viewBody is a value
