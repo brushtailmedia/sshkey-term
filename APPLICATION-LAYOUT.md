@@ -1022,7 +1022,7 @@ In the sidebar, mentions get a stronger indicator than unread counts:
 └────────────────────────────────────┘
 ```
 
-Min 2, max 32 characters. Error shown in orange if invalid.
+Min 2, max 32 UTF-8 bytes after trimming. Error shown in orange if invalid.
 
 ### Step 2 — Select SSH Key
 
