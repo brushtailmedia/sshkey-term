@@ -11,9 +11,9 @@ import (
 // Conformance-vector loader test (displayname-validator-conformance.md, Option
 // C). This file's testdata/displayname_vectors.json is a VENDORED, byte-
 // identical copy of the canonical set owned by sshkey-chat
-// (internal/config/testdata/displayname_vectors.json). A repo-root drift check
-// (../../displayname_vectors_drift_test.go) guards that the copy stays in sync
-// with the sibling server checkout when present. The contract: assert
+// (internal/config/testdata/displayname_vectors.json). An in-package drift check
+// (displayname_vectors_drift_test.go, same directory) guards that the copy stays
+// in sync with the sibling server checkout when present. The contract: assert
 // accept/reject and the trimmed return for valid cases — never error text.
 // Length is bytes-after-trim, not rune count.
 

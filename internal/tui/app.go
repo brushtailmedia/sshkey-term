@@ -80,6 +80,17 @@ type App struct {
 	verify        VerifyModel
 	keyWarning    KeyWarningModel
 	quitConfirm   QuitConfirmModel
+
+	// renameInFlight + renameAttempted implement Option B confirm-then-apply
+	// for the Settings display-name rename (rename-collision-ux.md). On submit
+	// we set the marker and show "Saving…" instead of optimistic success; the
+	// self-`profile` broadcast whose DisplayName matches renameAttempted is the
+	// durable confirmation, and any empty-correlation server error while the
+	// marker is set surfaces the failure in-panel. No previous-name stash —
+	// the confirmed value is always DisplayName(self).
+	renameInFlight  bool
+	renameAttempted string
+
 	// lastCtrlQAt (Phase 17c Step 5 polish) stamps the time of the
 	// last Ctrl+Q keypress. A second Ctrl+Q within doubleQuitWindow
 	// bypasses the confirm dialog — escape hatch for users who
@@ -455,6 +466,7 @@ func (a *App) openSettingsPanel() {
 		displayName = a.client.DisplayName(a.client.UserID())
 	}
 	a.settings.Show(a.appConfig, a.configDir, displayName, a.serverIdx)
+	a.settings.SetDisplayNameRenamePending(a.renameInFlight)
 }
 
 func (a *App) switchServerByIndex(idx int) tea.Cmd {
@@ -506,6 +518,14 @@ func (a *App) switchServerByIndex(idx int) tea.Cmd {
 	a.sidebar.SetRooms(nil)
 	a.sidebar.SetGroups(nil)
 	a.pinnedBar = PinnedBarModel{}
+	// Abandon any in-flight display-name rename: it targeted the prior server,
+	// and its confirmation/error will never arrive on the new connection. Clear
+	// the marker so it can't be falsely confirmed or leave a stuck "Saving…".
+	a.renameInFlight = false
+	a.renameAttempted = ""
+	if a.settings.IsVisible() {
+		a.settings.SetDisplayNameRenamePending(false)
+	}
 	// Dismiss the connection-failed overlay if it was up: a switch
 	// initiated FROM that modal (the escape hatch — see
 	// fix-server-switching.md) must not leave the old modal painted
@@ -2088,21 +2108,26 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ProfileUpdateMsg:
 		if a.client != nil {
+			// Option B confirm-then-apply (rename-collision-ux.md): do NOT
+			// optimistically show success. The displayed name stays the
+			// server-confirmed value (DisplayName(self)); we set an in-flight
+			// marker, send set_profile, and show a tentative "Saving…" notice.
+			// The self-`profile` broadcast confirms (case "profile"), and any
+			// empty-correlation server error while the marker is set surfaces
+			// the failure in the panel. Ignore a re-submit while one is already
+			// in flight so we never send a second set_profile for the same edit.
+			if a.renameInFlight {
+				return a, nil
+			}
 			a.client.Enc().Encode(protocol.SetProfile{
 				Type:        "set_profile",
 				DisplayName: msg.DisplayName,
 			})
-			// Optimistically update the settings panel with the new
-			// name so the user sees their edit reflected immediately.
-			// The server's profile broadcast (success) or error
-			// response (username_taken) updates a.client's profile
-			// cache asynchronously; on error, the next time settings
-			// is opened it'll show the actual stored value. Settings
-			// covers the status bar so feedback has to live in the
-			// panel itself.
+			a.renameInFlight = true
+			a.renameAttempted = msg.DisplayName
 			if a.settings.IsVisible() {
-				a.settings.Refresh(msg.DisplayName)
-				a.settings.SetNotice("Display name updated to " + msg.DisplayName)
+				a.settings.SetDisplayNameRenamePending(true)
+				a.settings.SetNotice("Saving \"" + msg.DisplayName + "\"…")
 			}
 		}
 		return a, nil
@@ -4758,6 +4783,7 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			displayName = a.client.DisplayName(a.client.UserID())
 		}
 		a.settings.Show(a.appConfig, a.configDir, displayName, a.serverIdx)
+		a.settings.SetDisplayNameRenamePending(a.renameInFlight)
 	case "/setstatus":
 		// Locked-set status — the only valid arguments are the
 		// constants in sidebar.go (available / away / busy). Bare
@@ -6640,9 +6666,28 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		// Profiles for retired users include Retired=true — mirror that into
 		// the message renderer so historical sender names get [retired] marker.
 		var p protocol.Profile
-		if err := json.Unmarshal(msg.Raw, &p); err == nil && p.Retired {
-			a.messages.MarkRetired(p.User)
-			a.sidebar.MarkRetired(p.User)
+		if err := json.Unmarshal(msg.Raw, &p); err == nil {
+			if p.Retired {
+				a.messages.MarkRetired(p.User)
+				a.sidebar.MarkRetired(p.User)
+			}
+			// Option B rename confirmation (rename-collision-ux.md): the self-
+			// `profile` broadcast is the durable success signal for a Settings
+			// display-name rename. Confirm only when our marker is set, it's our
+			// OWN profile, AND the name matches what we attempted — a profile
+			// event for a different value (e.g. from a second device) must not
+			// falsely confirm this attempt. handleInternal has already updated
+			// the cache before this runs, so DisplayName(self) is the new value.
+			if a.renameInFlight && a.client != nil &&
+				p.User == a.client.UserID() && p.DisplayName == a.renameAttempted {
+				a.renameInFlight = false
+				a.renameAttempted = ""
+				if a.settings.IsVisible() {
+					a.settings.SetDisplayNameRenamePending(false)
+					a.settings.Refresh(p.DisplayName)
+					a.settings.SetNotice("Display name updated to " + p.DisplayName)
+				}
+			}
 		}
 	case "admin_notify":
 		// Update status bar pending indicator for admins
@@ -7411,6 +7456,33 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		// m.Message is equivalent. Left as a hook for future
 		// category-specific UX (e.g., soft toast vs hard banner).
 		_ = category
+
+		// Option B rename failure (rename-collision-ux.md): set_profile carries
+		// no corr_id today, so only empty-correlation errors can be attributed
+		// to a pending rename. Correlated errors belong to their originating
+		// send-queue entry above and must not clear rename state. Expected
+		// set_profile codes: username_taken / invalid_profile defense-in-depth,
+		// plus rate_limited pre-validation and internal_error from the server
+		// write-hardening. The displayed name was never optimistically changed,
+		// so there is nothing to revert.
+		if a.renameInFlight && m.CorrID == "" {
+			attempted := a.renameAttempted
+			a.renameInFlight = false
+			a.renameAttempted = ""
+			if a.settings.IsVisible() {
+				// The status bar is hidden behind Settings — surface the failure
+				// in-panel and re-open the edit with the rejected name pre-filled
+				// so the user tweaks rather than retypes. Suppress the redundant
+				// (invisible) status-bar copy.
+				a.settings.SetDisplayNameRenamePending(false)
+				a.settings.SetErrorNotice("Name change failed: " + m.Message)
+				a.settings.StartEditingDisplayName(attempted)
+				return nil
+			}
+			// Settings already closed — fall back to the status-bar error.
+			a.statusBar.SetError("Name change failed: " + m.Message)
+			return nil
+		}
 
 		a.statusBar.SetError(m.Message)
 		// If this is a username_taken error and settings is open, show it

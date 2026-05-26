@@ -1,4 +1,4 @@
-package main
+package tui
 
 import (
 	"bytes"
@@ -6,26 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 )
-
-// findTermRepoRoot walks up from the test's working directory to the directory
-// containing go.mod (the sshkey-term checkout root).
-func findTermRepoRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatalf("walked to filesystem root without finding go.mod")
-		}
-		dir = parent
-	}
-}
 
 // TestDisplayNameVectorsVendorInSync is the sibling-aware drift check for the
 // vendored display-name conformance vectors (displayname-validator-
@@ -36,12 +16,14 @@ func findTermRepoRoot(t *testing.T) string {
 // that builds term alone), it SKIPS cleanly so the term repo stays
 // independently buildable.
 //
-// It deliberately lives at the repo root, not in internal/tui: no ordinary
-// package unit test should hard-depend on a sibling-checkout path. The paths are
-// derived from the checkout root (go.mod), and the sibling canonical is found
-// relative to it.
+// It lives in package tui — alongside the loader test
+// (displayname_vectors_test.go) whose testdata it backstops — following the same
+// in-package guard-test convention as request_room_members_guard_test.go and
+// internal/config/path_drift_test.go. The repo root is discovered via the shared
+// repoRootForGuardTest go.mod walk, so the sibling canonical resolves relative to
+// the checkout root regardless of the package's test working directory.
 func TestDisplayNameVectorsVendorInSync(t *testing.T) {
-	root := findTermRepoRoot(t)
+	root := repoRootForGuardTest(t)
 
 	vendored := filepath.Join(root, "internal", "tui", "testdata", "displayname_vectors.json")
 	canonical := filepath.Join(root, "..", "sshkey-chat", "internal", "config", "testdata", "displayname_vectors.json")

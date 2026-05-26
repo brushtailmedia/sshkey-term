@@ -38,6 +38,19 @@ type SettingsModel struct {
 	// Set via SetNotice; cleared by Hide and overwritten by the
 	// next SetNotice call.
 	notice string
+
+	// noticeIsError selects the notice render style: false → success
+	// (checkStyle), true → failure (errorStyle). Set together with notice via
+	// SetNotice (success/info) or SetErrorNotice (failure). The rename-collision
+	// fix needs an in-panel FAILURE notice because the status bar is hidden
+	// behind the Settings overlay.
+	noticeIsError bool
+
+	// displayNameRenamePending disables the display-name row while the App is
+	// waiting for the server's self-profile confirmation. The App still owns
+	// the authoritative in-flight marker; this mirror keeps Settings from
+	// inviting an edit that App would have to drop.
+	displayNameRenamePending bool
 }
 
 type settingsItem struct {
@@ -81,6 +94,8 @@ func (s *SettingsModel) Show(cfg *config.Config, configDir string, displayName s
 	s.cursor = 0
 	s.confirm = nil
 	s.notice = ""
+	s.noticeIsError = false
+	s.displayNameRenamePending = false
 	s.displayName = displayName
 	s.currentServer = currentServer
 	s.buildItems(displayName, currentServer)
@@ -116,6 +131,38 @@ func (s *SettingsModel) Refresh(displayName string) {
 // clears the current notice without setting a new one.
 func (s *SettingsModel) SetNotice(message string) {
 	s.notice = message
+	s.noticeIsError = false
+}
+
+// SetErrorNotice puts a FAILURE-styled transient message in the same footer
+// slot as SetNotice. Used when an action the user is watching (e.g. a
+// display-name rename) is rejected by the server — the status bar that would
+// normally carry the error is hidden behind the Settings overlay, so the
+// failure has to render in-panel, and as an error (not the success/check style).
+func (s *SettingsModel) SetErrorNotice(message string) {
+	s.notice = message
+	s.noticeIsError = true
+}
+
+// SetDisplayNameRenamePending mirrors the App's rename-in-flight state so the
+// display-name row stays inert while the server confirmation/error is pending.
+func (s *SettingsModel) SetDisplayNameRenamePending(pending bool) {
+	s.displayNameRenamePending = pending
+}
+
+// StartEditingDisplayName re-enters inline edit mode for the display-name row
+// with prefill pre-loaded, callable by the App (e.g. to let the user tweak a
+// rejected rename without retyping). Mirrors the internal edit-entry path so
+// the next Enter re-emits ProfileUpdateMsg.
+func (s *SettingsModel) StartEditingDisplayName(prefill string) {
+	s.displayNameRenamePending = false
+	s.editing = true
+	s.editAction = "edit_name"
+	s.editInput = textinput.New()
+	s.editInput.SetValue(prefill)
+	s.editInput.Focus()
+	s.editInput.Prompt = ""
+	s.editInput.CharLimit = 100
 }
 
 func (s *SettingsModel) buildItems(displayName string, currentServer int) {
@@ -199,6 +246,8 @@ func (s *SettingsModel) Hide() {
 	s.visible = false
 	s.confirm = nil
 	s.notice = ""
+	s.noticeIsError = false
+	s.displayNameRenamePending = false
 }
 
 func (s *SettingsModel) IsVisible() bool {
@@ -286,6 +335,9 @@ func (s SettingsModel) Update(msg tea.KeyMsg) (SettingsModel, tea.Cmd) {
 			item := s.items[s.cursor]
 			switch {
 			case item.action == "edit_name":
+				if s.displayNameRenamePending {
+					return s, nil
+				}
 				s.editing = true
 				s.editAction = item.action
 				s.editInput = textinput.New()
@@ -432,7 +484,11 @@ func (s SettingsModel) View(width, height int) string {
 
 	b.WriteString("\n\n")
 	if s.notice != "" {
-		b.WriteString("  " + checkStyle.Render(s.notice) + "\n")
+		noticeStyle := checkStyle
+		if s.noticeIsError {
+			noticeStyle = errorStyle
+		}
+		b.WriteString("  " + noticeStyle.Render(s.notice) + "\n")
 	}
 	b.WriteString(helpDescStyle.Render(" ↑/↓=navigate  Enter=select  d=remove server  Esc=close"))
 
