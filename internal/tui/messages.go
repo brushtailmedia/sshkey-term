@@ -662,9 +662,38 @@ func (m *MessagesModel) LatestMessageID() string {
 }
 
 // PrependMessages adds older messages at the top (from history response).
+//
+// Incoming rows are de-duplicated by message ID against what is already loaded
+// (and within the batch itself). The local-short-page fallback prepends local
+// rows and then asks the server with the original cursor (app.go ~2889), so the
+// server's history_result can overlap rows already present; PrependMessages is
+// the only prepend path, so guarding here covers both callers (and any future
+// one). A blind append would render the overlap twice. Empty-ID rows are never
+// de-duplicated (so distinct system rows can't collapse), and the cursor is
+// advanced by the post-dedup count so a partial overlap doesn't drift it off the
+// message it was on.
 func (m *MessagesModel) PrependMessages(msgs []DisplayMessage, hasMore bool) {
+	if len(m.messages) > 0 && len(msgs) > 0 {
+		seen := make(map[string]struct{}, len(m.messages))
+		for _, e := range m.messages {
+			if e.ID != "" {
+				seen[e.ID] = struct{}{}
+			}
+		}
+		deduped := make([]DisplayMessage, 0, len(msgs))
+		for _, nm := range msgs {
+			if nm.ID != "" {
+				if _, dup := seen[nm.ID]; dup {
+					continue
+				}
+				seen[nm.ID] = struct{}{} // also guard within-batch duplicates
+			}
+			deduped = append(deduped, nm)
+		}
+		msgs = deduped
+	}
 	m.messages = append(msgs, m.messages...)
-	m.cursor += len(msgs) // keep cursor on the same message
+	m.cursor += len(msgs) // post-dedup count — keep cursor on the same message
 	m.loadingHistory = false
 	m.hasMore = hasMore
 }
