@@ -78,7 +78,7 @@ func CategoryForCode(code string) ErrorCategory {
 		"device_limit_exceeded",
 		"too_many_members", "username_taken", "invalid_profile",
 		"invalid_upload_id", "invalid_content_hash", "missing_hash",
-		"invalid_context", "invalid_file_id", "invalid_message",
+		"invalid_context", "invalid_cursor", "invalid_file_id", "invalid_message",
 		"edit_not_authorized", "edit_deleted_message",
 		"malformed", "invalid_id", "payload_too_large", "unknown_verb",
 		"daily_quota_exceeded": // out-of-phase 2026-04-19 (per-user upload quota)

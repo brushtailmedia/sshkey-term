@@ -21,7 +21,7 @@ func TestPurgeRoomMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 	s := openTestStore(t)
 
 	// msg_a has two attachments, msg_b has one, msg_c has none.
-	if _, err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "msg_a", Sender: "alice", Body: "two attachments", TS: 1,
 		Room: "room_target",
 		Attachments: []StoredAttachment{
@@ -31,7 +31,7 @@ func TestPurgeRoomMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert msg_a: %v", err)
 	}
-	if _, err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "msg_b", Sender: "bob", Body: "one attachment", TS: 2,
 		Room: "room_target",
 		Attachments: []StoredAttachment{
@@ -40,14 +40,14 @@ func TestPurgeRoomMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert msg_b: %v", err)
 	}
-	if _, err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "msg_c", Sender: "carol", Body: "no attachments", TS: 3,
 		Room: "room_target",
 	}); err != nil {
 		t.Fatalf("insert msg_c: %v", err)
 	}
 	// Control: another room with an attachment that must NOT be returned.
-	if _, err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "msg_other", Sender: "alice", Body: "other room", TS: 4,
 		Room: "room_other",
 		Attachments: []StoredAttachment{
@@ -83,7 +83,7 @@ func TestPurgeRoomMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 func TestPurgeGroupMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 	s := openTestStore(t)
 
-	if _, err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "gmsg_a", Sender: "alice", Body: "x", TS: 1,
 		Group: "group_target",
 		Attachments: []StoredAttachment{
@@ -92,7 +92,7 @@ func TestPurgeGroupMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if _, err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "gmsg_b", Sender: "bob", Body: "y", TS: 2,
 		Group: "group_target",
 		Attachments: []StoredAttachment{
@@ -103,9 +103,9 @@ func TestPurgeGroupMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 	// Control message in a different group.
-	if _, err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "gmsg_other", Sender: "alice", Body: "z", TS: 3,
-		Group: "group_other",
+		Group:       "group_other",
 		Attachments: []StoredAttachment{{FileID: "g_file_other"}},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -131,7 +131,7 @@ func TestPurgeGroupMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 func TestPurgeDMMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 	s := openTestStore(t)
 
-	if _, err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "dmsg_a", Sender: "alice", Body: "x", TS: 1,
 		DM: "dm_target",
 		Attachments: []StoredAttachment{
@@ -140,7 +140,7 @@ func TestPurgeDMMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if _, err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "dmsg_b", Sender: "bob", Body: "y", TS: 2,
 		DM: "dm_target",
 		Attachments: []StoredAttachment{
@@ -150,9 +150,9 @@ func TestPurgeDMMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 	// Control: another DM.
-	if _, err := s.InsertMessage(StoredMessage{
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "dmsg_other", Sender: "alice", Body: "z", TS: 3,
-		DM: "dm_other",
+		DM:          "dm_other",
 		Attachments: []StoredAttachment{{FileID: "d_file_other"}},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -182,13 +182,13 @@ func TestPurge_NoAttachmentsReturnsEmpty(t *testing.T) {
 	s := openTestStore(t)
 
 	// Seed one message per scope, no attachments.
-	if _, err := s.InsertMessage(StoredMessage{ID: "m1", Sender: "a", Body: "x", TS: 1, Room: "room_x"}); err != nil {
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "a", Body: "x", TS: 1, Room: "room_x"}); err != nil {
 		t.Fatalf("insert room: %v", err)
 	}
-	if _, err := s.InsertMessage(StoredMessage{ID: "m2", Sender: "a", Body: "x", TS: 2, Group: "group_x"}); err != nil {
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m2", Sender: "a", Body: "x", TS: 2, Group: "group_x"}); err != nil {
 		t.Fatalf("insert group: %v", err)
 	}
-	if _, err := s.InsertMessage(StoredMessage{ID: "m3", Sender: "a", Body: "x", TS: 3, DM: "dm_x"}); err != nil {
+	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m3", Sender: "a", Body: "x", TS: 3, DM: "dm_x"}); err != nil {
 		t.Fatalf("insert dm: %v", err)
 	}
 

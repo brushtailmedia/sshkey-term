@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
@@ -131,5 +133,28 @@ func TestPinnedBar_CollapsesOnRoomSwitch(t *testing.T) {
 	}
 	if got := a.pinnedBar.PinIDs(); !reflect.DeepEqual(got, []string{"msg_b1"}) {
 		t.Fatalf("room_b pin ids = %v, want [msg_b1]", got)
+	}
+}
+
+func TestPinnedBar_CtrlQPassesThroughToQuitConfirm(t *testing.T) {
+	a := App{}
+	a.pinnedBar = PinnedBarModel{
+		expanded: true,
+		pins: []PinnedMessage{
+			{ID: "msg_1", From: "alice", Body: "hello"},
+		},
+	}
+
+	model, cmd := a.Update(tea.KeyMsg{Type: tea.KeyCtrlQ})
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatalf("first Ctrl+q should open quit confirmation, got cmd %T", cmd)
+	}
+	if !got.quitConfirm.IsVisible() {
+		t.Fatal("Ctrl+q should pass through the expanded pinned bar and show quit confirmation")
+	}
+	if !got.pinnedBar.expanded {
+		t.Fatal("Ctrl+q should not collapse or otherwise handle the pinned bar before quit confirmation")
 	}
 }

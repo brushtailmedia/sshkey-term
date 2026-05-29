@@ -362,6 +362,10 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 	// guaranteed non-nil here (already dereferenced above for bell /
 	// muted / showHelpHint).
 	a.input.SetTypingDisabled(appCfg.Notifications.TypingDisabled)
+	// Seed the message model's connection-generation stamp from the App's
+	// seeded gen (1) so first-run history requests stamp the current gen
+	// rather than the zero value and get stale-dropped against connGen == 1.
+	a.messages.connGen = a.connGen
 	return a
 }
 
@@ -382,7 +386,25 @@ func (a App) Init() tea.Cmd {
 // retry, passphrase retry, explicit refresh reconnect).
 func (a *App) nextConnGen() uint64 {
 	a.connGen++
+	// Keep the message model's stamp in sync so history requests created
+	// after this bump carry the current generation (Outgoing Request Guard).
+	a.messages.connGen = a.connGen
 	return a.connGen
+}
+
+// sendServerHistory generates a fresh corr_id, records it as the active visible
+// history request, and sends the server history request under it. The corr_id
+// lets the inbound history_result guard pin the result to this exact request
+// (Incoming Result Guard, history-state-model.md).
+func (a *App) sendServerHistory(room, group, dm, before string) {
+	corrID := protocol.GenerateCorrID()
+	a.messages.activeHistoryCorrID = corrID
+	if err := a.client.RequestHistoryWithID(corrID, room, group, dm, before, historyPageLimit); err != nil {
+		// Send failed (encode error / closed conn): the queue entry was
+		// dropped internally; clear the visible load so the pane doesn't stay
+		// on "loading history" forever.
+		a.messages.abortHistoryRequest()
+	}
 }
 
 // startConnect bumps the generation and returns a connect command
@@ -490,6 +512,7 @@ func (a *App) switchServerByIndex(idx int) tea.Cmd {
 
 	// Target is valid — disconnect the current server.
 	if a.client != nil {
+		a.abandonActiveHistoryRequest()
 		a.client.Close()
 	}
 
@@ -513,8 +536,7 @@ func (a *App) switchServerByIndex(idx int) tea.Cmd {
 	a.cfg.User = srv.RequestedDisplayName
 
 	// Clear UI state.
-	a.messages.SetContext("", "", "")
-	a.onContextSwitch()
+	a.switchMessageContext("", "", "")
 	a.sidebar.SetRooms(nil)
 	a.sidebar.SetGroups(nil)
 	a.pinnedBar = PinnedBarModel{}
@@ -1160,6 +1182,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// swallowed.
 		if msg.Type == tea.KeyCtrlC {
 			if a.client != nil {
+				a.abandonActiveHistoryRequest()
 				a.client.Close()
 			}
 			return a, tea.Quit
@@ -1272,6 +1295,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.quitConfirm, cmd = a.quitConfirm.Update(msg)
 			if cmd != nil {
 				if a.client != nil {
+					a.abandonActiveHistoryRequest()
 					a.client.Close()
 				}
 			}
@@ -1532,7 +1556,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fell through to the input/messages handlers (since
 		// PinnedBarModel.Update was never called from anywhere) — the
 		// user reported all the listed shortcuts were dead.
-		if a.pinnedBar.expanded {
+		if a.pinnedBar.expanded && msg.String() != "ctrl+q" {
 			var cmd tea.Cmd
 			a.pinnedBar, cmd = a.pinnedBar.Update(msg)
 			return a, cmd
@@ -1564,6 +1588,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !a.lastCtrlQAt.IsZero() && now.Sub(a.lastCtrlQAt) < doubleQuitWindow {
 				a.lastCtrlQAt = time.Time{}
 				if a.client != nil {
+					a.abandonActiveHistoryRequest()
 					a.client.Close()
 				}
 				return a, tea.Quit
@@ -1692,8 +1717,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Check if sidebar selected a new room/conversation
 			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group || a.sidebar.SelectedDM() != a.messages.dm {
-				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), a.sidebar.SelectedDM())
-				a.onContextSwitch()
+				a.switchMessageContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), a.sidebar.SelectedDM())
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
 				a.syncPinnedBarForContext()
@@ -2175,6 +2199,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// quits the app behind the user's back.
 				if msg.ServerIdx == a.serverIdx {
 					if a.client != nil {
+						a.abandonActiveHistoryRequest()
 						a.client.Close()
 					}
 					return a, tea.Quit
@@ -2242,6 +2267,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Don't auto-reconnect — the server will close this session, and
 			// the retired key won't authenticate on any subsequent attempt.
+			a.abandonActiveHistoryRequest()
 			a.client.Close()
 		}
 		return a, tea.Quit
@@ -2599,6 +2625,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// ultimately masks it. See
 			// fix-cross-server-db-isolation.md §"Generation bumps".
 			a.statusBar.SetReconnecting(0, 0)
+			a.abandonActiveHistoryRequest()
 			_ = a.client.Close()
 			a.statusBar.SetRefreshing(refreshingMinVisibleMs * time.Millisecond)
 			return a, tea.Batch(
@@ -2630,6 +2657,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the reconnect loop, which would otherwise keep hitting the same
 		// revoked device_id) and quit.
 		if a.client != nil {
+			a.abandonActiveHistoryRequest()
 			a.client.Close()
 		}
 		return a, tea.Quit
@@ -2652,6 +2680,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case KeyWarningDisconnectMsg:
 		if a.client != nil {
+			a.abandonActiveHistoryRequest()
 			a.client.Close()
 		}
 		return a, tea.Quit
@@ -2775,13 +2804,12 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.search.Hide()
 		a.focus = FocusInput
 		if msg.Room != "" {
-			a.messages.SetContext(msg.Room, "", "")
+			a.switchMessageContext(msg.Room, "", "")
 		} else if msg.Group != "" {
-			a.messages.SetContext("", msg.Group, "")
+			a.switchMessageContext("", msg.Group, "")
 		} else if msg.DM != "" {
-			a.messages.SetContext("", "", msg.DM)
+			a.switchMessageContext("", "", msg.DM)
 		}
-		a.onContextSwitch()
 		a.syncMessagesLeftState()
 		a.messages.LoadFromDB(a.client)
 		a.syncPinnedBarForContext()
@@ -2790,7 +2818,18 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case HistoryRequestMsg:
+		// Outgoing Request Guard first (needs no client): drop a request from a
+		// superseded connection generation or a context the user has since
+		// left. A stale request belongs to a previous context and must not
+		// mutate — or abort — a newer context's Loading/probe state.
+		if msg.Gen != a.connGen || !validHistoryContext(msg.Room, msg.Group, msg.DM) || !a.messages.historyRequestMatches(msg.Room, msg.Group, msg.DM) {
+			return a, nil
+		}
 		if a.client == nil {
+			// Current request but the client is gone (disconnected before
+			// send): clear the visible load so the pane doesn't stay stuck on
+			// "loading history".
+			a.messages.abortHistoryRequest()
 			return a, nil
 		}
 		// Try local DB first — avoids a server round-trip when messages
@@ -2864,9 +2903,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Attachments: attachments,
 					})
 				}
-				hasMore := len(localMsgs) >= 100
-				a.messages.PrependMessages(display, hasMore)
-				a.messages.loadingHistory = false
+				a.messages.PrependMessages(display)
+				full := len(localMsgs) >= historyPageLimit
+				// Full local page: stop here (Loading cleared, hint shown).
+				// Short page: Loading stays set so the server continuation
+				// below is one logical load and a second top-scroll can't
+				// double-fire.
+				a.messages.markLocalHistoryPage(len(localMsgs), historyPageLimit)
 
 				// Load reactions for the prepended messages
 				msgIDs := make([]string, 0, len(localMsgs))
@@ -2883,16 +2926,19 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 
-				// If local DB had fewer than a full page, also hit server
-				// for any remaining that haven't been synced yet
-				if !hasMore {
-					a.client.RequestHistory(msg.Room, msg.Group, msg.DM, msg.BeforeID, 100)
+				// If local DB had fewer than a full page, continue to the
+				// server for older rows not yet synced. Loading stays set
+				// (markLocalHistoryPage left it on for a short page), so this
+				// is one logical load; markServerHistoryResult clears it.
+				if !full {
+					a.sendServerHistory(msg.Room, msg.Group, msg.DM, msg.BeforeID)
 				}
 				return a, nil
 			}
 		}
-		// No local data — fall through to server
-		a.client.RequestHistory(msg.Room, msg.Group, msg.DM, msg.BeforeID, 100)
+		// No local data — fall through to server. Loading stays set;
+		// markServerHistoryResult clears it when history_result arrives.
+		a.sendServerHistory(msg.Room, msg.Group, msg.DM, msg.BeforeID)
 		return a, nil
 
 	case MessageAction:
@@ -3237,8 +3283,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.newConv.resolveName = a.client.DisplayName
 		a.infoPanel.resolveRoomName = a.client.DisplayRoomName
 		if len(a.client.Rooms()) > 0 {
-			a.messages.SetContext(a.client.Rooms()[0], "", "")
-			a.onContextSwitch()
+			a.switchMessageContext(a.client.Rooms()[0], "", "")
 			a.syncMessagesLeftState()
 			a.messages.LoadFromDB(a.client)
 			a.syncPinnedBarForContext()
@@ -3727,8 +3772,7 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 			a.sidebar.updateSelection()
 			// Switch to selected room/conversation
 			if a.sidebar.SelectedRoom() != a.messages.room || a.sidebar.SelectedGroup() != a.messages.group || a.sidebar.SelectedDM() != a.messages.dm {
-				a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), a.sidebar.SelectedDM())
-				a.onContextSwitch()
+				a.switchMessageContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), a.sidebar.SelectedDM())
 				a.syncMessagesLeftState()
 				a.messages.LoadFromDB(a.client)
 				a.syncPinnedBarForContext()
@@ -3877,12 +3921,34 @@ func (a *App) setUnreadDividerAfter(lastReadID string) {
 	}
 }
 
+// abandonActiveHistoryRequest drops the active visible history request from the
+// current client's send queue before context/server ownership changes clear the
+// corr_id. SetContext still clears the corr_id defensively, but this helper
+// prevents the background retry driver from resending an abandoned scroll-back.
+func (a *App) abandonActiveHistoryRequest() {
+	corrID := a.messages.activeHistoryCorrID
+	if corrID != "" && a.client != nil {
+		if entry := a.client.SendQueue().Get(corrID); entry != nil && entry.Verb == "history" {
+			a.client.SendQueue().Drop(corrID)
+		}
+	}
+	if corrID != "" || a.messages.loadingHistory {
+		a.messages.abortHistoryRequest()
+	}
+}
+
+func (a *App) switchMessageContext(room, group, dm string) {
+	a.abandonActiveHistoryRequest()
+	a.messages.SetContext(room, group, dm)
+	a.onContextSwitch()
+}
+
 // onContextSwitch runs every app-layer side effect that must fire
 // when the messages context changes — sidebar navigation, quick
 // switch, search jump, inline creation flows, or terminal context
 // clears triggered by `room_deleted` / `group_deleted` / `dm_left` /
-// `room_retired` broadcasts and by self-leave echoes. Called AFTER
-// `a.messages.SetContext(...)` at every call site so the messages
+// `room_retired` broadcasts and by self-leave echoes. Called by
+// switchMessageContext AFTER `a.messages.SetContext(...)` so the messages
 // model already reflects the new context when the side effects run.
 //
 // Side effects in order:
@@ -3908,8 +3974,8 @@ func (a *App) setUnreadDividerAfter(lastReadID string) {
 // cleared-context call sites (`SetContext("", "", "")` for a deleted
 // or retired room, left group, etc.) never called `applyRoomTopic`,
 // so compose state could be left hanging with stale targets in a
-// now-non-existent context. Every SetContext site now calls this
-// single helper, which closes the gap.
+// now-non-existent context. Every production context switch now goes through
+// switchMessageContext, which closes the gap.
 func (a *App) onContextSwitch() {
 	// (1) Clear compose state on every context switch. This prevents
 	// draft/reply/edit carry-over across rooms/groups/DMs.
@@ -4230,8 +4296,7 @@ func (a *App) switchToSidebarSelection() {
 	if a.sidebar.SelectedRoom() == a.messages.room && a.sidebar.SelectedGroup() == a.messages.group && a.sidebar.SelectedDM() == a.messages.dm {
 		return
 	}
-	a.messages.SetContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), a.sidebar.SelectedDM())
-	a.onContextSwitch()
+	a.switchMessageContext(a.sidebar.SelectedRoom(), a.sidebar.SelectedGroup(), a.sidebar.SelectedDM())
 	a.syncMessagesLeftState()
 	a.messages.LoadFromDB(a.client)
 	a.syncPinnedBarForContext()
@@ -6928,8 +6993,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			a.sidebar.RemoveGroup(m.Group)
 			if a.messages.group == m.Group {
-				a.messages.SetContext("", "", "")
-				a.onContextSwitch()
+				a.switchMessageContext("", "", "")
 			}
 		}
 	case "deleted_groups":
@@ -6944,8 +7008,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			for _, groupID := range m.Groups {
 				a.sidebar.RemoveGroup(groupID)
 				if a.messages.group == groupID {
-					a.messages.SetContext("", "", "")
-					a.onContextSwitch()
+					a.switchMessageContext("", "", "")
 				}
 			}
 		}
@@ -7006,8 +7069,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			a.sidebar.RemoveRoom(m.Room)
 			if a.messages.room == m.Room {
-				a.messages.SetContext("", "", "")
-				a.onContextSwitch()
+				a.switchMessageContext("", "", "")
 			}
 		}
 	case "deleted_rooms":
@@ -7022,8 +7084,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			for _, roomID := range m.Rooms {
 				a.sidebar.RemoveRoom(roomID)
 				if a.messages.room == roomID {
-					a.messages.SetContext("", "", "")
-					a.onContextSwitch()
+					a.switchMessageContext("", "", "")
 				}
 			}
 		}
@@ -7255,8 +7316,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		if err := json.Unmarshal(msg.Raw, &dl); err == nil {
 			a.sidebar.RemoveDM(dl.DM)
 			if a.messages.dm == dl.DM {
-				a.messages.SetContext("", "", "")
-				a.onContextSwitch()
+				a.switchMessageContext("", "", "")
 			}
 		}
 	case "reaction":
@@ -7313,9 +7373,25 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		var result protocol.HistoryResult
 		json.Unmarshal(msg.Raw, &result)
 
-		// Build display messages and prepend (history arrives oldest-first).
-		// Epoch keys are already unwrapped by the client layer (handleHistoryKeys),
-		// and messages are persisted there too (storeRoomMessage/storeGroupMessage).
+		// Incoming Result Guard: apply a history_result to the visible pane
+		// only if it matches the active request's corr_id AND the active
+		// context. Tuple matching alone is not enough for A->B->A (an old A
+		// result, after the user returns to A, re-matches the tuple); the
+		// corr_id pins it to the exact request. Persistence is handled by the
+		// client layer (handleHistoryKeys) regardless, so a non-matching
+		// result is simply not shown and does not touch the current context's
+		// history state.
+		if !a.messages.historyResultMatchesActiveRequest(result.CorrID, result.Room, result.Group, result.DM) {
+			break
+		}
+
+		// Build display messages and prepend. The server now emits history
+		// oldest-first (S3: handleHistory pages server_order and reverses at the
+		// store boundary), so we prepend the batch as-is — no TUI reversal. A
+		// double-reverse here would silently restore the old reverse-chronological
+		// bug. Epoch keys are already unwrapped by the client layer
+		// (handleHistoryKeys), and messages are persisted there too
+		// (storeRoomMessage/storeGroupMessage).
 		var histMsgs []DisplayMessage
 		for _, raw := range result.Messages {
 			histType, _ := protocol.TypeOf(raw)
@@ -7338,19 +7414,47 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 					// silently omitted.
 					histMsgs = append(histMsgs, a.messages.buildDisplayDM(dm, a.client))
 				}
+			case "deleted":
+				// Remote scrollback can include tombstones for messages this
+				// client never cached (created+deleted before we joined). Render
+				// them as generic tombstones rather than silently dropping the
+				// row — mirroring the local-DB load path, which already shows
+				// Deleted rows. Server-side deleted history carries the deleter,
+				// not the original author, so leave From/FromID empty and let the
+				// renderer use DeletedBy ("removed by …"); no body/attachments/
+				// reactions. Durability of these rows is handled in the client
+				// layer (storeCatchupTombstone), so a reload shows them too.
+				var d protocol.Deleted
+				if json.Unmarshal(raw, &d) == nil {
+					histMsgs = append(histMsgs, DisplayMessage{
+						ID:        d.ID,
+						TS:        d.TS,
+						Room:      d.Room,
+						Group:     d.Group,
+						DM:        d.DM,
+						Deleted:   true,
+						DeletedBy: d.DeletedBy,
+					})
+				}
 			}
 		}
+		// Server history now arrives oldest-first (S3), so prepend as-is.
 		if len(histMsgs) > 0 {
-			a.messages.PrependMessages(histMsgs, result.HasMore)
-		} else {
-			a.messages.loadingHistory = false
-			a.messages.hasMore = result.HasMore
+			a.messages.PrependMessages(histMsgs)
 		}
+		// has_more drives the remote state + hint and ends the in-flight
+		// load, whether or not any messages were returned (replaces the old
+		// len>0 / empty-else split that both set hasMore).
+		a.messages.markServerHistoryResult(result.HasMore)
 
 		// Apply reactions from the history batch
 		for _, raw := range result.Reactions {
 			a.handleServerMessage(ServerMsg{Type: "reaction", Raw: raw})
 		}
+
+		// The active request is resolved; release ownership so a late
+		// duplicate result can't re-apply into this context.
+		a.messages.activeHistoryCorrID = ""
 	case "pins":
 		var m protocol.Pins
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
@@ -7421,6 +7525,19 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				verb = entry.Verb
 			}
 			a.client.SendQueue().Error(m.CorrID, &m)
+			// Correlated history errors (invalid_context / invalid_cursor /
+			// internal_error — and, once the server echoes corr_id on history
+			// rate-limits, rate_limited): drop the queue entry so the retry
+			// driver can't resend an abandoned scroll-back request, whether
+			// this error is for the active request or a stale one. verb was
+			// captured above BEFORE Queue.Error() (which may delete the entry).
+			// If it is the active request, abort the visible load too.
+			if verb == "history" {
+				a.client.SendQueue().Drop(m.CorrID)
+				if m.CorrID == a.messages.activeHistoryCorrID {
+					a.messages.abortHistoryRequest()
+				}
+			}
 		}
 		category := protocol.CategoryForCode(m.Code)
 

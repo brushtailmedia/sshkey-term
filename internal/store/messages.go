@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -20,6 +21,7 @@ type StoredAttachment struct {
 // StoredMessage represents a message in the local DB.
 type StoredMessage struct {
 	ID          string
+	ServerOrder int64 // server's authoritative per-conversation commit order (S2)
 	Sender      string
 	Body        string
 	TS          int64
@@ -47,6 +49,29 @@ type StoredMessage struct {
 // fileID, each rewriting the cached file and invalidating the
 // image-render cache's mod-time check).
 func (s *Store) InsertMessage(msg StoredMessage) (bool, error) {
+	// Validate the server-origin invariants in Go (clear errors for tests and
+	// callers) before the SQL CHECK constraints act as the final backstop:
+	// exactly one context column, and a positive server_order. A missing/zero
+	// server_order or a malformed context is a bug (server regression or a
+	// caller that didn't populate the row) and must fail loudly, not silently
+	// drop the message.
+	ctxCount := 0
+	if msg.Room != "" {
+		ctxCount++
+	}
+	if msg.Group != "" {
+		ctxCount++
+	}
+	if msg.DM != "" {
+		ctxCount++
+	}
+	if ctxCount != 1 {
+		return false, fmt.Errorf("InsertMessage: exactly one of room/group/dm must be set (got %d) for id %q", ctxCount, msg.ID)
+	}
+	if msg.ServerOrder <= 0 {
+		return false, fmt.Errorf("InsertMessage: server_order must be > 0 (got %d) for id %q", msg.ServerOrder, msg.ID)
+	}
+
 	mentions := strings.Join(msg.Mentions, ",")
 	attachJSON := ""
 	hasAttach := 0
@@ -56,10 +81,17 @@ func (s *Store) InsertMessage(msg StoredMessage) (bool, error) {
 			hasAttach = 1
 		}
 	}
+	// Targeted same-ID idempotency (ON CONFLICT(id) DO NOTHING) instead of a
+	// broad INSERT OR IGNORE: a re-delivered identical message (live + sync +
+	// history all re-hit the same id) converges quietly, but a duplicate
+	// (context, server_order) from a buggy server, a CHECK violation, or any
+	// other constraint failure surfaces as an error rather than being silently
+	// swallowed.
 	result, err := s.db.Exec(`
-		INSERT OR IGNORE INTO messages (id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, has_attachments, attachments)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		msg.ID, msg.Sender, msg.Body, msg.TS, msg.Room, msg.Group, msg.DM, msg.Epoch, msg.ReplyTo, mentions, hasAttach, attachJSON,
+		INSERT INTO messages (id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, has_attachments, attachments, server_order)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO NOTHING`,
+		msg.ID, msg.Sender, msg.Body, msg.TS, msg.Room, msg.Group, msg.DM, msg.Epoch, msg.ReplyTo, mentions, hasAttach, attachJSON, msg.ServerOrder,
 	)
 	if err != nil {
 		return false, err
@@ -75,11 +107,15 @@ func (s *Store) InsertMessage(msg StoredMessage) (bool, error) {
 	return affected > 0, nil
 }
 
-// GetRoomMessages returns messages for a room, ordered by timestamp ascending.
+// GetRoomMessages returns the latest window of messages for a room, ordered
+// oldest-first by server_order. The SQL pages newest-first (server_order DESC +
+// LIMIT) to grab the most recent window, then reverses. Uses server_order rather
+// than rowid: remote history backfill can insert older messages after newer
+// local rows, so local rowid no longer tracks chronology (S3).
 func (s *Store) GetRoomMessages(room string, limit int) ([]StoredMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at
-		FROM messages WHERE room = ? ORDER BY rowid DESC LIMIT ?`,
+		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at, server_order
+		FROM messages WHERE room = ? ORDER BY server_order DESC LIMIT ?`,
 		room, limit,
 	)
 	if err != nil {
@@ -99,11 +135,13 @@ func (s *Store) GetRoomMessages(room string, limit int) ([]StoredMessage, error)
 	return msgs, nil
 }
 
-// GetGroupMessages returns messages for a group DM, ordered by timestamp ascending.
+// GetGroupMessages returns the latest window of messages for a group DM,
+// ordered oldest-first by server_order (see GetRoomMessages for why server_order
+// not rowid).
 func (s *Store) GetGroupMessages(groupID string, limit int) ([]StoredMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at
-		FROM messages WHERE group_id = ? ORDER BY rowid DESC LIMIT ?`,
+		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at, server_order
+		FROM messages WHERE group_id = ? ORDER BY server_order DESC LIMIT ?`,
 		groupID, limit,
 	)
 	if err != nil {
@@ -122,11 +160,13 @@ func (s *Store) GetGroupMessages(groupID string, limit int) ([]StoredMessage, er
 	return msgs, nil
 }
 
-// GetDMMessages returns messages for a 1:1 DM, ordered by timestamp ascending.
+// GetDMMessages returns the latest window of messages for a 1:1 DM, ordered
+// oldest-first by server_order (see GetRoomMessages for why server_order not
+// rowid).
 func (s *Store) GetDMMessages(dmID string, limit int) ([]StoredMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at
-		FROM messages WHERE dm_id = ? ORDER BY rowid DESC LIMIT ?`,
+		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at, server_order
+		FROM messages WHERE dm_id = ? ORDER BY server_order DESC LIMIT ?`,
 		dmID, limit,
 	)
 	if err != nil {
@@ -145,7 +185,16 @@ func (s *Store) GetDMMessages(dmID string, limit int) ([]StoredMessage, error) {
 	return msgs, nil
 }
 
-// GetMessagesBefore returns messages before a given ID for scroll-back.
+// GetMessagesBefore returns messages before a given ID for scroll-back,
+// ordered oldest-first (chronological) to match GetRoomMessages /
+// GetGroupMessages / GetDMMessages. The SQL pages newest-first
+// (server_order DESC + LIMIT) to grab the page immediately below the cursor,
+// then reverses so the scroll-back caller can prepend the batch in
+// display order without re-sorting. Pages by server_order, not rowid:
+// remote history backfill can insert older messages after newer local rows,
+// so rowid no longer tracks chronology (S3). If beforeID is unknown locally
+// the server_order subquery is NULL and the comparison matches no rows, so the
+// caller falls back to a server history probe with the original cursor.
 func (s *Store) GetMessagesBefore(room, groupID, dmID, beforeID string, limit int) ([]StoredMessage, error) {
 	var rows *sql.Rows
 	var err error
@@ -163,16 +212,25 @@ func (s *Store) GetMessagesBefore(room, groupID, dmID, beforeID string, limit in
 	}
 
 	rows, err = s.db.Query(`
-		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at
-		FROM messages WHERE `+col+` = ? AND rowid < (SELECT rowid FROM messages WHERE id = ?)
-		ORDER BY rowid DESC LIMIT ?`,
+		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at, server_order
+		FROM messages WHERE `+col+` = ? AND server_order < (SELECT server_order FROM messages WHERE id = ?)
+		ORDER BY server_order DESC LIMIT ?`,
 		val, beforeID, limit,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanMessages(rows)
+	msgs, err := scanMessages(rows)
+	if err != nil {
+		return nil, err
+	}
+	// Reverse so oldest first (the SQL pages server_order DESC for correct
+	// before-cursor pagination; callers prepend in chronological order).
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
 }
 
 // DeleteMessage soft-deletes a message and hard-deletes its reactions.
@@ -200,6 +258,94 @@ func (s *Store) DeleteMessage(id, deletedBy string) ([]string, error) {
 		}
 	}
 	return fileIDs, err
+}
+
+// UpsertDeletedMessage makes a remote `deleted` tombstone durable. Unlike
+// DeleteMessage (which only soft-deletes an already-cached row), this also
+// inserts a minimal tombstone when the original message was never cached — the
+// history/catchup case where a client joins after a message was created *and*
+// deleted, so the original `id` was never seen locally. Without this, such a
+// tombstone renders once in the live history_result but vanishes on reload.
+//
+// It is update-first: a known row gets the same soft-delete shape as
+// DeleteMessage (deleted flag set, deleted_by set, body cleared, reactions
+// purged) and returns the row's attachment file IDs for the caller to clean
+// up; an absent row gets a
+// minimal inserted tombstone (no attachments, so no file IDs). It is
+// idempotent/collision-safe — live, sync_batch, and history_result can all
+// deliver the same tombstone — via UPDATE…RowsAffected + ON CONFLICT(id) DO
+// NOTHING, never a broad INSERT OR IGNORE (which would also mask server_order /
+// exact-one-context constraint violations on the insert path).
+//
+// Use this only from the history/catchup `deleted` path; the live delete event
+// keeps using DeleteMessage so its product semantics (authoritative soft-delete
+// of a visible cached row) are unchanged.
+func (s *Store) UpsertDeletedMessage(id, deletedBy string, ts, serverOrder int64, room, group, dm string) ([]string, error) {
+	// Capture attachment file IDs before the soft-delete clears the row, so a
+	// known-row tombstone cleans up its files exactly like DeleteMessage.
+	var attachJSON string
+	s.db.QueryRow(`SELECT attachments FROM messages WHERE id = ?`, id).Scan(&attachJSON)
+
+	res, err := s.db.Exec(`UPDATE messages SET deleted = 1, deleted_by = ?, body = '' WHERE id = ?`,
+		deletedBy, id)
+	if err != nil {
+		return nil, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+
+	if affected > 0 {
+		// Known row: mirror DeleteMessage — purge reactions, return file IDs.
+		if err := s.DeleteReactionsForMessage(id); err != nil {
+			return nil, err
+		}
+		var fileIDs []string
+		if attachJSON != "" {
+			var atts []StoredAttachment
+			if json.Unmarshal([]byte(attachJSON), &atts) == nil {
+				for _, a := range atts {
+					if a.FileID != "" {
+						fileIDs = append(fileIDs, a.FileID)
+					}
+				}
+			}
+		}
+		return fileIDs, nil
+	}
+
+	// Absent row: insert a minimal tombstone. The insert path must satisfy the
+	// same server-origin invariants InsertMessage enforces (exactly one context,
+	// server_order > 0) — validate in Go for clear errors before the SQL CHECKs.
+	ctxCount := 0
+	if room != "" {
+		ctxCount++
+	}
+	if group != "" {
+		ctxCount++
+	}
+	if dm != "" {
+		ctxCount++
+	}
+	if ctxCount != 1 {
+		return nil, fmt.Errorf("UpsertDeletedMessage: exactly one of room/group/dm must be set (got %d) for id %q", ctxCount, id)
+	}
+	if serverOrder <= 0 {
+		return nil, fmt.Errorf("UpsertDeletedMessage: server_order must be > 0 (got %d) for id %q", serverOrder, id)
+	}
+
+	// sender stays '' so the renderer uses deleted_by ("removed by <deleter>")
+	// rather than mistaking the deleter for the original author.
+	if _, err := s.db.Exec(`
+		INSERT INTO messages (id, sender, body, ts, room, group_id, dm_id, deleted, deleted_by, server_order)
+		VALUES (?, '', '', ?, ?, ?, ?, 1, ?, ?)
+		ON CONFLICT(id) DO NOTHING`,
+		id, ts, room, group, dm, deletedBy, serverOrder,
+	); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 // DeleteReactionsForMessage removes all reactions for a single message id.
@@ -272,14 +418,22 @@ func (s *Store) GetReactionsForMessages(messageIDs []string) ([]StoredReaction, 
 
 // SearchMessages performs full-text search across all messages.
 // Tries FTS5 first, falls back to LIKE if FTS5 is not available.
+//
+// Search is global across rooms/groups/DMs, so it stays primarily timestamp-
+// ordered for cross-conversation recency. server_order is per-conversation (not
+// globally comparable), so it is used only as a deterministic tie-breaker
+// (`ts DESC, server_order DESC`): within one conversation it disambiguates
+// same-second messages by commit order, and across conversations it just makes
+// the tie stable rather than arbitrary (S5). The FTS join still keys on rowid —
+// that is the external-content row link (`content_rowid='rowid'`), not chronology.
 func (s *Store) SearchMessages(query string, limit int) ([]StoredMessage, error) {
 	// Try FTS5 first
 	rows, err := s.db.Query(`
-		SELECT m.id, m.sender, m.body, m.ts, m.room, m.group_id, m.dm_id, m.epoch, m.reply_to, m.mentions, m.deleted, m.deleted_by, m.attachments, m.edited_at
+		SELECT m.id, m.sender, m.body, m.ts, m.room, m.group_id, m.dm_id, m.epoch, m.reply_to, m.mentions, m.deleted, m.deleted_by, m.attachments, m.edited_at, m.server_order
 		FROM messages_fts f
 		JOIN messages m ON f.rowid = m.rowid
 		WHERE messages_fts MATCH ? AND m.deleted = 0
-		ORDER BY m.ts DESC LIMIT ?`,
+		ORDER BY m.ts DESC, m.server_order DESC LIMIT ?`,
 		query, limit,
 	)
 	if err == nil {
@@ -290,10 +444,10 @@ func (s *Store) SearchMessages(query string, limit int) ([]StoredMessage, error)
 	// FTS5 not available — fall back to LIKE
 	likeQuery := "%" + query + "%"
 	rows, err = s.db.Query(`
-		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at
+		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at, server_order
 		FROM messages
 		WHERE deleted = 0 AND (body LIKE ? OR sender LIKE ?)
-		ORDER BY ts DESC LIMIT ?`,
+		ORDER BY ts DESC, server_order DESC LIMIT ?`,
 		likeQuery, likeQuery, limit,
 	)
 	if err != nil {
@@ -310,7 +464,7 @@ func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 		var mentionsStr string
 		var deleted int
 		var attachJSON string
-		err := rows.Scan(&m.ID, &m.Sender, &m.Body, &m.TS, &m.Room, &m.Group, &m.DM, &m.Epoch, &m.ReplyTo, &mentionsStr, &deleted, &m.DeletedBy, &attachJSON, &m.EditedAt)
+		err := rows.Scan(&m.ID, &m.Sender, &m.Body, &m.TS, &m.Room, &m.Group, &m.DM, &m.Epoch, &m.ReplyTo, &mentionsStr, &deleted, &m.DeletedBy, &attachJSON, &m.EditedAt, &m.ServerOrder)
 		if err != nil {
 			return nil, err
 		}
@@ -361,7 +515,7 @@ func (s *Store) UpdateMessageEdited(msgID, newBody string, editedAt int64) (int6
 // sql.ErrNoRows if the row is missing.
 func (s *Store) GetMessageByID(msgID string) (*StoredMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at
+		SELECT id, sender, body, ts, room, group_id, dm_id, epoch, reply_to, mentions, deleted, deleted_by, attachments, edited_at, server_order
 		FROM messages WHERE id = ? LIMIT 1`,
 		msgID,
 	)
@@ -377,35 +531,4 @@ func (s *Store) GetMessageByID(msgID string) (*StoredMessage, error) {
 		return nil, sql.ErrNoRows
 	}
 	return &msgs[0], nil
-}
-
-// GetUserMostRecentMessageIDInContext returns the id of the user's most
-// recent non-deleted message in the given context (room, group, or DM),
-// or empty string if they have none. Used by the TUI edit-mode entry
-// path (Chunk 8) — Up-arrow on empty input scans backwards for the
-// user's most recent editable message.
-func (s *Store) GetUserMostRecentMessageIDInContext(userID, room, groupID, dmID string) (string, error) {
-	var col, val string
-	switch {
-	case room != "":
-		col, val = "room", room
-	case groupID != "":
-		col, val = "group_id", groupID
-	case dmID != "":
-		col, val = "dm_id", dmID
-	default:
-		return "", nil
-	}
-	var id string
-	err := s.db.QueryRow(
-		`SELECT id FROM messages WHERE `+col+` = ? AND sender = ? AND deleted = 0 ORDER BY rowid DESC LIMIT 1`,
-		val, userID,
-	).Scan(&id)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return id, nil
 }

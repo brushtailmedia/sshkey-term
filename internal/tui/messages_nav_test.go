@@ -22,7 +22,7 @@ func makeMultilineMessages(n int) []DisplayMessage {
 
 func TestMessagesDownArrowScrollsViewportToSelectedMessage(t *testing.T) {
 	m := NewMessages()
-	m.hasMore = false
+	m.remoteState = HistoryExhausted
 	m.messages = makeMultilineMessages(3)
 	m.viewport.Height = 4
 	m.RefreshContent(80)
@@ -49,7 +49,7 @@ func TestMessagesDownArrowScrollsViewportToSelectedMessage(t *testing.T) {
 
 func TestMessagesArrowRoundTripFromLatestScrollsBackDown(t *testing.T) {
 	m := NewMessages()
-	m.hasMore = false
+	m.remoteState = HistoryExhausted
 	m.messages = makeMultilineMessages(12)
 	m.viewport.Height = 6
 	m.RefreshContent(80)

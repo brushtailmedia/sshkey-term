@@ -1017,7 +1017,15 @@ func (c *Client) DecryptDMReaction(wrappedKeys map[string]string, payloadBase64 
 // history_result reply (no context = nothing to query) and the TUI's
 // loadingHistory flag was only cleared inside the result handler.
 func (c *Client) RequestHistory(room, group, dm, before string, limit int) error {
-	corrID := protocol.GenerateCorrID()
+	return c.RequestHistoryWithID(protocol.GenerateCorrID(), room, group, dm, before, limit)
+}
+
+// RequestHistoryWithID is RequestHistory with a caller-provided corr_id, so the
+// TUI can record the ID as the active visible history request and pin the
+// inbound history_result to this exact request (Incoming Result Guard,
+// history-state-model.md). The server echoes the corr_id on history_result and
+// on correlated errors.
+func (c *Client) RequestHistoryWithID(corrID, room, group, dm, before string, limit int) error {
 	envelope := protocol.History{
 		Type:   "history",
 		Room:   room,
@@ -1029,7 +1037,12 @@ func (c *Client) RequestHistory(room, group, dm, before string, limit int) error
 	}
 	c.sendQueue.EnqueueWithID(corrID, "history", envelope)
 	c.sendQueue.MarkSending(corrID)
-	return c.enc.Encode(envelope)
+	if err := c.enc.Encode(envelope); err != nil {
+		// Don't leave a failed send waiting for the queue's timeout sweep.
+		c.sendQueue.Drop(corrID)
+		return err
+	}
+	return nil
 }
 
 // SendRetireMe permanently retires the current user's account. After the

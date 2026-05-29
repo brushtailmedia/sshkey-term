@@ -36,6 +36,8 @@ func TestCategoryForCode_KnownCodes(t *testing.T) {
 		{"device_limit_exceeded", CategoryC, "C"},
 		{"unknown_verb", CategoryC, "C"},
 		{"invalid_message", CategoryC, "C"},
+		{"invalid_context", CategoryC, "C"},
+		{"invalid_cursor", CategoryC, "C"},
 		{ErrDailyQuotaExceeded, CategoryC, "C"},
 
 		// D

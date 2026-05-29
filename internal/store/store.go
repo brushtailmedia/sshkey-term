@@ -116,6 +116,13 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) init() error {
+	// The app has no users, so a schema change to the local messages cache needs
+	// no backwards-compatible migration: clean-rebuild an old messages table (and
+	// its FTS index + triggers) so the CREATE below recreates it with the
+	// server_order column + constraints. Fresh DBs are unaffected.
+	if err := s.ensureMessagesServerOrderSchema(); err != nil {
+		return err
+	}
 	// Create tables in separate execs to handle FTS5 gracefully
 	_, err := s.db.Exec(`
 		CREATE TABLE IF NOT EXISTS messages (
@@ -134,12 +141,29 @@ func (s *Store) init() error {
 			deleted         INTEGER NOT NULL DEFAULT 0,
 			deleted_by      TEXT NOT NULL DEFAULT '',
 			attachments     TEXT NOT NULL DEFAULT '',
-			edited_at       INTEGER NOT NULL DEFAULT 0
+			edited_at       INTEGER NOT NULL DEFAULT 0,
+			-- server_order (S2): the server's authoritative per-conversation
+			-- commit order. Every persisted row is server-originated, so it is
+			-- NOT NULL and > 0; it is per-conversation (not global). S1's
+			-- AUTOINCREMENT already guarantees the server never emits a duplicate
+			-- (context, server_order), so the pagination indexes below are
+			-- non-unique (the unique backstop would only catch a bug S1 prevents,
+			-- at the cost of brittle distinct-value test fixtures).
+			server_order    INTEGER NOT NULL CHECK(server_order > 0),
+			-- Exactly one context column is set per message (room XOR group XOR dm).
+			CHECK ((room != '') + (group_id != '') + (dm_id != '') = 1)
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_messages_room_ts ON messages(room, ts) WHERE room != '';
 		CREATE INDEX IF NOT EXISTS idx_messages_group_ts ON messages(group_id, ts) WHERE group_id != '';
 		CREATE INDEX IF NOT EXISTS idx_messages_dm_ts ON messages(dm_id, ts) WHERE dm_id != '';
+
+		-- Per-conversation server_order pagination index for ORDER BY
+		-- server_order within a context (S3). Non-unique (see the column
+		-- comment above).
+		CREATE INDEX IF NOT EXISTS idx_messages_room_order ON messages(room, server_order) WHERE room != '';
+		CREATE INDEX IF NOT EXISTS idx_messages_group_order ON messages(group_id, server_order) WHERE group_id != '';
+		CREATE INDEX IF NOT EXISTS idx_messages_dm_order ON messages(dm_id, server_order) WHERE dm_id != '';
 
 		-- Reactions (decrypted emoji stored locally)
 		CREATE TABLE IF NOT EXISTS reactions (
@@ -324,6 +348,52 @@ func (s *Store) init() error {
 	// If FTS5 isn't available, search falls back to LIKE queries
 
 	return nil
+}
+
+// ensureMessagesServerOrderSchema clean-rebuilds the local messages cache when
+// it predates server_order (S2). The app has no users, so there is no
+// backwards-compatibility burden: an old messages table (plus its FTS index and
+// triggers, which reference it) is dropped so init recreates it with the
+// server_order column, CHECK constraints, and per-conversation unique indexes.
+// Cached messages re-sync from the server. Fresh DBs never trigger this.
+func (s *Store) ensureMessagesServerOrderSchema() error {
+	if !s.tableExists("messages") || s.messageColumnExists("server_order") {
+		return nil // fresh DB or already migrated
+	}
+	s.db.Exec(`DROP TRIGGER IF EXISTS messages_ai`)
+	s.db.Exec(`DROP TRIGGER IF EXISTS messages_ad`)
+	s.db.Exec(`DROP TABLE IF EXISTS messages_fts`)
+	if _, err := s.db.Exec(`DROP TABLE IF EXISTS messages`); err != nil {
+		return fmt.Errorf("clean-rebuild messages for server_order: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) tableExists(name string) bool {
+	var got string
+	err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&got)
+	return err == nil
+}
+
+func (s *Store) messageColumnExists(name string) bool {
+	rows, err := s.db.Query(`PRAGMA table_info(messages)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var colName, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &dflt, &pk); err != nil {
+			return false
+		}
+		if colName == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) ensureDirectMessageSchema() error {

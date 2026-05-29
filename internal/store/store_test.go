@@ -38,7 +38,7 @@ func TestOpen_EncryptedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
-	if _, err := s1.InsertMessage(StoredMessage{
+	if _, err := s1.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "enc_m1", Sender: "alice", Body: "secret message", TS: 1, Room: "general",
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -75,7 +75,7 @@ func TestOpen_EncryptedWrongKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	s1.InsertMessage(StoredMessage{ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "general"})
+	s1.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "general"})
 	s1.Close()
 
 	// Reopen with key2 — should fail
@@ -152,7 +152,7 @@ func TestOpen_IdempotentReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
-	if _, err := s1.InsertMessage(StoredMessage{ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "general"}); err != nil {
+	if _, err := s1.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "general"}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	s1.Close()
@@ -184,7 +184,7 @@ func TestOpen_RejectsNilKey(t *testing.T) {
 func TestMessages_InsertAndRetrieve(t *testing.T) {
 	s := openTestStore(t)
 
-	msg := StoredMessage{
+	msg := StoredMessage{ServerOrder: 1,
 		ID:      "msg_001",
 		Sender:  "alice",
 		Body:    "hello world",
@@ -227,7 +227,7 @@ func TestMessages_InsertAndRetrieve(t *testing.T) {
 func TestMessages_InsertReturnsBoolForNewVsExisting(t *testing.T) {
 	s := openTestStore(t)
 
-	msg := StoredMessage{ID: "msg_dedup", Sender: "alice", Body: "hi", TS: 1, Room: "general"}
+	msg := StoredMessage{ServerOrder: 1, ID: "msg_dedup", Sender: "alice", Body: "hi", TS: 1, Room: "general"}
 
 	inserted, err := s.InsertMessage(msg)
 	if err != nil {
@@ -249,9 +249,9 @@ func TestMessages_InsertReturnsBoolForNewVsExisting(t *testing.T) {
 
 func TestMessages_RoomFilter(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "a", Sender: "x", Body: "general msg", TS: 1, Room: "general"})
-	s.InsertMessage(StoredMessage{ID: "b", Sender: "x", Body: "eng msg", TS: 2, Room: "engineering"})
-	s.InsertMessage(StoredMessage{ID: "c", Sender: "x", Body: "general 2", TS: 3, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "a", Sender: "x", Body: "general msg", TS: 1, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "b", Sender: "x", Body: "eng msg", TS: 2, Room: "engineering"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "c", Sender: "x", Body: "general 2", TS: 3, Room: "general"})
 
 	got, _ := s.GetRoomMessages("general", 10)
 	if len(got) != 2 {
@@ -265,8 +265,8 @@ func TestMessages_RoomFilter(t *testing.T) {
 
 func TestMessages_GroupFilter(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "a", Sender: "x", Body: "grp 1", TS: 1, Group: "group_1"})
-	s.InsertMessage(StoredMessage{ID: "b", Sender: "x", Body: "grp 2", TS: 2, Group: "group_2"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "a", Sender: "x", Body: "grp 1", TS: 1, Group: "group_1"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "b", Sender: "x", Body: "grp 2", TS: 2, Group: "group_2"})
 
 	got, _ := s.GetGroupMessages("group_1", 10)
 	if len(got) != 1 || got[0].Body != "grp 1" {
@@ -276,8 +276,8 @@ func TestMessages_GroupFilter(t *testing.T) {
 
 func TestMessages_DMFilter(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "a", Sender: "x", Body: "dm 1", TS: 1, DM: "dm_1"})
-	s.InsertMessage(StoredMessage{ID: "b", Sender: "x", Body: "dm 2", TS: 2, DM: "dm_2"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "a", Sender: "x", Body: "dm 1", TS: 1, DM: "dm_1"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "b", Sender: "x", Body: "dm 2", TS: 2, DM: "dm_2"})
 
 	got, _ := s.GetDMMessages("dm_1", 10)
 	if len(got) != 1 || got[0].Body != "dm 1" {
@@ -288,7 +288,7 @@ func TestMessages_DMFilter(t *testing.T) {
 func TestMessages_LimitRespected(t *testing.T) {
 	s := openTestStore(t)
 	for i := 0; i < 20; i++ {
-		s.InsertMessage(StoredMessage{ID: string(rune('a' + i)), Sender: "x", Body: "hi", TS: int64(i), Room: "general"})
+		s.InsertMessage(StoredMessage{ServerOrder: 1, ID: string(rune('a' + i)), Sender: "x", Body: "hi", TS: int64(i), Room: "general"})
 	}
 	got, _ := s.GetRoomMessages("general", 5)
 	if len(got) != 5 {
@@ -298,7 +298,7 @@ func TestMessages_LimitRespected(t *testing.T) {
 
 func TestMessages_Delete(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "secret", TS: 1, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "secret", TS: 1, Room: "general"})
 	if _, err := s.DeleteMessage("m1", "alice"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -322,8 +322,8 @@ func TestMessages_InsertIsIdempotent(t *testing.T) {
 	// is a no-op. This is intentional: messages are immutable and can be
 	// re-delivered via sync + real-time push without duplicating.
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "v1", TS: 1, Room: "general"})
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "v2-should-be-ignored", TS: 2, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "v1", TS: 1, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "v2-should-be-ignored", TS: 2, Room: "general"})
 	got, _ := s.GetRoomMessages("general", 10)
 	if len(got) != 1 {
 		t.Fatalf("should still have 1 message, got %d", len(got))
@@ -335,23 +335,28 @@ func TestMessages_InsertIsIdempotent(t *testing.T) {
 
 func TestMessages_GetMessagesBefore(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "x", Body: "first", TS: 100, Room: "general"})
-	s.InsertMessage(StoredMessage{ID: "m2", Sender: "x", Body: "second", TS: 200, Room: "general"})
-	s.InsertMessage(StoredMessage{ID: "m3", Sender: "x", Body: "third", TS: 300, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "x", Body: "first", TS: 100, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 2, ID: "m2", Sender: "x", Body: "second", TS: 200, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 3, ID: "m3", Sender: "x", Body: "third", TS: 300, Room: "general"})
 
 	got, err := s.GetMessagesBefore("general", "", "", "m3", 10)
 	if err != nil {
 		t.Fatalf("get before: %v", err)
 	}
 	if len(got) != 2 {
-		t.Errorf("expected 2 messages before m3, got %d", len(got))
+		t.Fatalf("expected 2 messages before m3, got %d", len(got))
+	}
+	// Must be oldest-first (chronological), matching GetRoomMessages et al.,
+	// so the scroll-back caller can prepend the page without re-sorting.
+	if got[0].ID != "m1" || got[1].ID != "m2" {
+		t.Errorf("GetMessagesBefore order = [%s, %s], want [m1, m2] (oldest-first)", got[0].ID, got[1].ID)
 	}
 }
 
 func TestMessages_Search(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "the quick brown fox", TS: 1, Room: "general"})
-	s.InsertMessage(StoredMessage{ID: "m2", Sender: "bob", Body: "jumps over the lazy dog", TS: 2, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "the quick brown fox", TS: 1, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m2", Sender: "bob", Body: "jumps over the lazy dog", TS: 2, Room: "general"})
 
 	got, err := s.SearchMessages("brown", 10)
 	if err != nil {

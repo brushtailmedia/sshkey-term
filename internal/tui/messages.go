@@ -184,13 +184,20 @@ type MessagesModel struct {
 	resolveRoomName  func(string) string  // room nanoid → display name (set by App)
 	resolveGroupName func(string) string  // group nanoid → display name (set by App)
 	resolveDMName    func(string) string  // dm nanoid → other user's display name (set by App)
-	loadingHistory   bool
-	hasMore          bool            // server indicated more history available
-	unreadFromID     string          // first unread message ID (for divider)
-	retired          map[string]bool // userID -> account retired
-	left             bool            // current context is archived (read-only, user has left)
-	roomRetired      bool            // current context is a retired room (archived by admin)
-	filesDir         string          // <dataDir>/files — set by App after connect; used to derive per-attachment cached path for inline-image render
+	loadingHistory   bool                 // a history request is in flight (the "Loading" concept)
+	remoteState      HistoryRemoteState   // server truth: does older history exist? (replaces the overloaded hasMore)
+	hintVisible      bool                 // whether the top "press up to load more" hint should render
+	probeDone        bool                 // a quiet server probe was already spent while the hint was hidden
+	connGen          uint64               // App-synced connection generation; stamps outgoing HistoryRequestMsg (mirrors currentUserID)
+	// activeHistoryCorrID is the corr_id of the in-flight server history
+	// request; it pins the inbound history_result so an A->B->A stale result
+	// cannot re-apply (Incoming Result Guard).
+	activeHistoryCorrID string
+	unreadFromID        string          // first unread message ID (for divider)
+	retired             map[string]bool // userID -> account retired
+	left                bool            // current context is archived (read-only, user has left)
+	roomRetired         bool            // current context is a retired room (archived by admin)
+	filesDir            string          // <dataDir>/files — set by App after connect; used to derive per-attachment cached path for inline-image render
 
 	// viewport owns the scrollable message-stream region. Width and
 	// Height are set by View() each render to track terminal resize +
@@ -286,15 +293,40 @@ func (m *MessagesModel) SelectedImagePath() string {
 	return ""
 }
 
+// HistoryRemoteState is the server's truth about whether older history
+// exists before the earliest loaded message. It replaces the overloaded
+// hasMore boolean: only HistoryExhausted is branched on (the scroll guard
+// and the hint render), so a fresh context (HistoryUnknown) no longer
+// renders a confident "more history" hint before there is any evidence.
+type HistoryRemoteState int
+
+const (
+	HistoryUnknown HistoryRemoteState = iota
+	HistoryAvailable
+	HistoryExhausted
+)
+
+const (
+	// initialHistoryLoadLimit is both the initial local load size
+	// (loadRoom/loadGroup/loadDM) and the "hint visible" threshold in
+	// LoadFromDB — one constant so the two cannot drift apart.
+	initialHistoryLoadLimit = 200
+	// historyPageLimit is both the scroll-back local read size
+	// (GetMessagesBefore) and its full-page check in the history fallback.
+	historyPageLimit = 100
+)
+
 func NewMessages() MessagesModel {
 	// Initial viewport size is a reasonable default; View() resizes
 	// every render to the actual panel dimensions. Mouse wheel
 	// support comes for free via viewport.Update(tea.MouseMsg).
 	vp := viewport.New(80, 24)
+	// History state starts zero-valued: remoteState=HistoryUnknown,
+	// hintVisible=false, probeDone=false — a fresh context shows no hint
+	// until the local load fills the window or the server proves more exists.
 	return MessagesModel{
 		cursor:      -1,
 		typingUsers: make(map[string]time.Time),
-		hasMore:     true,
 		retired:     make(map[string]bool),
 		viewport:    vp,
 	}
@@ -447,8 +479,15 @@ func (m *MessagesModel) SetContext(room, group, dm string) {
 	m.cursor = -1
 	m.viewport.GotoBottom() // reset scroll position for new context
 	m.unreadFromID = ""
-	m.hasMore = true
+	// A context switch proves nothing about remote history and clears any
+	// hint/probe state from the previous context. Clearing the active history
+	// corr_id is load-bearing for A->B->A: an old result for A must not regain
+	// ownership when the user leaves and returns to A.
+	m.remoteState = HistoryUnknown
+	m.hintVisible = false
+	m.probeDone = false
 	m.loadingHistory = false
+	m.activeHistoryCorrID = ""
 	m.left = false        // caller should call SetLeft after if the new context is archived
 	m.roomRetired = false // caller should call SetRoomRetired after if the new context is a retired room
 	// Clear typing indicators on context switch. SetTyping only inserts
@@ -513,6 +552,7 @@ func (m *MessagesModel) SetUnreadFrom(msgID string) {
 // persisted reactions.
 func (m *MessagesModel) LoadFromDB(c *client.Client) {
 	if c == nil {
+		m.hintVisible = false
 		return
 	}
 
@@ -528,8 +568,14 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 	}
 
 	if err != nil || len(stored) == 0 {
+		m.hintVisible = false
 		return
 	}
+
+	// The local DB controls only the hint, not remote exhaustion: if the
+	// initial load filled the window, older pages likely exist, so show the
+	// hint. remoteState stays whatever SetContext set (Unknown).
+	m.hintVisible = len(stored) >= initialHistoryLoadLimit
 
 	m.messages = nil
 	msgIDs := make([]string, 0, len(stored))
@@ -612,39 +658,131 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 type storeMsg = store.StoredMessage
 
 func loadRoom(c *client.Client, room string) ([]store.StoredMessage, error) {
-	return c.LoadRoomMessages(room, 200)
+	return c.LoadRoomMessages(room, initialHistoryLoadLimit)
 }
 
 func loadGroup(c *client.Client, group string) ([]store.StoredMessage, error) {
-	return c.LoadGroupMessages(group, 200)
+	return c.LoadGroupMessages(group, initialHistoryLoadLimit)
 }
 
 func loadDM(c *client.Client, dm string) ([]store.StoredMessage, error) {
-	return c.LoadDMMessages(dm, 200)
+	return c.LoadDMMessages(dm, initialHistoryLoadLimit)
 }
 
-// requestHistory sends a history request for older messages.
+// shouldShowHistoryHint reports whether the top "press up to load more
+// history" hint should render. It is render-authoritative on exhaustion:
+// even if a future count-based reload re-raised hintVisible, a proven-
+// exhausted context never re-shows the hint.
+func (m *MessagesModel) shouldShowHistoryHint() bool {
+	return m.hintVisible && len(m.messages) > 0 && m.remoteState != HistoryExhausted
+}
+
+// markLocalHistoryPage records the outcome of a local scroll-back page. A
+// full page stops the load here (the local cache had a page to give); a
+// short page leaves Loading set so the caller can continue to the server in
+// the same logical load without a second top-scroll double-firing.
+func (m *MessagesModel) markLocalHistoryPage(count, limit int) {
+	if count >= limit {
+		m.loadingHistory = false
+		m.hintVisible = true
+	}
+}
+
+// markServerHistoryResult records the server's history_result truth and ends
+// the in-flight load. has_more drives both the remote state and the hint.
+func (m *MessagesModel) markServerHistoryResult(hasMore bool) {
+	m.loadingHistory = false
+	if hasMore {
+		m.remoteState = HistoryAvailable
+		m.hintVisible = true
+	} else {
+		m.remoteState = HistoryExhausted
+		m.hintVisible = false
+	}
+}
+
+// abortHistoryRequest ends an in-flight history load that will get no result
+// (send failure, nil client, or a correlated history error). It clears Loading
+// and the active corr_id and resets the quiet-probe budget so a later scroll-
+// to-top re-probes — an aborted probe never got an answer, so it must not count
+// as the one probe being spent. RemoteState is left unchanged: an abort proves
+// nothing about whether older history exists.
+func (m *MessagesModel) abortHistoryRequest() {
+	m.loadingHistory = false
+	m.activeHistoryCorrID = ""
+	m.probeDone = false
+}
+
+func validHistoryContext(room, group, dm string) bool {
+	count := 0
+	if room != "" {
+		count++
+	}
+	if group != "" {
+		count++
+	}
+	if dm != "" {
+		count++
+	}
+	return count == 1
+}
+
+// requestHistory sends a history request for older messages, or returns nil
+// when no request should fire. "No request" is not "ignore the keypress":
+// callers fall through to cursor/viewport browsing when this returns nil.
 func (m *MessagesModel) requestHistory() tea.Cmd {
-	if !m.hasMore || m.loadingHistory || len(m.messages) == 0 {
+	if m.loadingHistory || m.remoteState == HistoryExhausted || len(m.messages) == 0 {
 		return nil
 	}
-
-	firstMsg := m.messages[0]
 	room := m.room
 	group := m.group
 	dm := m.dm
-	beforeID := firstMsg.ID
+	if !validHistoryContext(room, group, dm) {
+		return nil
+	}
+	// Quiet-probe budget: when the hint is hidden (small local conversation,
+	// remote unknown), allow exactly one server probe per context until a
+	// switch resets it, so scroll-to-top doesn't hammer the server.
+	if !m.hintVisible && m.probeDone {
+		return nil
+	}
+
+	beforeID := m.EarliestMessageID()
+	if beforeID == "" {
+		return nil
+	}
 
 	m.loadingHistory = true
+	if !m.hintVisible {
+		m.probeDone = true
+	}
 
+	gen := m.connGen
 	return func() tea.Msg {
 		return HistoryRequestMsg{
+			Gen:      gen,
 			Room:     room,
 			Group:    group,
 			DM:       dm,
 			BeforeID: beforeID,
 		}
 	}
+}
+
+// historyRequestMatches reports whether a (possibly stale) HistoryRequestMsg's
+// context tuple still matches the active message context. Exactly one of
+// room/group/dm is non-empty for a valid context, so full-tuple equality also
+// rejects a request whose old context had a different family set.
+func (m MessagesModel) historyRequestMatches(room, group, dm string) bool {
+	return room == m.room && group == m.group && dm == m.dm
+}
+
+// historyResultMatchesActiveRequest reports whether an inbound history_result
+// belongs to the active visible history request. Tuple matching alone is not
+// enough for A->B->A (an old A result, after the user returns to A, re-matches
+// the tuple); the corr_id pins the result to the exact request still active.
+func (m MessagesModel) historyResultMatchesActiveRequest(corrID, room, group, dm string) bool {
+	return corrID != "" && corrID == m.activeHistoryCorrID && m.historyRequestMatches(room, group, dm)
 }
 
 // LatestMessageID returns the ID of the most recent message, or empty if none.
@@ -654,6 +792,17 @@ func (m *MessagesModel) LatestMessageID() string {
 	}
 	// Find the latest non-system message
 	for i := len(m.messages) - 1; i >= 0; i-- {
+		if !m.messages[i].IsSystem && m.messages[i].ID != "" {
+			return m.messages[i].ID
+		}
+	}
+	return ""
+}
+
+// EarliestMessageID returns the oldest loaded persisted message ID, or empty
+// if the visible buffer only contains local/system rows with no server cursor.
+func (m *MessagesModel) EarliestMessageID() string {
+	for i := range m.messages {
 		if !m.messages[i].IsSystem && m.messages[i].ID != "" {
 			return m.messages[i].ID
 		}
@@ -672,7 +821,13 @@ func (m *MessagesModel) LatestMessageID() string {
 // de-duplicated (so distinct system rows can't collapse), and the cursor is
 // advanced by the post-dedup count so a partial overlap doesn't drift it off the
 // message it was on.
-func (m *MessagesModel) PrependMessages(msgs []DisplayMessage, hasMore bool) {
+// PrependMessages is a pure data op: dedup incoming rows against what is
+// already loaded (and within the batch), prepend, and advance the cursor by
+// the post-dedup count. The history-state lifecycle (Loading / HintVisible /
+// RemoteState) is owned by the callers via markLocalHistoryPage /
+// markServerHistoryResult — keeping it out of here avoids clearing Loading
+// mid-load, which would let a second top-scroll double-fire.
+func (m *MessagesModel) PrependMessages(msgs []DisplayMessage) {
 	if len(m.messages) > 0 && len(msgs) > 0 {
 		seen := make(map[string]struct{}, len(m.messages))
 		for _, e := range m.messages {
@@ -694,8 +849,6 @@ func (m *MessagesModel) PrependMessages(msgs []DisplayMessage, hasMore bool) {
 	}
 	m.messages = append(msgs, m.messages...)
 	m.cursor += len(msgs) // post-dedup count — keep cursor on the same message
-	m.loadingHistory = false
-	m.hasMore = hasMore
 }
 
 func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
@@ -1432,7 +1585,13 @@ type MessageAction struct {
 }
 
 // HistoryRequestMsg is sent when the user scrolls to the top and needs older messages.
+// HistoryRequestMsg is produced by an async tea.Cmd, so the user can switch
+// servers or contexts between the key/mouse event that created it and the
+// handler that sends it. Gen + the context tuple let the handler drop a stale
+// request before it queries the local DB or hits the server (Outgoing Request
+// Guard, history-state-model.md).
 type HistoryRequestMsg struct {
+	Gen      uint64
 	Room     string
 	Group    string
 	DM       string
@@ -1448,13 +1607,13 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 		// requested history at cursor==0 (after walking the cursor message-by-
 		// message to the very first one) and otherwise snapped the cursor to
 		// the bottom, so up-arrow history loading felt broken next to the
-		// mouse. hasMore lets cursor-browse still engage when history is
-		// exhausted; requestHistory is idempotent under loadingHistory.
-		if m.viewport.AtTop() && m.hasMore && len(m.messages) > 0 {
-			if !m.loadingHistory {
-				return m, m.requestHistory()
+		// mouse. requestHistory() is the single gate (not loading, not
+		// exhausted, probe budget); cursor-browse still engages when it
+		// returns nil — "no request" is not "ignore the keypress".
+		if m.viewport.AtTop() && len(m.messages) > 0 {
+			if cmd := m.requestHistory(); cmd != nil {
+				return m, cmd
 			}
-			return m, nil
 		}
 		// Cursor-driven browse: snap to the last message on first engage
 		// (cursor == -1 or off-screen), then walk up; the viewport follows.
@@ -1466,16 +1625,18 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 		m.ensureCursorVisible()
 		// If walking the cursor up brought the viewport to the top, load
 		// older history on this same press rather than forcing another.
-		if m.viewport.AtTop() && m.hasMore && !m.loadingHistory && len(m.messages) > 0 {
-			return m, m.requestHistory()
+		if m.viewport.AtTop() && len(m.messages) > 0 {
+			if cmd := m.requestHistory(); cmd != nil {
+				return m, cmd
+			}
 		}
 	case "pageup", "pgup":
 		// Pure viewport scroll, cursor unchanged. Page = viewport height.
 		m.viewport.ScrollUp(m.viewport.Height)
 		// At the very top: opportunity to request history (server-side
-		// catchup of older messages). Same hasMore + loadingHistory
-		// gating as the up-arrow path.
-		if m.viewport.AtTop() && len(m.messages) > 0 && !m.loadingHistory {
+		// catchup of older messages). requestHistory() applies the same
+		// gate as the up-arrow path (loading / exhausted / probe budget).
+		if m.viewport.AtTop() && len(m.messages) > 0 {
 			return m, m.requestHistory()
 		}
 		return m, nil
@@ -1735,7 +1896,7 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 		b.WriteString(systemMsgStyle.Render(" ── loading history ──"))
 		b.WriteString("\n")
 		currentRow++
-	} else if m.hasMore && len(m.messages) > 0 {
+	} else if m.shouldShowHistoryHint() {
 		b.WriteString(systemMsgStyle.Render(" ── press up at top to load more history ──"))
 		b.WriteString("\n")
 		currentRow++

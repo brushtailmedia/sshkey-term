@@ -139,7 +139,7 @@ func TestCleanupAttachmentFiles_IntegrationWithPurgeRoom(t *testing.T) {
 		for _, fid := range fileIDs {
 			atts = append(atts, store.StoredAttachment{FileID: fid, Name: fid + ".png", Mime: "image/png"})
 		}
-		if _, err := st.InsertMessage(store.StoredMessage{
+		if _, err := st.InsertMessage(store.StoredMessage{ServerOrder: 1,
 			ID: id, Sender: "alice", Body: "x", TS: 1,
 			Room:        room,
 			Attachments: atts,

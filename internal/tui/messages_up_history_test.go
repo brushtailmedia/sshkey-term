@@ -29,7 +29,7 @@ func TestMessages_UpAtViewportTopLoadsHistory(t *testing.T) {
 	m := NewMessages()
 	m.SetContext("room_support", "", "")
 	seedMessages(&m, 120)
-	m.hasMore = true
+	m.hintVisible = true // history available → hint shown, up loads it
 
 	_ = m.View(80, 16, true)
 	m.viewport.GotoTop() // user scrolled to the top (mouse / pageup)
@@ -39,7 +39,7 @@ func TestMessages_UpAtViewportTopLoadsHistory(t *testing.T) {
 
 	after, cmd := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	if cmd == nil {
-		t.Fatal("up at viewport-top with hasMore must request history (was cursor==0-only)")
+		t.Fatal("up at viewport-top with available history must request history (was cursor==0-only)")
 	}
 	hist, ok := cmd().(HistoryRequestMsg)
 	if !ok {
@@ -56,15 +56,15 @@ func TestMessages_UpAtViewportTopLoadsHistory(t *testing.T) {
 func TestMessages_UpAtTopNoMoreHistoryEngagesCursor(t *testing.T) {
 	m := NewMessages()
 	m.SetContext("room_support", "", "")
-	seedMessages(&m, 5) // short — fits the viewport, so it's at top
-	m.hasMore = false
+	seedMessages(&m, 5)              // short — fits the viewport, so it's at top
+	m.remoteState = HistoryExhausted // server proved no older history
 
 	_ = m.View(80, 16, true)
 
 	after, cmd := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	if cmd != nil {
 		if _, ok := cmd().(HistoryRequestMsg); ok {
-			t.Fatal("up with hasMore=false must not request history")
+			t.Fatal("up with exhausted history must not request history")
 		}
 	}
 	// With no history to load, up engages cursor browsing instead.
@@ -77,7 +77,7 @@ func TestMessages_UpAtTopWhileLoadingIsNoOp(t *testing.T) {
 	m := NewMessages()
 	m.SetContext("room_support", "", "")
 	seedMessages(&m, 120)
-	m.hasMore = true
+	m.hintVisible = true
 	m.loadingHistory = true // a fetch is already in flight
 
 	_ = m.View(80, 16, true)

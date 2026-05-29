@@ -32,7 +32,7 @@ func TestAppMouseClick_WrappedPinnedBarOffsetsSelection(t *testing.T) {
 		{ID: "msg_2", FromID: "usr_bob", From: "bob", Body: "second", TS: 2, Room: "room_mouse"},
 		{ID: "msg_3", FromID: "usr_bob", From: "bob", Body: "third", TS: 3, Room: "room_mouse"},
 	}
-	a.messages.hasMore = false
+	a.messages.remoteState = HistoryExhausted
 	a.messages.cursor = 2
 	layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
 	a.pinnedBar.SetPins("room_mouse", []string{"msg_1", "msg_2", "msg_3", "msg_1", "msg_2"}, a.messages.messages)
@@ -113,7 +113,7 @@ func TestAppMouseClick_ExpandedPinnedWrappedHeaderSelectsCorrectPin(t *testing.T
 		{ID: "msg_2", FromID: "usr_bob", From: "bob", Body: "second", TS: 2, Room: "room_mouse"},
 		{ID: "msg_3", FromID: "usr_bob", From: "bob", Body: "third", TS: 3, Room: "room_mouse"},
 	}
-	a.messages.hasMore = false
+	a.messages.remoteState = HistoryExhausted
 	layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
 	a.pinnedBar.SetPins("room_mouse", []string{"msg_1", "msg_2"}, a.messages.messages)
 	a.pinnedBar.expanded = true

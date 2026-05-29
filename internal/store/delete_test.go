@@ -6,8 +6,8 @@ import (
 
 func TestSoftDelete_MessageStaysInResults(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "hello", TS: 1, Room: "general"})
-	s.InsertMessage(StoredMessage{ID: "m2", Sender: "bob", Body: "world", TS: 2, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "hello", TS: 1, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 2, ID: "m2", Sender: "bob", Body: "world", TS: 2, Room: "general"})
 
 	s.DeleteMessage("m1", "alice")
 
@@ -41,7 +41,7 @@ func TestSoftDelete_MessageStaysInResults(t *testing.T) {
 
 func TestSoftDelete_GroupMessages(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "d1", Sender: "alice", Body: "dm msg", TS: 1, Group: "group_1"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "d1", Sender: "alice", Body: "dm msg", TS: 1, Group: "group_1"})
 
 	s.DeleteMessage("d1", "alice")
 
@@ -56,7 +56,7 @@ func TestSoftDelete_GroupMessages(t *testing.T) {
 
 func TestSoftDelete_ReactionsHardDeleted(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "hello", TS: 1, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "hello", TS: 1, Room: "general"})
 	s.InsertReaction(StoredReaction{ReactionID: "r1", MessageID: "m1", User: "bob", Emoji: "👍", TS: 2})
 
 	// Verify reaction exists
@@ -76,8 +76,8 @@ func TestSoftDelete_ReactionsHardDeleted(t *testing.T) {
 
 func TestSoftDelete_SearchExcludesDeleted(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "secret password", TS: 1, Room: "general"})
-	s.InsertMessage(StoredMessage{ID: "m2", Sender: "bob", Body: "password reminder", TS: 2, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "secret password", TS: 1, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m2", Sender: "bob", Body: "password reminder", TS: 2, Room: "general"})
 
 	s.DeleteMessage("m1", "alice")
 
@@ -104,9 +104,9 @@ func TestSoftDelete_SearchExcludesDeleted(t *testing.T) {
 
 func TestSoftDelete_GetMessagesBefore_IncludesDeleted(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "first", TS: 1, Room: "general"})
-	s.InsertMessage(StoredMessage{ID: "m2", Sender: "bob", Body: "second", TS: 2, Room: "general"})
-	s.InsertMessage(StoredMessage{ID: "m3", Sender: "alice", Body: "third", TS: 3, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "first", TS: 1, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 2, ID: "m2", Sender: "bob", Body: "second", TS: 2, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 3, ID: "m3", Sender: "alice", Body: "third", TS: 3, Room: "general"})
 
 	s.DeleteMessage("m2", "bob")
 
@@ -131,7 +131,7 @@ func TestSoftDelete_GetMessagesBefore_IncludesDeleted(t *testing.T) {
 
 func TestAttachments_PersistAndLoad(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{
+	s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "m1", Sender: "alice", Body: "see attached", TS: 1, Room: "general",
 		Attachments: []StoredAttachment{
 			{FileID: "file_abc", Name: "doc.pdf", Size: 45000, Mime: "application/pdf", DecryptKey: "dGVzdGtleQ=="},
@@ -164,7 +164,7 @@ func TestAttachments_PersistAndLoad(t *testing.T) {
 
 func TestAttachments_EmptyPreserved(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "no files", TS: 1, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "no files", TS: 1, Room: "general"})
 
 	msgs, _ := s.GetRoomMessages("general", 10)
 	if len(msgs[0].Attachments) != 0 {
@@ -175,7 +175,7 @@ func TestAttachments_EmptyPreserved(t *testing.T) {
 func TestAttachments_SurviveSoftDelete(t *testing.T) {
 	// Attachments should be gone after soft-delete (body cleared)
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{
+	s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "m1", Sender: "alice", Body: "file here", TS: 1, Room: "general",
 		Attachments: []StoredAttachment{
 			{FileID: "file_abc", Name: "doc.pdf", Size: 100, Mime: "application/pdf"},
@@ -194,7 +194,7 @@ func TestAttachments_SurviveSoftDelete(t *testing.T) {
 
 func TestSoftDelete_ReturnsFileIDs(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{
+	s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "m1", Sender: "alice", Body: "file here", TS: 1, Room: "general",
 		Attachments: []StoredAttachment{
 			{FileID: "file_abc", Name: "doc.pdf", Size: 100, Mime: "application/pdf"},
@@ -216,7 +216,7 @@ func TestSoftDelete_ReturnsFileIDs(t *testing.T) {
 
 func TestSoftDelete_NoAttachmentsReturnsNil(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "no files", TS: 1, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "no files", TS: 1, Room: "general"})
 
 	fileIDs, _ := s.DeleteMessage("m1", "alice")
 	if len(fileIDs) != 0 {
@@ -235,7 +235,7 @@ func TestSoftDelete_NonexistentMessage(t *testing.T) {
 
 func TestSoftDelete_DoubleDelete(t *testing.T) {
 	s := openTestStore(t)
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "hello", TS: 1, Room: "general"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "hello", TS: 1, Room: "general"})
 
 	s.DeleteMessage("m1", "alice")
 	// Second delete is a no-op in practice (server won't send two

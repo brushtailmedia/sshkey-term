@@ -169,11 +169,11 @@ func CreateTestDB(t testing.TB, keyPath string) string {
 	defer st.Close()
 
 	// Seed with test data using the real generated usernames + a fixed test room nanoid.
-	st.InsertMessage(store.StoredMessage{
+	st.InsertMessage(store.StoredMessage{ServerOrder: 1,
 		ID: "msg_test_001", Sender: Alice.UserID, Body: "test message from alice",
 		TS: time.Now().Unix(), Room: TestRoomID,
 	})
-	st.InsertMessage(store.StoredMessage{
+	st.InsertMessage(store.StoredMessage{ServerOrder: 1,
 		ID: "msg_test_002", Sender: Bob.UserID, Body: "test reply from bob",
 		TS: time.Now().Unix() + 1, Room: TestRoomID,
 	})

@@ -23,8 +23,8 @@ func TestSoftDelete_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open 1: %v", err)
 	}
-	s1.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "hello world", TS: 1000, Room: "general"})
-	s1.InsertMessage(StoredMessage{ID: "m2", Sender: "bob", Body: "reply", TS: 1001, Room: "general", ReplyTo: "m1"})
+	s1.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "hello world", TS: 1000, Room: "general"})
+	s1.InsertMessage(StoredMessage{ServerOrder: 2, ID: "m2", Sender: "bob", Body: "reply", TS: 1001, Room: "general", ReplyTo: "m1"})
 	s1.DeleteMessage("m1", "alice")
 	s1.Close()
 
@@ -82,14 +82,14 @@ func TestAttachment_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open 1: %v", err)
 	}
-	s1.InsertMessage(StoredMessage{
+	s1.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "m1", Sender: "alice", Body: "see attached", TS: 1000, Room: "general",
 		Attachments: []StoredAttachment{
 			{FileID: "file_abc", Name: "report.pdf", Size: 45000, Mime: "application/pdf", DecryptKey: "dGVzdGtleTE="},
 			{FileID: "file_def", Name: "photo.jpg", Size: 230000, Mime: "image/jpeg", DecryptKey: "dGVzdGtleTI="},
 		},
 	})
-	s1.InsertMessage(StoredMessage{
+	s1.InsertMessage(StoredMessage{ServerOrder: 2,
 		ID: "m2", Sender: "bob", Body: "no attachments", TS: 1001, Room: "general",
 	})
 	s1.Close()
@@ -159,7 +159,7 @@ func TestDeletedAttachment_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open 1: %v", err)
 	}
-	s1.InsertMessage(StoredMessage{
+	s1.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "m1", Sender: "alice", Body: "file here", TS: 1000, Room: "general",
 		Attachments: []StoredAttachment{
 			{FileID: "file_xyz", Name: "doc.txt", Size: 100, Mime: "text/plain", DecryptKey: "a2V5"},
@@ -209,8 +209,8 @@ func TestSearch_ExcludesDeleted_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	s1.InsertMessage(StoredMessage{ID: "m1", Sender: "alice", Body: "secret password", TS: 1, Room: "general"})
-	s1.InsertMessage(StoredMessage{ID: "m2", Sender: "bob", Body: "password reminder", TS: 2, Room: "general"})
+	s1.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "alice", Body: "secret password", TS: 1, Room: "general"})
+	s1.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m2", Sender: "bob", Body: "password reminder", TS: 2, Room: "general"})
 	s1.DeleteMessage("m1", "alice")
 	s1.Close()
 
@@ -246,7 +246,7 @@ func TestGroupAttachment_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	s1.InsertMessage(StoredMessage{
+	s1.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "d1", Sender: "alice", Body: "group file", TS: 1000, Group: "group_abc",
 		Attachments: []StoredAttachment{
 			{FileID: "file_grp1", Name: "secret.pdf", Size: 5000, Mime: "application/pdf", DecryptKey: "Z3Jwa2V5"},

@@ -68,10 +68,11 @@ type Send struct {
 }
 
 type Message struct {
-	Type      string   `json:"type"`
-	ID        string   `json:"id"`
-	From      string   `json:"from"`
-	Room      string   `json:"room"`
+	Type        string   `json:"type"`
+	ID          string   `json:"id"`
+	ServerOrder int64    `json:"server_order,omitempty"` // server's per-conversation commit order (S2)
+	From        string   `json:"from"`
+	Room        string   `json:"room"`
 	TS        int64    `json:"ts"`
 	Epoch     int64    `json:"epoch"`
 	Payload   string   `json:"payload"`
@@ -139,6 +140,7 @@ type SendGroup struct {
 type GroupMessage struct {
 	Type        string            `json:"type"`
 	ID          string            `json:"id"`
+	ServerOrder int64             `json:"server_order,omitempty"` // server's per-conversation commit order (S2)
 	From        string            `json:"from"`
 	Group       string            `json:"group"`
 	TS          int64             `json:"ts"`
@@ -590,6 +592,7 @@ type SendDM struct {
 type DM struct {
 	Type        string            `json:"type"` // "dm"
 	ID          string            `json:"id"`
+	ServerOrder int64             `json:"server_order,omitempty"` // server's per-conversation commit order (S2)
 	From        string            `json:"from"`
 	DM          string            `json:"dm"`
 	TS          int64             `json:"ts"`
@@ -665,9 +668,10 @@ type Delete struct {
 }
 
 type Deleted struct {
-	Type      string `json:"type"`
-	ID        string `json:"id"`
-	DeletedBy string `json:"deleted_by"`
+	Type        string `json:"type"`
+	ID          string `json:"id"`
+	ServerOrder int64  `json:"server_order,omitempty"` // preserved from the original message (S2)
+	DeletedBy   string `json:"deleted_by"`
 	TS        int64  `json:"ts"`
 	Room      string `json:"room,omitempty"`
 	Group     string `json:"group,omitempty"`

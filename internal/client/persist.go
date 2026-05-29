@@ -100,8 +100,9 @@ func (c *Client) storeRoomMessage(raw json.RawMessage, warnReplay bool) {
 		}
 	}
 
-	inserted, _ := c.store.InsertMessage(store.StoredMessage{
+	inserted, err := c.store.InsertMessage(store.StoredMessage{
 		ID:          msg.ID,
+		ServerOrder: msg.ServerOrder,
 		Sender:      msg.From,
 		Body:        body,
 		TS:          msg.TS,
@@ -111,6 +112,12 @@ func (c *Client) storeRoomMessage(raw json.RawMessage, warnReplay bool) {
 		Mentions:    mentions,
 		Attachments: attachments,
 	})
+	if err != nil {
+		// Surface (don't swallow) a persistence failure — e.g. missing/zero
+		// server_order, a malformed context, or a duplicate (context,
+		// server_order) from a buggy server. The message just isn't cached.
+		c.logger.Error("persist room message", "id", msg.ID, "room", msg.Room, "error", err)
+	}
 	// Only fire auto-preview when we actually inserted a new row.
 	// Same message arriving via live broadcast + sync_batch +
 	// history_result is the common case (every reconnect re-hits
@@ -163,8 +170,9 @@ func (c *Client) storeGroupMessage(raw json.RawMessage, warnReplay bool) {
 		})
 	}
 
-	inserted, _ := c.store.InsertMessage(store.StoredMessage{
+	inserted, err := c.store.InsertMessage(store.StoredMessage{
 		ID:          msg.ID,
+		ServerOrder: msg.ServerOrder,
 		Sender:      msg.From,
 		Body:        payload.Body,
 		TS:          msg.TS,
@@ -173,6 +181,9 @@ func (c *Client) storeGroupMessage(raw json.RawMessage, warnReplay bool) {
 		Mentions:    payload.Mentions,
 		Attachments: attachments,
 	})
+	if err != nil {
+		c.logger.Error("persist group message", "id", msg.ID, "group", msg.Group, "error", err)
+	}
 	if inserted {
 		c.maybeAutoPreviewAttachments(attachments)
 	}
@@ -213,8 +224,9 @@ func (c *Client) storeDMMessage(raw json.RawMessage, warnReplay bool) {
 		}
 	}
 
-	inserted, _ := c.store.InsertMessage(store.StoredMessage{
+	inserted, err := c.store.InsertMessage(store.StoredMessage{
 		ID:          msg.ID,
+		ServerOrder: msg.ServerOrder,
 		Sender:      msg.From,
 		Body:        body,
 		TS:          msg.TS,
@@ -223,6 +235,9 @@ func (c *Client) storeDMMessage(raw json.RawMessage, warnReplay bool) {
 		Mentions:    mentions,
 		Attachments: attachments,
 	})
+	if err != nil {
+		c.logger.Error("persist DM message", "id", msg.ID, "dm", msg.DM, "error", err)
+	}
 	if inserted {
 		c.maybeAutoPreviewAttachments(attachments)
 	}
@@ -601,9 +616,39 @@ func (c *Client) handleCatchupMessage(msgType string, raw json.RawMessage) {
 		c.storeGroupMessage(raw, false)
 	case "dm":
 		c.storeDMMessage(raw, false)
+	case "deleted":
+		c.storeCatchupTombstone(raw)
 	default:
 		c.handleInternal(msgType, raw)
 	}
+}
+
+// storeCatchupTombstone makes a remote `deleted` tombstone durable on the
+// history/catchup path. Unlike the live delete event (handleInternal "deleted",
+// which only soft-deletes an already-cached row via DeleteMessage), catchup can
+// deliver a tombstone for a message that was created *and* deleted before this
+// client ever cached it — so the original `id` was never seen locally and a
+// plain soft-delete would no-op, leaving the tombstone visible for the current
+// history_result render but gone on reload. UpsertDeletedMessage inserts a
+// minimal tombstone when the row is absent and soft-deletes (returning
+// attachment file IDs to clean up) when present.
+func (c *Client) storeCatchupTombstone(raw json.RawMessage) {
+	if c.store == nil {
+		return
+	}
+	var d protocol.Deleted
+	if err := json.Unmarshal(raw, &d); err != nil {
+		c.logger.Error("catchup tombstone unmarshal", "error", err)
+		return
+	}
+	fileIDs, err := c.store.UpsertDeletedMessage(d.ID, d.DeletedBy, d.TS, d.ServerOrder, d.Room, d.Group, d.DM)
+	if err != nil {
+		c.logger.Error("persist catchup tombstone", "id", d.ID, "deleted_by", d.DeletedBy, "error", err)
+		return
+	}
+	// Known-row tombstones return the soft-deleted row's attachment file IDs;
+	// clean them up exactly like the live delete handler does.
+	c.cleanupAttachmentFiles(fileIDs)
 }
 
 // StoreProfile pins a user's key on first encounter, warns on change.

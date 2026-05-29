@@ -171,19 +171,19 @@ func TestApp_EditModeDispatchesCorrectVerbPerContext(t *testing.T) {
 		{
 			name:        "room",
 			room:        "room_dispatch",
-			msg:         store.StoredMessage{ID: "msg_room_dispatch", Sender: "usr_alice", Body: "orig", TS: 1, Room: "room_dispatch", Epoch: 1},
+			msg:         store.StoredMessage{ServerOrder: 1, ID: "msg_room_dispatch", Sender: "usr_alice", Body: "orig", TS: 1, Room: "room_dispatch", Epoch: 1},
 			errContains: "no epoch key for room room_dispatch",
 		},
 		{
 			name:        "group",
 			group:       "group_dispatch",
-			msg:         store.StoredMessage{ID: "msg_group_dispatch", Sender: "usr_alice", Body: "orig", TS: 1, Group: "group_dispatch"},
+			msg:         store.StoredMessage{ServerOrder: 1, ID: "msg_group_dispatch", Sender: "usr_alice", Body: "orig", TS: 1, Group: "group_dispatch"},
 			errContains: "no members for group group_dispatch",
 		},
 		{
 			name:        "dm",
 			dm:          "dm_dispatch",
-			msg:         store.StoredMessage{ID: "msg_dm_dispatch", Sender: "usr_alice", Body: "orig", TS: 1, DM: "dm_dispatch"},
+			msg:         store.StoredMessage{ServerOrder: 1, ID: "msg_dm_dispatch", Sender: "usr_alice", Body: "orig", TS: 1, DM: "dm_dispatch"},
 			errContains: "no members for DM dm_dispatch",
 		},
 	}

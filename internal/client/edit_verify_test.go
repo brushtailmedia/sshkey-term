@@ -35,8 +35,8 @@ import (
 
 // editVerifyHarness bundles an Alice-receiving-from-Bob test setup.
 type editVerifyHarness struct {
-	alice *Client         // the client under test (receives edits)
-	bobID string          // "usr_bob"
+	alice   *Client // the client under test (receives edits)
+	bobID   string  // "usr_bob"
 	bobPriv ed25519.PrivateKey
 	bobPub  ed25519.PublicKey
 }
@@ -117,7 +117,7 @@ func (h *editVerifyHarness) seedRoomEpochKey(t *testing.T, room string, epoch in
 // UpdateMessageEdited.
 func (h *editVerifyHarness) seedOriginalRoomMessage(t *testing.T, msgID, room, body string) {
 	t.Helper()
-	_, err := h.alice.store.InsertMessage(store.StoredMessage{
+	_, err := h.alice.store.InsertMessage(store.StoredMessage{ServerOrder: 1,
 		ID:     msgID,
 		Sender: h.bobID,
 		Body:   body,
@@ -321,7 +321,7 @@ func wrapKeyForTwoParties(t *testing.T, key []byte, aliceID string, alicePub ed2
 
 func (h *editVerifyHarness) seedOriginalGroupMessage(t *testing.T, msgID, group, body string) {
 	t.Helper()
-	_, err := h.alice.store.InsertMessage(store.StoredMessage{
+	_, err := h.alice.store.InsertMessage(store.StoredMessage{ServerOrder: 1,
 		ID:     msgID,
 		Sender: h.bobID,
 		Body:   body,
@@ -441,7 +441,7 @@ func TestStoreEditedGroupMessage_RejectsUnknownSender(t *testing.T) {
 
 func (h *editVerifyHarness) seedOriginalDMMessage(t *testing.T, msgID, dmID, body string) {
 	t.Helper()
-	_, err := h.alice.store.InsertMessage(store.StoredMessage{
+	_, err := h.alice.store.InsertMessage(store.StoredMessage{ServerOrder: 1,
 		ID:     msgID,
 		Sender: h.bobID,
 		Body:   body,

@@ -33,7 +33,7 @@ func TestApp_ServerReaction_ReconcilesFromStore(t *testing.T) {
 	clearReactionTracker()
 
 	a, st := newEditAppHarness(t)
-	if _, err := st.InsertMessage(store.StoredMessage{
+	if _, err := st.InsertMessage(store.StoredMessage{ServerOrder: 1,
 		ID:     "msg_live_react",
 		Sender: "usr_bob",
 		Body:   "hello",

@@ -38,9 +38,9 @@ func TestPrependMessages_DedupesOverlapWithExisting(t *testing.T) {
 	m.cursor = 1 // on m4
 
 	// Local-short-page prepend: older m1, m2.
-	m.PrependMessages([]DisplayMessage{{ID: "m1"}, {ID: "m2"}}, true)
+	m.PrependMessages([]DisplayMessage{{ID: "m1"}, {ID: "m2"}})
 	// Server history_result: overlaps m1, m2 (already prepended) and adds m0.
-	m.PrependMessages([]DisplayMessage{{ID: "m0"}, {ID: "m1"}, {ID: "m2"}}, false)
+	m.PrependMessages([]DisplayMessage{{ID: "m0"}, {ID: "m1"}, {ID: "m2"}})
 
 	want := []string{"m0", "m1", "m2", "m3", "m4"}
 	if got := msgIDs(m); !eqStrings(got, want) {
@@ -56,7 +56,7 @@ func TestPrependMessages_DedupesWithinBatch(t *testing.T) {
 	m := NewMessages()
 	m.messages = []DisplayMessage{{ID: "m5"}}
 
-	m.PrependMessages([]DisplayMessage{{ID: "m1"}, {ID: "m1"}, {ID: "m2"}}, false)
+	m.PrependMessages([]DisplayMessage{{ID: "m1"}, {ID: "m1"}, {ID: "m2"}})
 
 	want := []string{"m1", "m2", "m5"}
 	if got := msgIDs(m); !eqStrings(got, want) {
@@ -70,7 +70,7 @@ func TestPrependMessages_KeepsEmptyIDRows(t *testing.T) {
 	m := NewMessages()
 	m.messages = []DisplayMessage{{ID: "m3"}}
 
-	m.PrependMessages([]DisplayMessage{{ID: ""}, {ID: ""}, {ID: "m1"}}, false)
+	m.PrependMessages([]DisplayMessage{{ID: ""}, {ID: ""}, {ID: "m1"}})
 
 	if len(m.messages) != 4 {
 		t.Fatalf("empty-ID rows were collapsed: ids=%v (want 4 rows)", msgIDs(m))

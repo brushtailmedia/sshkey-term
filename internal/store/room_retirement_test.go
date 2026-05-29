@@ -94,9 +94,9 @@ func TestPurgeRoomMessages_DropsMessages(t *testing.T) {
 	s := openTestStore(t)
 
 	// Insert messages in two rooms
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "room_target"})
-	s.InsertMessage(StoredMessage{ID: "m2", Sender: "b", Body: "ho", TS: 2, Room: "room_target"})
-	s.InsertMessage(StoredMessage{ID: "m3", Sender: "c", Body: "keep", TS: 3, Room: "room_other"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "room_target"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m2", Sender: "b", Body: "ho", TS: 2, Room: "room_target"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m3", Sender: "c", Body: "keep", TS: 3, Room: "room_other"})
 
 	if _, err := s.PurgeRoomMessages("room_target"); err != nil {
 		t.Fatalf("PurgeRoomMessages: %v", err)
@@ -120,7 +120,7 @@ func TestPurgeRoomMessages_DropsMessages(t *testing.T) {
 func TestPurgeRoomMessages_DropsReactions(t *testing.T) {
 	s := openTestStore(t)
 
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "room_target"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "room_target"})
 	s.InsertReaction(StoredReaction{ReactionID: "r1", MessageID: "m1", User: "b", Emoji: "👍", TS: 2})
 
 	// Confirm reaction exists
@@ -178,7 +178,7 @@ func TestPurgeRoomMessages_Idempotent(t *testing.T) {
 	}
 
 	// Insert, purge, purge again
-	s.InsertMessage(StoredMessage{ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "room_x"})
+	s.InsertMessage(StoredMessage{ServerOrder: 1, ID: "m1", Sender: "a", Body: "hi", TS: 1, Room: "room_x"})
 	if _, err := s.PurgeRoomMessages("room_x"); err != nil {
 		t.Fatalf("first purge: %v", err)
 	}
