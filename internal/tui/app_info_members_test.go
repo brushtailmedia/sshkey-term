@@ -205,6 +205,47 @@ func TestApp_MemberPanelMessageActionFocusesCreatedDM(t *testing.T) {
 	}
 }
 
+// TestApp_UserInfoPanelMessageActionFocusesCreatedDM covers "m=message" from
+// the user identity panel (ShowUser — /whois, "view profile", Ctrl+g p). That
+// panel hides itself before emitting MemberActionMsg, so it isn't caught by the
+// fromContextInfoPanel (IsVisible + room/group) check; without the
+// fromUserInfoPanel path the created DM is added to the sidebar but never
+// switched to or focused.
+func TestApp_UserInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.sidebar = NewSidebar()
+	a.sidebar.SetRooms([]string{"room_prev"})
+	a.sidebar.updateSelection()
+	a.messages.SetContext("room_prev", "", "")
+	// Simulate the identity panel having just shown usr_bob and hidden itself:
+	// ShowUser sets isUser/userID; Hide() clears only `visible`.
+	a.infoPanel.isUser = true
+	a.infoPanel.userID = "usr_bob"
+
+	var out bytes.Buffer
+	client.SetEncoderForTesting(a.client, protocol.NewEncoder(&out))
+
+	model, _ := a.Update(MemberActionMsg{Action: "message", User: "usr_bob"})
+	updated := model.(App)
+
+	raw, _ := json.Marshal(protocol.DMCreated{
+		Type:    "dm_created",
+		DM:      "dm_new",
+		Members: []string{"usr_alice", "usr_bob"},
+	})
+	updated.handleServerMessage(ServerMsg{Type: "dm_created", Raw: raw})
+
+	if updated.messages.dm != "dm_new" {
+		t.Fatalf("active dm = %q, want dm_new (identity-panel message should switch to the DM)", updated.messages.dm)
+	}
+	if updated.messages.room != "" || updated.messages.group != "" {
+		t.Fatalf("expected room/group cleared after DM focus, got room=%q group=%q", updated.messages.room, updated.messages.group)
+	}
+	if updated.focus != FocusInput {
+		t.Fatalf("focus = %v, want FocusInput (compose ready after messaging from the identity panel)", updated.focus)
+	}
+}
+
 func TestApp_RoomInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
 	a, _ := newEditAppHarness(t)
 	a.sidebar = NewSidebar()

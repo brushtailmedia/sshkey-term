@@ -571,11 +571,21 @@ func (i *InfoPanelModel) ShowUser(userID string, c *client.Client, online map[st
 	// the plumbing is added in a follow-up.
 	i.userLastSeen = ""
 
-	// Auto-copy public key to clipboard on open. Matches /mykey
-	// behavior: pubkey is the unwieldy thing users actually want to
-	// paste elsewhere; fingerprint can be eyeballed from screen.
-	// Populates userClipboardNotice so the panel renders an inline
-	// confirmation line (without this, the auto-copy is silent).
+	// Auto-copy on open is intentionally DISABLED (2026-05-30): opening a
+	// panel is a *view*, and silently clobbering the global clipboard on a
+	// view is surprising. Copying is now explicit — `c` (public key) / `f`
+	// (fingerprint). The old behavior is preserved as copyUserPublicKey()
+	// below; to restore copy-on-open, call i.copyUserPublicKey() here.
+	i.userClipboardNotice = ""
+}
+
+// copyUserPublicKey copies the displayed user's public key to the clipboard
+// and sets the inline confirmation notice. Bound to the `c` key. It is ALSO
+// the retained auto-copy-on-open behavior (which matched /mykey ergonomics):
+// that on-open copy is currently OFF (see ShowUser) because clobbering the
+// clipboard on a view is surprising — re-enable it by calling this from
+// ShowUser again.
+func (i *InfoPanelModel) copyUserPublicKey() {
 	if i.userPubKey != "" {
 		CopyToClipboard(i.userPubKey)
 		i.userClipboardNotice = "Public key copied to clipboard."
@@ -659,6 +669,12 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 			return i, func() tea.Msg {
 				return MemberActionMsg{Action: "verify", User: user}
 			}
+		case "c":
+			// Copy the public key to the clipboard (explicit; auto-copy on
+			// open is disabled). Reuses copyUserPublicKey — also the retained
+			// copy-on-open path.
+			i.copyUserPublicKey()
+			return i, nil
 		case "f":
 			// Copy fingerprint to clipboard + swap the inline notice
 			// so the user gets visible confirmation. Without the
@@ -1131,7 +1147,9 @@ func (i InfoPanelModel) renderUserContent(width int) []string {
 	}
 
 	if i.userClipboardNotice != "" {
-		appendLine("  " + helpDescStyle.Render(i.userClipboardNotice))
+		// Green success style, matching the same "copied to clipboard"
+		// notice in connectfailed.go and other panels (was grey helpDescStyle).
+		appendLine("  " + checkStyle.Render(i.userClipboardNotice))
 		appendBlank()
 	}
 
@@ -1143,6 +1161,9 @@ func (i InfoPanelModel) renderUserContent(width int) []string {
 	}
 	if canVerify {
 		actions = append(actions, "v=verify")
+	}
+	if i.userPubKey != "" {
+		actions = append(actions, "c=copy key")
 	}
 	if i.userFingerprint != "" {
 		actions = append(actions, "f=copy fingerprint")

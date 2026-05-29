@@ -880,7 +880,9 @@ func TestInfoPanelAdminKeyMsg_Routing(t *testing.T) {
 		wantVisibleName string
 	}{
 		{"/add", "", setupGroupAsAdmin,
-			func(a App) bool { return a.picker.IsVisible() && a.picker.req.Verb == "/add" && a.picker.req.Source == PickerSourceInfoPanel },
+			func(a App) bool {
+				return a.picker.IsVisible() && a.picker.req.Verb == "/add" && a.picker.req.Source == PickerSourceInfoPanel
+			},
 			"picker (Source=info_panel, Verb=/add)"},
 		{"/kick", "usr_alice", setupGroupAsAdmin,
 			func(a App) bool { return a.kickConfirm.IsVisible() }, "kickConfirm"},
@@ -1096,7 +1098,7 @@ func TestAddToGroupPicker_SelectionOpensAddConfirm(t *testing.T) {
 
 func TestMute_RouterForwardsWithActiveContext(t *testing.T) {
 	cases := []struct {
-		text, room, group, dm    string
+		text, room, group, dm       string
 		wantRoom, wantGroup, wantDM string
 	}{
 		{"/mute", "room_x", "", "", "room_x", "", ""},
@@ -1157,13 +1159,13 @@ func TestMute_NoActiveContextStatusOnly(t *testing.T) {
 
 func TestRename_RouterForwardsAllForms(t *testing.T) {
 	cases := []struct {
-		text, group, room string
+		text, group, room  string
 		wantArg, wantGroup string
 	}{
-		{"/rename", "group_x", "", "", "group_x"},          // bare in group
+		{"/rename", "group_x", "", "", "group_x"},                // bare in group
 		{"/rename NewName", "group_x", "", "NewName", "group_x"}, // typed in group
-		{"/rename", "", "room_x", "", ""},                   // bare in room
-		{"/rename NewName", "", "room_x", "NewName", ""},   // typed in room
+		{"/rename", "", "room_x", "", ""},                        // bare in room
+		{"/rename NewName", "", "room_x", "NewName", ""},         // typed in room
 	}
 	for _, tc := range cases {
 		i := &InputModel{}
@@ -1278,8 +1280,8 @@ func TestInputParser_GroupAdminRoutesToAppInAllForms(t *testing.T) {
 			text, group, room, dm string
 			wantArg, wantGroup    string
 		}{
-			{verb, "", "", "", "", ""},                       // bare outside group
-			{verb, "group_x", "", "", "", "group_x"},         // bare in group
+			{verb, "", "", "", "", ""},                                 // bare outside group
+			{verb, "group_x", "", "", "", "group_x"},                   // bare in group
 			{verb + " @alice", "group_x", "", "", "@alice", "group_x"}, // typed in group
 			{verb + " @alice", "", "room_x", "", "@alice", ""},         // typed outside group
 		}
@@ -1307,10 +1309,10 @@ func TestInputParser_GroupAdminRoutesToAppInAllForms(t *testing.T) {
 // is the regression guard.
 func TestInputParser_RoleRoutesToAppInAllForms(t *testing.T) {
 	cases := []struct {
-		text          string
+		text            string
 		room, group, dm string
-		wantArg       string
-		wantGroup     string
+		wantArg         string
+		wantGroup       string
 	}{
 		// Bare /role in a group → must forward so App can open the picker.
 		{"/role", "", "group_x", "", "", "group_x"},

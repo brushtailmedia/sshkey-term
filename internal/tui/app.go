@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/crypto/ssh"
 
@@ -152,15 +153,21 @@ type App struct {
 	width  int
 	height int
 	focus  Focus
-	// navMode gates the Ctrl+g prefix flow. When true, the next key
-	// is interpreted as a navigation verb, then nav mode auto-exits.
+	// navMode gates the Ctrl+g prefix flow. When true, the next key is
+	// interpreted as a navigation verb. Nav mode no longer auto-exits — it
+	// ends on a mapped key, g/esc/ctrl+g, or any other key / mouse click.
 	navMode bool
-	// navModeTimeout controls auto-exit duration. Zero disables
-	// timeout and keeps nav mode active until explicit keypress.
-	navModeTimeout time.Duration
-	// navModeTickGen increments on each enter; timeout ticks carry a
-	// generation so stale ticks from prior enters can be ignored.
+	// navModePopupDelay is how long after Ctrl+g the which-key popup
+	// reveals. Zero = reveal instantly.
+	navModePopupDelay time.Duration
+	// navModeTickGen increments on each enter; the reveal tick carries a
+	// generation so a key consumed during the delay cancels a stale reveal.
 	navModeTickGen int
+	// navPopupVisible gates the which-key popup render. Set by the reveal
+	// tick (only when no modal is up), cleared on exit.
+	navPopupVisible bool
+	// navPopupEnabled mirrors the nav_mode_popup config kill switch.
+	navPopupEnabled bool
 	// Layout is no longer cached on the App. It's a derived value of
 	// (width, height, memberPanel.IsVisible) and is computed on
 	// demand by mouse handlers and View via computeLayout(). The
@@ -270,9 +277,10 @@ const refreshingMinVisibleMs = 200
 // server message arrived, which could be much later.
 type refreshingTickMsg struct{}
 
-// navModeTimeoutMsg is emitted by tea.Tick when nav-mode's timeout
-// window elapses.
-type navModeTimeoutMsg struct {
+// navPopupRevealMsg is emitted by the tea.Tick armed in enterNavMode;
+// when it fires (nav mode still active, gen matches, no modal up) the
+// which-key popup becomes visible.
+type navPopupRevealMsg struct {
 	Gen int
 }
 
@@ -289,9 +297,9 @@ const (
 // New creates the app model.
 func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx int) App {
 	kb := config.LoadKeybindings(configDir)
-	navTimeoutMs := kb.Navigation.NavModeTimeoutMs
-	if navTimeoutMs < 0 {
-		navTimeoutMs = 0
+	popupDelayMs := kb.Navigation.NavModePopupDelayMs
+	if popupDelayMs < 0 {
+		popupDelayMs = 0
 	}
 
 	a := App{
@@ -332,22 +340,23 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 			}
 			return dirs
 		}),
-		retireConfirm:   NewRetireConfirm(),
-		deviceRevoked:   NewDeviceRevoked(),
-		deviceMgr:       NewDeviceMgr(),
-		saveAttachment:  NewSaveAttachment(),
-		passphrase:      NewPassphrase(),
-		passphraseCh:    make(chan []byte, 1),
-		passphraseCache: make(map[string][]byte),
-		roomPins:        make(map[string][]string),
-		appConfig:       appCfg,
-		configDir:       configDir,
-		serverIdx:       serverIdx,
-		bell:            NewBellConfig(appCfg.Notifications),
-		muted:           config.LoadMutedMap(appCfg),
-		showHelpHint:    !appCfg.Notifications.HelpShown,
-		focus:           FocusInput,
-		navModeTimeout:  time.Duration(navTimeoutMs) * time.Millisecond,
+		retireConfirm:     NewRetireConfirm(),
+		deviceRevoked:     NewDeviceRevoked(),
+		deviceMgr:         NewDeviceMgr(),
+		saveAttachment:    NewSaveAttachment(),
+		passphrase:        NewPassphrase(),
+		passphraseCh:      make(chan []byte, 1),
+		passphraseCache:   make(map[string][]byte),
+		roomPins:          make(map[string][]string),
+		appConfig:         appCfg,
+		configDir:         configDir,
+		serverIdx:         serverIdx,
+		bell:              NewBellConfig(appCfg.Notifications),
+		muted:             config.LoadMutedMap(appCfg),
+		showHelpHint:      !appCfg.Notifications.HelpShown,
+		focus:             FocusInput,
+		navModePopupDelay: time.Duration(popupDelayMs) * time.Millisecond,
+		navPopupEnabled:   kb.Navigation.NavModePopup,
 		// Seed connGen to 1, not 0. Production code never uses gen 0;
 		// keeping zero out of the valid range means a missing-stamp bug
 		// (struct constructed without setting gen) shows up immediately
@@ -421,7 +430,7 @@ func (a *App) startConnect() tea.Cmd {
 }
 
 func (a *App) openQuickSwitch() {
-	a.quickSwitch.Show(a.sidebar.rooms, a.sidebar.groups, a.sidebar.resolveName, a.sidebar.resolveRoomName)
+	a.quickSwitch.Show(a.sidebar.rooms, a.sidebar.groups, a.sidebar.dms, a.sidebar.resolveName, a.sidebar.resolveRoomName, a.sidebar.resolveDMName)
 }
 
 func (a *App) openNewConversation() {
@@ -584,18 +593,39 @@ func (a *App) enterNavMode() tea.Cmd {
 	a.navMode = true
 	a.navModeTickGen++
 	a.statusBar.SetNavigationMode(true)
-	if a.navModeTimeout <= 0 {
+	// No popup when the kill switch is off, or when a modal owns the screen
+	// (the popup is a bare-chat affordance — decision 6). Nav keys still
+	// dispatch in both cases; there's just nothing to reveal.
+	if !a.navPopupEnabled || a.anyModalVisible() {
+		return nil
+	}
+	if a.navModePopupDelay <= 0 {
+		a.navPopupVisible = true
 		return nil
 	}
 	gen := a.navModeTickGen
-	return tea.Tick(a.navModeTimeout, func(time.Time) tea.Msg {
-		return navModeTimeoutMsg{Gen: gen}
+	return tea.Tick(a.navModePopupDelay, func(time.Time) tea.Msg {
+		return navPopupRevealMsg{Gen: gen}
 	})
 }
 
 func (a *App) exitNavMode() {
 	a.navMode = false
+	a.navPopupVisible = false
 	a.statusBar.SetNavigationMode(false)
+}
+
+// openDeviceManager shows the registered-devices panel and requests a fresh
+// device list. Shared by the Settings "manage devices" action and Ctrl+g d.
+// The list fetch is gated on a live connection: SendListDevices writes to the
+// client's encoder, which is nil while disconnected, so fetching without the
+// connected guard would panic (e.g. Ctrl+g d pressed mid-reconnect). When
+// offline the panel still opens, just without a refresh.
+func (a *App) openDeviceManager() {
+	a.deviceMgr.Show()
+	if a.client != nil && a.connected {
+		a.client.SendListDevices()
+	}
 }
 
 // handleNavModeKey handles the second key in Ctrl+g nav mode.
@@ -628,6 +658,16 @@ func (a *App) handleNavModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		a.exitNavMode()
 		a.openSettingsPanel()
 		return nil, true
+	case "d":
+		a.exitNavMode()
+		a.openDeviceManager()
+		return nil, true
+	case "p":
+		a.exitNavMode()
+		if a.client != nil {
+			a.whoisReadout(a.client.UserID())
+		}
+		return nil, true
 	case "/":
 		a.exitNavMode()
 		a.search.Show()
@@ -654,10 +694,10 @@ func (a *App) handleNavModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		}
 		return a.switchServerByIndex(idx), true
 	default:
-		// Unrecognized key exits nav mode and falls through to the
-		// normal dispatcher (e.g., typing into input).
+		// Unrecognized key in nav mode: dismiss the popup and swallow the
+		// key (strict which-key — it does NOT fall through to typing).
 		a.exitNavMode()
-		return nil, false
+		return nil, true
 	}
 }
 
@@ -2080,6 +2120,12 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case MemberActionMsg:
 		fromMembersPanel := a.memberPanel.IsVisible() && (a.focus == FocusMembers || a.memberMenu.IsVisible())
 		fromContextInfoPanel := a.infoPanel.IsVisible() && !a.infoPanel.isDM && (a.infoPanel.room != "" || a.infoPanel.group != "")
+		// The user identity panel (ShowUser — /whois, member-panel "view
+		// profile", Ctrl+g p) hides itself BEFORE emitting MemberActionMsg, so
+		// IsVisible() is already false here; its isUser/userID state survives
+		// Hide(), so match on that. "Message this user" from it should land in
+		// the new DM's input, same as the member panel.
+		fromUserInfoPanel := a.infoPanel.isUser && a.infoPanel.userID == msg.User
 		// Phase 14 admin actions keep the info panel open so the
 		// user can chain multiple operations. All other actions
 		// (message, menu, verify, profile) still close it as before.
@@ -2162,7 +2208,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.statusBar.SetError("Cannot create a DM with yourself")
 					break
 				}
-				if fromMembersPanel || fromContextInfoPanel {
+				if fromMembersPanel || fromContextInfoPanel || fromUserInfoPanel {
 					a.setPendingFocusCreatedDM(msg.User)
 				}
 				if err := a.client.CreateDM(msg.User); err != nil {
@@ -2392,10 +2438,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.retireConfirm.Show()
 		case "manage_devices":
 			a.settings.Hide()
-			a.deviceMgr.Show()
-			if a.client != nil {
-				a.client.SendListDevices()
-			}
+			a.openDeviceManager()
 		case "copy_pubkey":
 			if a.client != nil {
 				pubKey := a.client.PublicKeyAuthorized()
@@ -2808,9 +2851,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return refreshingTickMsg{}
 		})
 
-	case navModeTimeoutMsg:
-		if a.navMode && msg.Gen == a.navModeTickGen {
-			a.exitNavMode()
+	case navPopupRevealMsg:
+		// Reveal the which-key popup only if nav mode is still active (a
+		// consumed key bumps the gen / clears navMode) and no modal opened
+		// during the delay — gating where the bool is *set* keeps the popup
+		// out of modal contexts entirely (decision 6).
+		if a.navMode && msg.Gen == a.navModeTickGen && !a.anyModalVisible() {
+			a.navPopupVisible = true
 		}
 		return a, nil
 
@@ -2970,6 +3017,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for i, g := range a.sidebar.groups {
 				if g.ID == msg.Group {
 					a.sidebar.cursor = len(a.sidebar.rooms) + i
+					break
+				}
+			}
+		} else if msg.DM != "" {
+			for i, d := range a.sidebar.dms {
+				if d.ID == msg.DM {
+					a.sidebar.cursor = len(a.sidebar.rooms) + len(a.sidebar.groups) + i
 					break
 				}
 			}
@@ -3940,6 +3994,13 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 // handleMouseClick processes a left click at the given coordinates.
 func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
+	// A click anywhere dismisses an active nav-mode popup and is swallowed
+	// (click-outside-to-close, decision 2). This is the click-only path
+	// (left release), so mere cursor motion never dismisses the popup.
+	if a.navMode {
+		a.exitNavMode()
+		return a, nil
+	}
 	// Compute layout fresh — see computeLayout's doc-comment for why
 	// we don't read from a.layout (it was a stale-state bug). All
 	// HitTest / SidebarItemAt / MessageItemAt / MemberItemAt /
@@ -8313,6 +8374,20 @@ func (a App) viewBody() string {
 	}
 	if a.passphrase.IsVisible() {
 		return a.passphrase.View(a.width)
+	}
+
+	// which-key popup — a non-focus-stealing hint, painted last so it only
+	// appears over bare chat (any modal above already early-returned).
+	// Anchored just above the input bar, mirroring the picker/statusPicker
+	// overlays.
+	if a.navPopupVisible {
+		popup := renderNavPopup()
+		col := layout.MessagesX0 + 2
+		row := layout.InputY0 - lipgloss.Height(popup)
+		if row < 1 {
+			row = 1
+		}
+		return overlay(screen, popup, col, row, a.width, a.height)
 	}
 
 	return screen

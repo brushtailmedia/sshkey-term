@@ -493,8 +493,8 @@ func TestInfoPanel_AKPXAdminKeysEmitMsgForAdmin(t *testing.T) {
 		wantVerb     string
 		wantTargetID string
 	}{
-		{"a", "/add", ""},          // target picked later via the /add picker
-		{"r", "/kick", "usr_bob"},  // highlighted member
+		{"a", "/add", ""},         // target picked later via the /add picker
+		{"r", "/kick", "usr_bob"}, // highlighted member
 		{"p", "/promote", "usr_bob"},
 		{"x", "/demote", "usr_bob"},
 	}

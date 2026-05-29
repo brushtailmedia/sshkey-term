@@ -9,20 +9,24 @@ import (
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
-// QuickSwitchMsg is emitted when the user selects a room or group DM.
+// QuickSwitchMsg is emitted when the user selects a room, group DM, or 1:1 DM.
 type QuickSwitchMsg struct {
 	Room  string
 	Group string
+	DM    string
 }
 
-// QuickSwitchModel is a fuzzy-search overlay for switching rooms/group DMs.
+// QuickSwitchModel is a fuzzy-search overlay for switching rooms, group DMs,
+// and 1:1 DMs.
 type QuickSwitchModel struct {
 	visible         bool
 	input           textinput.Model
 	rooms           []string
 	groups          []protocol.GroupInfo
+	dms             []protocol.DMInfo
 	resolveName     func(string) string // user nanoid → display name
 	resolveRoomName func(string) string // room nanoid → display name
+	resolveDMName   func(string) string // dm nanoid → other user's display name
 	filtered        []switchItem
 	cursor          int
 }
@@ -31,6 +35,7 @@ type switchItem struct {
 	label string // display text
 	room  string // non-empty for rooms
 	group string // non-empty for group DMs
+	dm    string // non-empty for 1:1 DMs
 }
 
 func NewQuickSwitch() QuickSwitchModel {
@@ -40,12 +45,14 @@ func NewQuickSwitch() QuickSwitchModel {
 	return QuickSwitchModel{input: ti}
 }
 
-func (q *QuickSwitchModel) Show(rooms []string, groups []protocol.GroupInfo, resolve, resolveRoom func(string) string) {
+func (q *QuickSwitchModel) Show(rooms []string, groups []protocol.GroupInfo, dms []protocol.DMInfo, resolve, resolveRoom, resolveDM func(string) string) {
 	q.visible = true
 	q.rooms = rooms
 	q.groups = groups
+	q.dms = dms
 	q.resolveName = resolve
 	q.resolveRoomName = resolveRoom
+	q.resolveDMName = resolveDM
 	q.input.SetValue("")
 	q.input.Focus()
 	q.cursor = 0
@@ -95,6 +102,24 @@ func (q *QuickSwitchModel) updateFiltered() {
 		}
 	}
 
+	// 1:1 DMs — labeled by the other participant's display name, prefixed
+	// with `@` (rooms use `#`) so the row type is obvious and `@alice`
+	// finds the DM. Includes retired-partner DMs (they're still in the
+	// sidebar, read-only) — same set the sidebar renders.
+	for _, d := range q.dms {
+		name := ""
+		if q.resolveDMName != nil {
+			name = strings.TrimSpace(q.resolveDMName(d.ID))
+		}
+		if name == "" {
+			name = d.ID
+		}
+		label := "@" + name
+		if query == "" || strings.Contains(strings.ToLower(label), query) {
+			q.filtered = append(q.filtered, switchItem{label: label, dm: d.ID})
+		}
+	}
+
 	if q.cursor >= len(q.filtered) {
 		q.cursor = 0
 	}
@@ -110,7 +135,7 @@ func (q QuickSwitchModel) Update(msg tea.KeyMsg) (QuickSwitchModel, tea.Cmd) {
 			item := q.filtered[q.cursor]
 			q.Hide()
 			return q, func() tea.Msg {
-				return QuickSwitchMsg{Room: item.room, Group: item.group}
+				return QuickSwitchMsg{Room: item.room, Group: item.group, DM: item.dm}
 			}
 		}
 		return q, nil

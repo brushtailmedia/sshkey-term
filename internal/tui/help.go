@@ -143,21 +143,20 @@ func (h HelpModel) renderContent(width int) string {
 	navRows := []helpRow{
 		{"tab", "toggle sidebar focus"},
 		{"Ctrl+g", "navigation prefix"},
-		{"Ctrl+g k", "quick switch"},
-		{"Ctrl+g n", "new group DM"},
-		{"Ctrl+g m", "member panel"},
-		{"Ctrl+p", "pinned messages"},
-		{"i / Ctrl+g i", "room/group/DM info"},
-		{"Ctrl+g /", "search"},
-		{"Ctrl+g s", "settings"},
-		{"Ctrl+g 1-9", "switch server"},
-		{"Ctrl+g h/l", "prev/next server"},
-		{"Ctrl+g j", "server switcher"},
-		{"Ctrl+q", "quit (confirm)"},
-		{"Alt/Option+↑/↓", "prev/next room"},
-		{"↑/↓ j/k", "navigate"},
-		{"pgup/pgdn", "scroll history"},
 	}
+	// Ctrl+g continuations are generated from the single navBindings source
+	// (navpopup.go) so the help panel, the which-key popup, and the dispatch
+	// can't drift. Non-prefix globals stay hand-listed below.
+	for _, nb := range navBindings {
+		navRows = append(navRows, helpRow{"Ctrl+g " + nb.keys, nb.desc})
+	}
+	navRows = append(navRows,
+		helpRow{"Ctrl+p", "pinned messages"},
+		helpRow{"Ctrl+q", "quit (confirm)"},
+		helpRow{"Alt/Option+↑/↓", "prev/next room"},
+		helpRow{"↑/↓ j/k", "navigate"},
+		helpRow{"pgup/pgdn", "scroll history"},
+	)
 	msgRows := []helpRow{
 		{"r", "reply to selected"},
 		{"e", "react (emoji)"},

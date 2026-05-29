@@ -10,6 +10,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/config"
+	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
 func newNavModeAppHarness(t *testing.T) App {
@@ -23,7 +24,8 @@ func newNavModeAppHarness(t *testing.T) App {
 	a.settings = NewSettings()
 	a.addServer = NewAddServer(nil)
 	a.statusBar = NewStatusBar()
-	a.navModeTimeout = 2 * time.Second
+	a.navModePopupDelay = 2 * time.Second
+	a.navPopupEnabled = true
 	a.configDir = t.TempDir()
 	a.appConfig = &config.Config{
 		Device: config.DeviceConfig{ID: "dev_nav_mode"},
@@ -71,7 +73,10 @@ func TestNavMode_Enter(t *testing.T) {
 		t.Fatal("Ctrl+g should enter nav mode")
 	}
 	if cmd == nil {
-		t.Fatal("Ctrl+g should schedule timeout tick when timeout > 0")
+		t.Fatal("Ctrl+g should schedule the reveal tick when delay > 0 and popup enabled")
+	}
+	if updated.navPopupVisible {
+		t.Fatal("popup must not be visible until the reveal tick fires")
 	}
 	if !strings.Contains(updated.statusBar.View(80), "navigation mode") {
 		t.Fatal("status bar should show navigation mode indicator")
@@ -188,6 +193,37 @@ func TestNavMode_RecognizedKeysFireAndExit(t *testing.T) {
 		}
 	})
 
+	t.Run("d open device manager", func(t *testing.T) {
+		a := newNavModeAppHarness(t)
+		a = updateNavApp(t, a, navCtrlG())
+		a = updateNavApp(t, a, navRune('d'))
+		if !a.deviceMgr.IsVisible() {
+			t.Fatal("Ctrl+g d should open the device manager")
+		}
+		if a.navMode {
+			t.Fatal("nav mode should exit after recognized key")
+		}
+	})
+
+	t.Run("p open profile panel", func(t *testing.T) {
+		a := newNavModeAppHarness(t)
+		// whoisReadout(self) opens the identity panel only when the self
+		// profile carries a fingerprint — seed one.
+		client.SetProfileForTesting(a.client, &protocol.Profile{
+			User:           a.client.UserID(),
+			DisplayName:    "Alice",
+			KeyFingerprint: "SHA256:test",
+		})
+		a = updateNavApp(t, a, navCtrlG())
+		a = updateNavApp(t, a, navRune('p'))
+		if !a.infoPanel.IsVisible() {
+			t.Fatal("Ctrl+g p should open your profile (identity) panel")
+		}
+		if a.navMode {
+			t.Fatal("nav mode should exit after recognized key")
+		}
+	})
+
 	t.Run("slash open search", func(t *testing.T) {
 		a := newNavModeAppHarness(t)
 		a = updateNavApp(t, a, navCtrlG())
@@ -276,7 +312,7 @@ func TestNavMode_NumberKeysAllSwitch(t *testing.T) {
 	}
 }
 
-func TestNavMode_UnrecognizedKeyExitsAndFallsThroughInput(t *testing.T) {
+func TestNavMode_UnrecognizedKeyExitsAndSwallows(t *testing.T) {
 	a := newNavModeAppHarness(t)
 	// Keep this test local-only; no outbound typing side effects.
 	a.client = nil
@@ -288,8 +324,9 @@ func TestNavMode_UnrecognizedKeyExitsAndFallsThroughInput(t *testing.T) {
 	if a.navMode {
 		t.Fatal("unrecognized key should exit nav mode")
 	}
-	if got := a.input.Value(); got != "z" {
-		t.Fatalf("unrecognized key should fall through to input, got %q", got)
+	// Strict which-key: the dismissing key is consumed, not typed.
+	if got := a.input.Value(); got != "" {
+		t.Fatalf("unrecognized key in nav mode should be swallowed, not typed; input = %q", got)
 	}
 	if strings.Contains(a.statusBar.View(80), "navigation mode") {
 		t.Fatal("status bar should clear indicator after unrecognized-key exit")
@@ -322,17 +359,17 @@ func TestNavMode_CancelKeys(t *testing.T) {
 	})
 }
 
-func TestNavMode_TimeoutHandling(t *testing.T) {
-	t.Run("matching generation exits", func(t *testing.T) {
+func TestNavMode_PopupReveal(t *testing.T) {
+	t.Run("matching generation reveals popup, no auto-exit", func(t *testing.T) {
 		a := newNavModeAppHarness(t)
 		a = updateNavApp(t, a, navCtrlG())
 		gen := a.navModeTickGen
-		a = updateNavApp(t, a, navModeTimeoutMsg{Gen: gen})
-		if a.navMode {
-			t.Fatal("timeout message should exit nav mode")
+		a = updateNavApp(t, a, navPopupRevealMsg{Gen: gen})
+		if !a.navPopupVisible {
+			t.Fatal("matching-gen reveal should make the popup visible")
 		}
-		if strings.Contains(a.statusBar.View(80), "navigation mode") {
-			t.Fatal("status bar navigation indicator should clear on timeout")
+		if !a.navMode {
+			t.Fatal("reveal must NOT exit nav mode — there is no auto-exit")
 		}
 	})
 
@@ -344,22 +381,42 @@ func TestNavMode_TimeoutHandling(t *testing.T) {
 		if a.navModeTickGen == stale {
 			t.Fatal("precondition failed: generation should increment")
 		}
-		a = updateNavApp(t, a, navModeTimeoutMsg{Gen: stale})
-		if !a.navMode {
-			t.Fatal("stale timeout should not exit nav mode")
+		a = updateNavApp(t, a, navPopupRevealMsg{Gen: stale})
+		if a.navPopupVisible {
+			t.Fatal("stale-gen reveal should be ignored")
 		}
 	})
 
-	t.Run("zero timeout disables auto tick", func(t *testing.T) {
+	t.Run("zero delay reveals instantly", func(t *testing.T) {
 		a := newNavModeAppHarness(t)
-		a.navModeTimeout = 0
+		a.navModePopupDelay = 0
 		model, cmd := a.Update(navCtrlG())
 		updated := model.(App)
 		if !updated.navMode {
-			t.Fatal("Ctrl+g should still enter nav mode when timeout is zero")
+			t.Fatal("Ctrl+g should enter nav mode")
+		}
+		if !updated.navPopupVisible {
+			t.Fatal("zero delay should reveal the popup immediately")
 		}
 		if cmd != nil {
-			t.Fatal("timeout=0 should not schedule a timeout tick")
+			t.Fatal("zero delay should not schedule a reveal tick")
+		}
+	})
+
+	t.Run("disabled kill switch never reveals", func(t *testing.T) {
+		a := newNavModeAppHarness(t)
+		a.navPopupEnabled = false
+		a.navModePopupDelay = 0 // would reveal instantly if enabled
+		model, cmd := a.Update(navCtrlG())
+		updated := model.(App)
+		if !updated.navMode {
+			t.Fatal("Ctrl+g should still enter nav mode with the popup disabled")
+		}
+		if updated.navPopupVisible {
+			t.Fatal("kill switch off → popup must never show")
+		}
+		if cmd != nil {
+			t.Fatal("kill switch off → no reveal tick")
 		}
 	})
 }

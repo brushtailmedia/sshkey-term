@@ -32,13 +32,15 @@ Press `Ctrl+g`, then one of:
 | `m` | Toggle member panel |
 | `i` | Room/group/DM info panel |
 | `s` | Settings |
+| `d` | Your devices panel |
+| `p` | Your profile panel |
 | `/` | Search |
 | `1`-`9` | Switch to server N (a digit past the configured count opens Add Server) |
 | `h` / `l` | Previous / next server in the ring (Add Server is a ring slot after the last server) |
 | `j` | Server quick-switch overlay (configured servers + an Add server row) |
 | `g` or `Esc` | Cancel nav mode |
 
-Default timeout is `2000ms`. Set `[navigation] nav_mode_timeout_ms = 0` to disable auto-exit.
+After `Ctrl+g`, a which-key popup lists these continuations once you pause (default `300ms`). Set `[navigation] nav_mode_popup_delay_ms = 0` to show it instantly, or `nav_mode_popup = false` to disable it. Nav mode does not auto-exit: press a listed key to run it, `g`/`Esc` to cancel, or any other key/click to dismiss.
 
 ### Navigation
 
@@ -234,7 +236,8 @@ Custom keybindings via `~/.sshkey-term/keybindings.toml`. Only uncommented lines
 # next_room = "alt+down"
 # scroll_up = "pageup"
 # scroll_down = "pagedown"
-# nav_mode_timeout_ms = 2000
+# nav_mode_popup_delay_ms = 300
+# nav_mode_popup = true
 
 # [message]
 # reply = "r"

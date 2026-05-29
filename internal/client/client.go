@@ -222,10 +222,37 @@ func (c *Client) hydrateLocalCache(st *store.Store) {
 // an empty value sends no SSH username, which the server treats as "no hint".
 func (c *Client) buildSSHClientConfig(signer ssh.Signer) *ssh.ClientConfig {
 	return &ssh.ClientConfig{
+		Config:          secureSSHConfig(),
 		User:            c.cfg.User,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: hostKeyCallback(c.cfg.DataDir, c.cfg.Host),
 		Timeout:         10 * time.Second,
+	}
+}
+
+// secureSSHConfig pins the SSH transport algorithm allowlist and MUST mirror
+// the server's pin (sshkey-chat internal/server.secureSSHConfig): AEAD-only
+// ciphers, ML-KEM-768 + X25519 post-quantum-hybrid KEX preferred (classical
+// curve25519 fallback), ETM-SHA2 MACs. Both ends run the same x/crypto, so the
+// intersection always negotiates the PQ hybrid. See the server-side comment /
+// audit finding S4 for the full rationale. Note: the PQ-hybrid KEX hardens the
+// transport (routing metadata) only — E2E message content is sealed by the
+// classical X25519 ECIES wrap and is unaffected by this setting.
+func secureSSHConfig() ssh.Config {
+	return ssh.Config{
+		Ciphers: []string{
+			ssh.CipherChaCha20Poly1305,
+			ssh.CipherAES256GCM,
+			ssh.CipherAES128GCM,
+		},
+		KeyExchanges: []string{
+			ssh.KeyExchangeMLKEM768X25519,
+			ssh.KeyExchangeCurve25519,
+		},
+		MACs: []string{
+			"hmac-sha2-256-etm@openssh.com",
+			"hmac-sha2-512-etm@openssh.com",
+		},
 	}
 }
 

@@ -26,18 +26,19 @@ type GlobalKeys struct {
 }
 
 type NavigationKeys struct {
-	PrevRoom         string `toml:"prev_room"`
-	NextRoom         string `toml:"next_room"`
-	Focus            string `toml:"sidebar_focus"`
-	ScrollUp         string `toml:"scroll_up"`
-	ScrollDown       string `toml:"scroll_down"`
-	JumpTop          string `toml:"jump_top"`
-	JumpBottom       string `toml:"jump_bottom"`
-	Up               string `toml:"up"`
-	Down             string `toml:"down"`
-	VimUp            string `toml:"vim_up"`
-	VimDown          string `toml:"vim_down"`
-	NavModeTimeoutMs int    `toml:"nav_mode_timeout_ms"`
+	PrevRoom            string `toml:"prev_room"`
+	NextRoom            string `toml:"next_room"`
+	Focus               string `toml:"sidebar_focus"`
+	ScrollUp            string `toml:"scroll_up"`
+	ScrollDown          string `toml:"scroll_down"`
+	JumpTop             string `toml:"jump_top"`
+	JumpBottom          string `toml:"jump_bottom"`
+	Up                  string `toml:"up"`
+	Down                string `toml:"down"`
+	VimUp               string `toml:"vim_up"`
+	VimDown             string `toml:"vim_down"`
+	NavModePopupDelayMs int    `toml:"nav_mode_popup_delay_ms"`
+	NavModePopup        bool   `toml:"nav_mode_popup"`
 }
 
 type MessageKeys struct {
@@ -67,18 +68,19 @@ func DefaultKeybindings() Keybindings {
 			CommandMode:    "/",
 		},
 		Navigation: NavigationKeys{
-			PrevRoom:         "alt+up",
-			NextRoom:         "alt+down",
-			Focus:            "tab",
-			ScrollUp:         "pageup",
-			ScrollDown:       "pagedown",
-			JumpTop:          "home",
-			JumpBottom:       "end",
-			Up:               "up",
-			Down:             "down",
-			VimUp:            "k",
-			VimDown:          "j",
-			NavModeTimeoutMs: 2000,
+			PrevRoom:            "alt+up",
+			NextRoom:            "alt+down",
+			Focus:               "tab",
+			ScrollUp:            "pageup",
+			ScrollDown:          "pagedown",
+			JumpTop:             "home",
+			JumpBottom:          "end",
+			Up:                  "up",
+			Down:                "down",
+			VimUp:               "k",
+			VimDown:             "j",
+			NavModePopupDelayMs: 300,
+			NavModePopup:        true,
 		},
 		Message: MessageKeys{
 			Reply:       "r",
@@ -137,7 +139,8 @@ func LoadKeybindings(configDir string) Keybindings {
 # next_room = "alt+down"
 # scroll_up = "pageup"
 # scroll_down = "pagedown"
-# nav_mode_timeout_ms = 2000
+# nav_mode_popup_delay_ms = 300
+# nav_mode_popup = true
 
 # [message]
 # reply = "r"
@@ -160,8 +163,11 @@ func LoadKeybindings(configDir string) Keybindings {
 		mergeKeybindings(&kb, &overrides)
 		// Int fields need metadata checks so an explicit zero is not
 		// mistaken for "unset".
-		if md.IsDefined("navigation", "nav_mode_timeout_ms") {
-			kb.Navigation.NavModeTimeoutMs = overrides.Navigation.NavModeTimeoutMs
+		if md.IsDefined("navigation", "nav_mode_popup_delay_ms") {
+			kb.Navigation.NavModePopupDelayMs = overrides.Navigation.NavModePopupDelayMs
+		}
+		if md.IsDefined("navigation", "nav_mode_popup") {
+			kb.Navigation.NavModePopup = overrides.Navigation.NavModePopup
 		}
 	}
 
