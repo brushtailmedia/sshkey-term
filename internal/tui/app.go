@@ -4425,6 +4425,28 @@ func (a *App) focusSidebarDM(dmID string) {
 	}
 }
 
+// focusSidebarDMForCompose / focusSidebarGroupForCompose switch to a
+// just-created (or reused) conversation AND land the cursor in the compose
+// input, so the natural next action after "message this user" / creating a group
+// is to type — no Tab/Esc/click needed. These are deliberately separate from the
+// plain focusSidebar* helpers (and from the generic switchMessageContext /
+// switchToSidebarSelection) so ordinary sidebar navigation, quick switch, and
+// search jump keep their existing focus semantics and are never force-focused
+// into compose. Only the matched local-create result branches use these (see
+// created-conversation-input-focus.md). The member panel, if still visible, is
+// unfocused so it does not keep a highlighted cursor behind the input.
+func (a *App) focusSidebarDMForCompose(dmID string) {
+	a.focusSidebarDM(dmID)
+	a.focus = FocusInput
+	a.memberPanel.SetFocused(false)
+}
+
+func (a *App) focusSidebarGroupForCompose(groupID string) {
+	a.focusSidebarGroup(groupID)
+	a.focus = FocusInput
+	a.memberPanel.SetFocused(false)
+}
+
 func (a *App) showInfoPanelForContext(room, group, dm string) {
 	if a.client == nil {
 		return
@@ -7161,7 +7183,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				Name:    m.Name,
 			})
 			if a.shouldFocusCreatedGroup(m) {
-				a.focusSidebarGroup(m.Group)
+				a.focusSidebarGroupForCompose(m.Group)
 			}
 		}
 	case "group_added_to":
@@ -7273,7 +7295,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				}
 			}
 			if a.shouldFocusCreatedDM(m) {
-				a.focusSidebarDM(m.DM)
+				a.focusSidebarDMForCompose(m.DM)
 			}
 		}
 	case "dm":

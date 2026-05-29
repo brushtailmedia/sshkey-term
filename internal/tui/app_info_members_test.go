@@ -197,6 +197,12 @@ func TestApp_MemberPanelMessageActionFocusesCreatedDM(t *testing.T) {
 	if updated.sidebar.SelectedDM() != "dm_new" {
 		t.Fatalf("sidebar selected dm = %q, want dm_new", updated.sidebar.SelectedDM())
 	}
+	if updated.focus != FocusInput {
+		t.Fatalf("focus = %v, want FocusInput (compose ready after create)", updated.focus)
+	}
+	if updated.memberPanel.focused {
+		t.Fatal("member panel should not remain focused after landing in compose")
+	}
 }
 
 func TestApp_RoomInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
@@ -207,6 +213,7 @@ func TestApp_RoomInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
 	a.messages.SetContext("room_prev", "", "")
 	a.infoPanel.visible = true
 	a.infoPanel.room = "room_prev"
+	a.focus = FocusMessages // start outside compose so the assertion is meaningful
 
 	var out bytes.Buffer
 	client.SetEncoderForTesting(a.client, protocol.NewEncoder(&out))
@@ -229,6 +236,12 @@ func TestApp_RoomInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
 	}
 	if updated.sidebar.SelectedDM() != "dm_new" {
 		t.Fatalf("sidebar selected dm = %q, want dm_new", updated.sidebar.SelectedDM())
+	}
+	if updated.focus != FocusInput {
+		t.Fatalf("focus = %v, want FocusInput (compose ready after create)", updated.focus)
+	}
+	if updated.memberPanel.focused {
+		t.Fatal("member panel should not remain focused after landing in compose")
 	}
 }
 
@@ -242,6 +255,7 @@ func TestApp_GroupInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
 	a.messages.SetContext("", "group_prev", "")
 	a.infoPanel.visible = true
 	a.infoPanel.group = "group_prev"
+	a.focus = FocusMessages // start outside compose so the assertion is meaningful
 
 	var out bytes.Buffer
 	client.SetEncoderForTesting(a.client, protocol.NewEncoder(&out))
@@ -264,6 +278,12 @@ func TestApp_GroupInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
 	}
 	if updated.sidebar.SelectedDM() != "dm_new" {
 		t.Fatalf("sidebar selected dm = %q, want dm_new", updated.sidebar.SelectedDM())
+	}
+	if updated.focus != FocusInput {
+		t.Fatalf("focus = %v, want FocusInput (compose ready after create)", updated.focus)
+	}
+	if updated.memberPanel.focused {
+		t.Fatal("member panel should not remain focused after landing in compose")
 	}
 }
 
@@ -311,6 +331,12 @@ func TestApp_MemberPanelCreateGroupFocusesCreatedGroup(t *testing.T) {
 	if updated.sidebar.SelectedGroup() != "group_new" {
 		t.Fatalf("sidebar selected group = %q, want group_new", updated.sidebar.SelectedGroup())
 	}
+	if updated.focus != FocusInput {
+		t.Fatalf("focus = %v, want FocusInput (compose ready after create)", updated.focus)
+	}
+	if updated.memberPanel.focused {
+		t.Fatal("member panel should not remain focused after landing in compose")
+	}
 }
 
 func TestApp_DmCreatedDoesNotStealFocusWithoutPendingIntent(t *testing.T) {
@@ -319,6 +345,7 @@ func TestApp_DmCreatedDoesNotStealFocusWithoutPendingIntent(t *testing.T) {
 	a.sidebar.SetRooms([]string{"room_prev"})
 	a.sidebar.updateSelection()
 	a.messages.SetContext("room_prev", "", "")
+	a.focus = FocusMessages // a non-compose focus that must survive an unrelated create
 
 	raw, _ := json.Marshal(protocol.DMCreated{
 		Type:    "dm_created",
@@ -332,6 +359,37 @@ func TestApp_DmCreatedDoesNotStealFocusWithoutPendingIntent(t *testing.T) {
 	}
 	if a.messages.dm != "" {
 		t.Fatalf("dm context should remain empty, got %q", a.messages.dm)
+	}
+	if a.focus != FocusMessages {
+		t.Fatalf("focus = %v, want FocusMessages unchanged (no pending intent must not force compose focus)", a.focus)
+	}
+}
+
+func TestApp_GroupCreatedDoesNotStealFocusWithoutPendingIntent(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.sidebar = NewSidebar()
+	a.sidebar.SetRooms([]string{"room_prev"})
+	a.sidebar.updateSelection()
+	a.messages.SetContext("room_prev", "", "")
+	a.focus = FocusMessages
+
+	raw, _ := json.Marshal(protocol.GroupCreated{
+		Type:    "group_created",
+		Group:   "group_incoming",
+		Members: []string{"usr_alice", "usr_bob"},
+		Admins:  []string{"usr_bob"},
+		Name:    "Incoming",
+	})
+	a.handleServerMessage(ServerMsg{Type: "group_created", Raw: raw})
+
+	if a.messages.room != "room_prev" {
+		t.Fatalf("room context changed unexpectedly to %q", a.messages.room)
+	}
+	if a.messages.group != "" {
+		t.Fatalf("group context should remain empty, got %q", a.messages.group)
+	}
+	if a.focus != FocusMessages {
+		t.Fatalf("focus = %v, want FocusMessages unchanged (no pending intent must not force compose focus)", a.focus)
 	}
 }
 
