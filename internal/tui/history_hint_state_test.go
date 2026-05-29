@@ -1,6 +1,9 @@
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Regression tests for the history hint-state model (history-state-model.md
 // "Final Model"): the overloaded hasMore boolean is replaced by an explicit
@@ -136,5 +139,34 @@ func TestHistoryHint_ExhaustedBlocksRequest(t *testing.T) {
 
 	if cmd := m.requestHistory(); cmd != nil {
 		t.Error("exhausted remote history must not request more")
+	}
+}
+
+// TestHistoryHint_QuietProbeRendersNoLoadingBanner locks the option-A polish:
+// a speculative quiet probe (loadingHistory while remote history is unproven and
+// the hint hidden) must NOT render the "loading history" banner. Otherwise a
+// small conversation flashes the indicator (and a one-row layout shift) for the
+// single server round-trip before the server confirms exhaustion. The banner
+// renders only once there is evidence of more history (hintVisible).
+func TestHistoryHint_QuietProbeRendersNoLoadingBanner(t *testing.T) {
+	m := NewMessages()
+	m.SetContext("room_x", "", "")
+	seedMessages(&m, 5)
+
+	// Speculative probe in flight: loading, but no evidence of more history.
+	m.loadingHistory = true
+	m.hintVisible = false
+	m.remoteState = HistoryUnknown
+	content, _ := m.buildContent(80)
+	if strings.Contains(content, "loading history") {
+		t.Error("speculative quiet probe must not render the loading-history banner (the flash)")
+	}
+
+	// Known load (full local window or server has_more → hintVisible): banner is
+	// appropriate and must render.
+	m.hintVisible = true
+	content, _ = m.buildContent(80)
+	if !strings.Contains(content, "loading history") {
+		t.Error("a load with hintVisible must render the loading-history banner")
 	}
 }

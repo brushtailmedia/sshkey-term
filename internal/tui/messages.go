@@ -1888,11 +1888,17 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 	rowMap := make([]int, len(m.messages))
 	currentRow := 0
 
-	// Top: loading-history indicator. Replaces the previous
-	// "shift start to show cursor at top" + "request history"
-	// scroll mechanism — now the user scrolls to the top of
-	// the viewport explicitly and sees this prompt.
-	if m.loadingHistory {
+	// Top: loading-history indicator — shown only when we have positive evidence
+	// there is more to load (hintVisible: a full initial local window, or a server
+	// has_more). The speculative "quiet probe" on a small conversation
+	// (loadingHistory && !hintVisible) stays SILENT: it sets loadingHistory for one
+	// server round-trip and, when the server confirms exhaustion, clears it —
+	// rendering the banner for that round-trip flashes an indicator (and a one-row
+	// layout shift) that led to nothing. Keeping the probe quiet matches the
+	// "one quiet server probe" design intent (history-state-model.md). A probe that
+	// *does* find history flips hintVisible via markServerHistoryResult, so any
+	// subsequent scroll-up shows the banner normally.
+	if m.loadingHistory && m.hintVisible {
 		b.WriteString(systemMsgStyle.Render(" ── loading history ──"))
 		b.WriteString("\n")
 		currentRow++
