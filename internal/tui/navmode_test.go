@@ -365,17 +365,35 @@ func TestNavMode_TimeoutHandling(t *testing.T) {
 }
 
 func TestNavMode_ModalPrecedence(t *testing.T) {
-	t.Run("add server Ctrl+g remains modal-local", func(t *testing.T) {
+	t.Run("add server Ctrl+g enters server nav (no longer generates)", func(t *testing.T) {
+		// Reversal (server-nav-ux): Add Server is now a first-class slot in
+		// the server ring, so Ctrl+g is the global nav prefix even while the
+		// dialog is open. Generation moved to Alt+g + the [Generate new key]
+		// row. This locks "Ctrl+g no longer enters generate mode".
 		a := newNavModeAppHarness(t)
 		a.addServer.Show()
-		a.addServer.inputs[1].SetValue("chat.example.com")
+		a.addServer.inputs[fieldHost].SetValue("chat.example.com")
 
 		a = updateNavApp(t, a, navCtrlG())
-		if a.navMode {
-			t.Fatal("global nav mode should stay off while add-server modal is open")
+		if !a.navMode {
+			t.Fatal("Ctrl+g while Add Server is open should enter server nav mode")
 		}
+		if a.addServer.mode == addServerGenerate {
+			t.Fatal("Ctrl+g must NOT enter generate mode anymore")
+		}
+		if !a.addServer.IsVisible() {
+			t.Fatal("Add Server should stay visible after entering nav mode")
+		}
+	})
+
+	t.Run("add server Alt+g enters generate mode", func(t *testing.T) {
+		a := newNavModeAppHarness(t)
+		a.addServer.Show()
+		a.addServer.inputs[fieldHost].SetValue("chat.example.com")
+
+		a = updateNavApp(t, a, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}, Alt: true})
 		if a.addServer.mode != addServerGenerate {
-			t.Fatalf("add-server modal should handle Ctrl+g locally, mode=%d", a.addServer.mode)
+			t.Fatalf("Alt+g should enter generate mode, mode=%d", a.addServer.mode)
 		}
 	})
 

@@ -67,6 +67,59 @@ func TestAppMouseClick_WrappedPinnedBarOffsetsSelection(t *testing.T) {
 	}
 }
 
+// TestAppMouseClick_SelectingMessageCollapsesExpandedPinnedBar locks the
+// Option-A fix: while the pinned bar is expanded it grabs every key (the
+// intercept at the top of the KeyMsg handler), so selecting a message below
+// it by mouse must collapse the bar — otherwise the just-selected message
+// could not be replied to / edited / actioned by keyboard.
+func TestAppMouseClick_SelectingMessageCollapsesExpandedPinnedBar(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.width = 56
+	a.height = 30
+	a.sidebar = NewSidebar()
+	a.focus = FocusInput
+	a.messages.SetContext("room_mouse", "", "")
+	a.messages.messages = []DisplayMessage{
+		{ID: "msg_1", FromID: "usr_alice", From: "alice", Body: "first", TS: 1, Room: "room_mouse"},
+		{ID: "msg_2", FromID: "usr_bob", From: "bob", Body: "second", TS: 2, Room: "room_mouse"},
+		{ID: "msg_3", FromID: "usr_bob", From: "bob", Body: "third", TS: 3, Room: "room_mouse"},
+	}
+	a.messages.remoteState = HistoryExhausted
+	a.messages.cursor = 2
+	layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+	// Pin msg_1 and EXPAND the bar — the state that grabs all keys.
+	a.pinnedBar.SetPins("room_mouse", []string{"msg_1"}, a.messages.messages)
+	a.pinnedBar.expanded = true
+	a.messages.SetPinnedBar(a.pinnedBar.View(layout.MessagesWidth - 2))
+	a.refreshMessageContent()
+
+	headerRows := a.messages.HeaderRowsForHitTest(layout.MessagesWidth)
+	pinnedHit := a.messages.PinnedBarRowsForHitTest(layout.MessagesWidth)
+	// First message row sits one row past the (expanded) pinned bar region.
+	x := layout.MessagesX0 + 2
+	y := layout.MessagesY0 + 1 + headerRows + pinnedHit
+	if panel := layout.HitTest(x, y); panel != "messages" {
+		t.Fatalf("precondition: hit-test panel=%q, want messages", panel)
+	}
+	relY := y - layout.MessagesY0 - 1
+	if idx := a.messages.MessageAtViewportRow(relY - headerRows - pinnedHit); idx != 0 {
+		t.Fatalf("precondition: computed message idx=%d, want 0 (msg_1)", idx)
+	}
+
+	model, _ := a.handleMouseClick(x, y)
+	updated := model.(App)
+
+	if updated.pinnedBar.expanded {
+		t.Fatal("selecting a message below the pinned bar must collapse it so the message is keyboard-actionable")
+	}
+	if updated.messages.cursor != 0 {
+		t.Fatalf("message cursor after click = %d, want 0 (msg_1)", updated.messages.cursor)
+	}
+	if updated.focus != FocusMessages {
+		t.Fatalf("focus after selecting a message = %v, want FocusMessages", updated.focus)
+	}
+}
+
 func TestPinnedBarPinIndexAtVisualRow_ExpandedWrapAware(t *testing.T) {
 	p := PinnedBarModel{
 		expanded: true,

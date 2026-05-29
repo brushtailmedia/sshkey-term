@@ -33,7 +33,9 @@ Press `Ctrl+g`, then one of:
 | `i` | Room/group/DM info panel |
 | `s` | Settings |
 | `/` | Search |
-| `1`-`9` | Switch server tab |
+| `1`-`9` | Switch to server N (a digit past the configured count opens Add Server) |
+| `h` / `l` | Previous / next server in the ring (Add Server is a ring slot after the last server) |
+| `j` | Server quick-switch overlay (configured servers + an Add server row) |
 | `g` or `Esc` | Cancel nav mode |
 
 Default timeout is `2000ms`. Set `[navigation] nav_mode_timeout_ms = 0` to disable auto-exit.

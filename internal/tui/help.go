@@ -151,6 +151,8 @@ func (h HelpModel) renderContent(width int) string {
 		{"Ctrl+g /", "search"},
 		{"Ctrl+g s", "settings"},
 		{"Ctrl+g 1-9", "switch server"},
+		{"Ctrl+g h/l", "prev/next server"},
+		{"Ctrl+g j", "server switcher"},
 		{"Ctrl+q", "quit (confirm)"},
 		{"Alt/Option+↑/↓", "prev/next room"},
 		{"↑/↓ j/k", "navigate"},

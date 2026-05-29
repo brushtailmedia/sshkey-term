@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -242,5 +243,70 @@ func TestRename_ErrorNoMarkerDoesNotTouchSettings(t *testing.T) {
 	}
 	if a.settings.noticeIsError || a.settings.editing {
 		t.Error("an error with no rename in flight should not write an error notice or re-enter edit mode")
+	}
+}
+
+// stuckWriter always fails — used to force a local Enc().Encode error.
+type stuckWriter struct{}
+
+func (stuckWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+// A local encode failure on submit must NOT set the in-flight marker (which would
+// stick Settings on "Saving…" with no result coming) and must surface a visible
+// failure. set-profile-corr-id.md dry-run finding: the send path previously
+// discarded the Enc().Encode error and set the marker unconditionally.
+func TestRename_EncodeFailureDoesNotSetMarker(t *testing.T) {
+	a := newRenameApp(t)
+	client.SetEncoderForTesting(a.client, protocol.NewEncoder(stuckWriter{}))
+
+	model, _ := a.updateInner(ProfileUpdateMsg{DisplayName: "NewName"})
+	na := model.(App)
+
+	if na.renameInFlight || na.renameAttempted != "" {
+		t.Fatalf("encode failure must not set the pending marker: inFlight=%v attempted=%q", na.renameInFlight, na.renameAttempted)
+	}
+	if !na.settings.noticeIsError || !contains(na.settings.notice, "Name change failed") {
+		t.Errorf("encode failure should surface an error notice in the visible Settings panel: noticeIsError=%v notice=%q",
+			na.settings.noticeIsError, na.settings.notice)
+	}
+	if na.settings.displayNameRenamePending {
+		t.Error("encode failure must not leave the Settings pending mirror set")
+	}
+}
+
+// A current-server disconnect (ErrMsg) while a rename is pending must clear the
+// marker so Settings doesn't stick on "Saving…": the rename's outcome is unknown
+// and no self-`profile`/error will arrive on the dead connection. The reconnect
+// welcome self-`profile` re-renders the authoritative name.
+func TestRename_DisconnectClearsPending(t *testing.T) {
+	a := newRenameApp(t)
+	a.connected = true // a live connection that then drops -> reconnect branch
+	a.renameInFlight = true
+	a.renameAttempted = "NewName"
+	a.settings.SetDisplayNameRenamePending(true)
+
+	model, _ := a.updateInner(ErrMsg{Err: errors.New("connection lost"), gen: a.connGen})
+	na := model.(App)
+
+	if na.renameInFlight || na.renameAttempted != "" {
+		t.Fatalf("disconnect must clear the pending rename: inFlight=%v attempted=%q", na.renameInFlight, na.renameAttempted)
+	}
+	if na.settings.displayNameRenamePending {
+		t.Error("disconnect must clear the Settings pending mirror so it doesn't stick on Saving…")
+	}
+}
+
+// A disconnect with NO rename pending must not touch rename state (guard against
+// the clear firing spuriously).
+func TestRename_DisconnectNoPendingIsNoop(t *testing.T) {
+	a := newRenameApp(t)
+	a.connected = true
+	// renameInFlight is false.
+
+	model, _ := a.updateInner(ErrMsg{Err: errors.New("connection lost"), gen: a.connGen})
+	na := model.(App)
+
+	if na.renameInFlight {
+		t.Error("disconnect with no pending rename must not set the marker")
 	}
 }

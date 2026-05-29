@@ -392,158 +392,180 @@ func (a AddServerModel) Update(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 	return a.updateForm(msg)
 }
 
+// Form focus zones. `focused` in [0, len(inputs)) is a text field; the two
+// sentinels below sit past the fields, in render/Tab order:
+//
+//	focusGenRow  — the [Generate new key] row (not a text input)
+//	focusKeyList — the scanned-keys list (active row tracked by keyCursor)
+func (a AddServerModel) focusGenRow() int  { return len(a.inputs) }
+func (a AddServerModel) focusKeyList() int { return len(a.inputs) + 1 }
+
+// enterGenerateMode validates the hostname (required — it doubles as the
+// per-server key-folder name) and switches to the generate-key sub-view.
+// Shared by the Alt+g shortcut, Enter on the [Generate new key] row, and a
+// mouse click on that row. On a missing/invalid host it sets formErr and
+// moves focus to the host field instead of switching modes, so the
+// filesystem never sees a key written under an unusable folder name.
+func (a AddServerModel) enterGenerateMode() (AddServerModel, tea.Cmd) {
+	// If focus was in the gen-row / list zone, clamp back into the form
+	// range — the error paths and Esc-back call inputs[focused].Focus()
+	// and would panic on an out-of-bounds index.
+	if a.focused >= len(a.inputs) {
+		a.focused = fieldKey
+	}
+	host := strings.TrimSpace(a.inputs[fieldHost].Value())
+	if host == "" {
+		a.formErr = "Type a hostname first — used as the per-server folder name."
+		a.inputs[a.focused].Blur()
+		a.focused = fieldHost
+		a.inputs[fieldHost].Focus()
+		return a, nil
+	}
+	if err := config.ValidateHost(host); err != nil {
+		a.formErr = "Invalid hostname: " + err.Error()
+		a.inputs[a.focused].Blur()
+		a.focused = fieldHost
+		a.inputs[fieldHost].Focus()
+		return a, nil
+	}
+	// Enter generate sub-view with a host-derived save path and a fresh
+	// passphrase slate (no stale value/echo carried over from a prior open).
+	a.mode = addServerGenerate
+	for i := range a.inputs {
+		a.inputs[i].Blur()
+	}
+	a.genInputs[0].SetValue(config.ServerKeyPath(config.DefaultConfigDir(), host))
+	a.genInputs[1].SetValue("")
+	a.genInputs[2].SetValue("")
+	a.strengthHint = keygen.LiveHint{}
+	a.genFocused = 0
+	a.genInputs[0].Focus()
+	a.genErr = ""
+	return a, nil
+}
+
 func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		a.Hide()
 		return a, nil
 
-	case "ctrl+g":
-		// Require a hostname before opening the generate sub-view.
-		// The new key file lives at <configDir>/<host>/keys/id_ed25519,
-		// so without a host we can't even derive the destination
-		// directory — and the host doubles as the per-server folder
-		// name, so any unsafe path segments (slashes, `..`, control
-		// bytes) would corrupt the filesystem layout. Validate before
-		// the user can type a passphrase, so we never write a key
-		// into a directory we'd then refuse to read back.
-		//
-		// Refuse early: don't switch modes, set formErr to explain,
-		// move focus to the host field so the next keystroke lands
-		// where the user needs to type. One-step fix from the user's
-		// side and the filesystem never sees a misnamed key.
-		// If user was navigating the scanned-keys list, clamp focused
-		// back into the form range — Esc-back from generate calls
-		// inputs[focused].Focus() and would panic on out-of-bounds.
-		if a.focused >= len(a.inputs) {
-			a.focused = fieldKey
-		}
-		host := strings.TrimSpace(a.inputs[1].Value())
-		if host == "" {
-			a.formErr = "Type a hostname first — used as the per-server folder name."
-			a.inputs[a.focused].Blur()
-			a.focused = 1
-			a.inputs[1].Focus()
-			return a, nil
-		}
-		if err := config.ValidateHost(host); err != nil {
-			a.formErr = "Invalid hostname: " + err.Error()
-			a.inputs[a.focused].Blur()
-			a.focused = 1
-			a.inputs[1].Focus()
-			return a, nil
-		}
-		// Enter generate sub-view
-		a.mode = addServerGenerate
-		for i := range a.inputs {
-			a.inputs[i].Blur()
-		}
-		a.genInputs[0].SetValue(config.ServerKeyPath(config.DefaultConfigDir(), host))
-		// Always enter generate with empty passphrase fields and no
-		// stale strength hint — even if the user previously typed a
-		// passphrase in this dialog session and Esc'd back to the
-		// form, the textinput retains the value. Re-show should be a
-		// fresh slate so a passphrase isn't sitting visible (echo is
-		// masked but the value is in memory) and the live hint isn't
-		// reading old data until the first keystroke recomputes it.
-		a.genInputs[1].SetValue("")
-		a.genInputs[2].SetValue("")
-		a.strengthHint = keygen.LiveHint{}
-		a.genFocused = 0
-		a.genInputs[0].Focus()
-		a.genErr = ""
-		return a, nil
+	case "alt+g":
+		// Generate-key shortcut. Ctrl+g is reserved as the global server
+		// navigation prefix (intercepted at the App level while Add Server
+		// is open), so key generation lives on Alt/Option+g and on the
+		// selectable [Generate new key] row. Host validation + sub-view
+		// entry are shared via enterGenerateMode.
+		return a.enterGenerateMode()
 
 	case "tab":
-		// Tab cycles through the four form fields only — the scanned-
-		// keys list isn't part of the tab order (its size varies and
-		// users may want to skip past it quickly to submit). If the
-		// user is currently in the list, Tab pops back out to field 0
-		// rather than advancing through list rows.
-		if a.focused >= len(a.inputs) {
+		// Tab order: field0 → … → fieldKey → [Generate new key] row → field0.
+		// The scanned-keys list is NOT in the Tab cycle (its size varies;
+		// it's reached via Down). From the list or the gen row, Tab wraps
+		// back to field 0.
+		if a.focused < len(a.inputs) {
+			a.inputs[a.focused].Blur()
+		}
+		switch {
+		case a.focused < fieldKey:
+			a.focused++
+			a.inputs[a.focused].Focus()
+		case a.focused == fieldKey:
+			a.focused = a.focusGenRow()
+		default: // gen row or list → wrap to the first field
 			a.focused = 0
 			a.inputs[0].Focus()
-			return a, nil
 		}
-		a.inputs[a.focused].Blur()
-		a.focused = (a.focused + 1) % len(a.inputs)
-		a.inputs[a.focused].Focus()
 		return a, nil
 
 	case "shift+tab":
-		if a.focused >= len(a.inputs) {
-			// From the list, Shift+Tab returns to field 3 — the
-			// natural "above the list" target.
+		// Reverse Tab order: field0 ← [Generate new key] row ← fieldKey ←
+		// … ← field0. From the list, Shift+Tab goes up to the gen row (the
+		// focus stop directly above it).
+		if a.focused < len(a.inputs) {
+			a.inputs[a.focused].Blur()
+		}
+		switch {
+		case a.focused == a.focusKeyList():
+			a.focused = a.focusGenRow()
+		case a.focused == a.focusGenRow():
 			a.focused = fieldKey
 			a.inputs[fieldKey].Focus()
-			return a, nil
+		case a.focused == 0:
+			a.focused = a.focusGenRow()
+		default:
+			a.focused--
+			a.inputs[a.focused].Focus()
 		}
-		a.inputs[a.focused].Blur()
-		a.focused--
-		if a.focused < 0 {
-			a.focused = len(a.inputs) - 1
-		}
-		a.inputs[a.focused].Focus()
 		return a, nil
 
 	case "down":
-		// Down acts like Tab within the form, but with one extra step:
-		// from field 3 it descends into the scanned-keys list (if any),
-		// matching the visual layout where the list sits below the
-		// form. Within the list, Down moves the cursor; we deliberately
-		// don't wrap back to field 0 at the bottom — keeps the user
-		// oriented when scrolling through a long key list.
-		if a.focused >= len(a.inputs) {
+		// Down descends, matching the visual layout: fields → [Generate
+		// new key] row → scanned-keys list. Within the list, Down moves the
+		// cursor (no wrap at the bottom — keeps the user oriented in a long
+		// list). The gen row is always present; the list only if keys exist.
+		switch {
+		case a.focused == a.focusKeyList():
 			if a.keyCursor < len(a.scannedKeys)-1 {
 				a.keyCursor++
 			}
-			return a, nil
-		}
-		if a.focused == fieldKey && len(a.scannedKeys) > 0 {
+		case a.focused == a.focusGenRow():
+			if len(a.scannedKeys) > 0 {
+				a.focused = a.focusKeyList()
+				a.keyCursor = 0
+			}
+		case a.focused == fieldKey:
 			a.inputs[fieldKey].Blur()
-			a.focused = len(a.inputs)
-			a.keyCursor = 0
-			return a, nil
+			a.focused = a.focusGenRow()
+		default:
+			a.inputs[a.focused].Blur()
+			a.focused++
+			a.inputs[a.focused].Focus()
 		}
-		a.inputs[a.focused].Blur()
-		a.focused = (a.focused + 1) % len(a.inputs)
-		a.inputs[a.focused].Focus()
 		return a, nil
 
 	case "up":
-		// Up navigates within the list when the user is in it,
-		// returning to field 3 from the top row. Outside the list,
-		// behaves like Shift+Tab (cycle backward through fields).
-		if a.focused >= len(a.inputs) {
+		// Up ascends: list → [Generate new key] row → fieldKey → … (wraps
+		// to fieldKey at the top of the form). From the top list row it
+		// steps up to the gen row; from the gen row, back to the key field.
+		switch {
+		case a.focused == a.focusKeyList():
 			if a.keyCursor > 0 {
 				a.keyCursor--
-				return a, nil
+			} else {
+				a.focused = a.focusGenRow()
 			}
+		case a.focused == a.focusGenRow():
 			a.focused = fieldKey
 			a.inputs[fieldKey].Focus()
-			return a, nil
+		default:
+			a.inputs[a.focused].Blur()
+			a.focused--
+			if a.focused < 0 {
+				a.focused = len(a.inputs) - 1
+			}
+			a.inputs[a.focused].Focus()
 		}
-		a.inputs[a.focused].Blur()
-		a.focused--
-		if a.focused < 0 {
-			a.focused = len(a.inputs) - 1
-		}
-		a.inputs[a.focused].Focus()
 		return a, nil
 
 	case "enter", "ctrl+enter":
 		// Enter on a list row means "select this key" (parallel to
 		// mouse click on the same row), not "submit the form". Fill
-		// inputs[3] with the highlighted path and return focus to
-		// field 3 so the user can review or adjust before pressing
-		// Enter again to submit.
-		if a.focused >= len(a.inputs) {
+		// the key field with the highlighted path and return focus to
+		// it so the user can review or adjust before pressing Enter
+		// again to submit.
+		if a.focused == a.focusKeyList() {
 			if a.keyCursor >= 0 && a.keyCursor < len(a.scannedKeys) {
 				a.inputs[fieldKey].SetValue(a.scannedKeys[a.keyCursor].Path)
 			}
 			a.focused = fieldKey
 			a.inputs[fieldKey].Focus()
 			return a, nil
+		}
+		// Enter on the [Generate new key] row opens the generate sub-view
+		// (same host-validation + entry path as Alt+g and a row click).
+		if a.focused == a.focusGenRow() {
+			return a.enterGenerateMode()
 		}
 		// Validate and submit
 		a.formErr = "" // clear any prior submit error
@@ -799,6 +821,14 @@ func (a AddServerModel) HandleMouse(msg tea.MouseMsg) (AddServerModel, tea.Cmd) 
 		}
 	}
 
+	// [Generate new key] row: rendered directly below the form fields
+	// (Y = first-field 4 + len(inputs)*2). A click opens generate mode —
+	// same path as Alt+g and Enter on the row. enterGenerateMode handles
+	// focus clamping + host validation.
+	if msg.Y == 4+len(a.inputs)*2 {
+		return a.enterGenerateMode()
+	}
+
 	// Check scanned key lines
 	keyStartY := a.keyListStartY()
 	for i, entry := range a.scannedKeys {
@@ -825,6 +855,7 @@ func (a AddServerModel) keyListStartY() int {
 	// Border(1) + padding(1) + header(1) + blank(1) + len(inputs) fields * 2.
 	// Derived from len(inputs) so it tracks the field count (5 fields → 14).
 	y := 4 + len(a.inputs)*2
+	y += 2 // [Generate new key] row + blank (always rendered)
 	if a.genNotice != "" {
 		y += 2 // notice line + blank
 	}
@@ -860,6 +891,16 @@ func (a AddServerModel) viewForm(width int) string {
 		b.WriteString("\n\n")
 	}
 
+	// [Generate new key] selectable row — focus stop after the key field,
+	// before notices/errors and the scanned-keys list. Highlighted when
+	// focused; Enter / click / Alt+g all open the generate sub-view. Keep
+	// in sync with keyListStartY() and HandleMouse (row at Y = 4+len*2).
+	genRow := "  [ Generate new key ]"
+	if a.focused == a.focusGenRow() {
+		genRow = completionSelectedStyle.Render(genRow)
+	}
+	b.WriteString(genRow + "\n\n")
+
 	if a.genNotice != "" {
 		b.WriteString("  " + helpDescStyle.Render(a.genNotice) + "\n\n")
 	}
@@ -879,7 +920,7 @@ func (a AddServerModel) viewForm(width int) string {
 			// Highlight the row only when keyboard focus is in the
 			// list. A leftover keyCursor from a prior visit shouldn't
 			// look "selected" while the user is typing in a form field.
-			if a.focused == len(a.inputs) && i == a.keyCursor {
+			if a.focused == a.focusKeyList() && i == a.keyCursor {
 				line = completionSelectedStyle.Render(line)
 			}
 			b.WriteString(line + "\n")
@@ -887,7 +928,7 @@ func (a AddServerModel) viewForm(width int) string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(helpDescStyle.Render("  Tab=field  ↑/↓=keys  Enter=add/select  Ctrl+g=generate  Esc=cancel"))
+	b.WriteString(helpDescStyle.Render("  Tab=field  ↑/↓=keys  Enter=add/select  Alt+g=generate  Esc=cancel"))
 
 	return dialogStyle.Width(width - 4).Render(b.String())
 }

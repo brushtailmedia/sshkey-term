@@ -492,6 +492,13 @@ func (a *App) openSettingsPanel() {
 }
 
 func (a *App) switchServerByIndex(idx int) tea.Cmd {
+	// Dismiss the Add Server overlay if a switch was initiated from the
+	// ring slot. This sits ABOVE the early-return (unlike connectFailed.Hide
+	// / passphrase.Hide below, which are after it) on purpose: re-selecting
+	// the current server from the Add Server slot — single-server `Ctrl+g l`,
+	// or `Ctrl+g <current digit>` — is a no-op switch that must still reveal
+	// the server underneath. No-op when the wizard isn't open.
+	a.addServer.Hide()
 	if a.appConfig == nil || idx < 0 || idx >= len(a.appConfig.Servers) || idx == a.serverIdx {
 		return nil
 	}
@@ -625,9 +632,26 @@ func (a *App) handleNavModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		a.exitNavMode()
 		a.search.Show()
 		return nil, true
+	case "h":
+		a.exitNavMode()
+		return a.cycleServer(-1), true
+	case "l":
+		a.exitNavMode()
+		return a.cycleServer(1), true
+	case "j":
+		a.exitNavMode()
+		a.openServerSwitcher()
+		return nil, true
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		a.exitNavMode()
 		idx := int(key[0]-'0') - 1
+		// A digit past the configured server count is the explicit
+		// "I tried to reach a server slot that does not exist" path:
+		// open the add-server wizard instead of the old silent no-op.
+		if a.appConfig == nil || idx >= len(a.appConfig.Servers) {
+			a.openAddServerFromNav()
+			return nil, true
+		}
 		return a.switchServerByIndex(idx), true
 	default:
 		// Unrecognized key exits nav mode and falls through to the
@@ -635,6 +659,102 @@ func (a *App) handleNavModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		a.exitNavMode()
 		return nil, false
 	}
+}
+
+// openAddServerFromNav opens the add-server wizard from any nav-origin
+// path. It hides the connect-failed overlay first so the wizard is not
+// painted behind the failure screen (View renders connectFailed before
+// normal overlays). No-op hide when the overlay isn't visible.
+func (a *App) openAddServerFromNav() {
+	a.connectFailed.Hide()
+	a.addServer.Show()
+}
+
+// cycleServer moves through the server navigation ring by delta (+1 next,
+// -1 previous). The ring is: Server 1 → … → Server N → Add Server → Server 1.
+// Returns the connect tea.Cmd when the move lands on a real server, or nil
+// when it opens the Add Server slot.
+func (a *App) cycleServer(delta int) tea.Cmd {
+	if a.appConfig == nil || len(a.appConfig.Servers) == 0 {
+		// No configured targets: any ring move opens the wizard.
+		a.openAddServerFromNav()
+		return nil
+	}
+	n := len(a.appConfig.Servers)
+
+	// Add Server slot: when the wizard is the active ring slot, h/l are
+	// slot-relative — forward wraps to the first server, backward to the
+	// last — NOT serverIdx±1, because serverIdx still points at the
+	// underlying server. switchServerByIndex hides the wizard (top-hide),
+	// so a no-op re-selection (single server, or the current index) still
+	// reveals the server underneath.
+	if a.addServer.IsVisible() {
+		if delta < 0 {
+			return a.switchServerByIndex(n - 1)
+		}
+		return a.switchServerByIndex(0)
+	}
+
+	// Ephemeral CLI mode: the current server is not in the configured list,
+	// but there are real configured targets — use the list edges rather than
+	// opening the wizard.
+	if a.serverIdx < 0 || a.serverIdx >= n {
+		if delta < 0 {
+			return a.switchServerByIndex(n - 1)
+		}
+		return a.switchServerByIndex(0)
+	}
+
+	// Add Server is the extra ring slot after the last configured server
+	// and before the first configured server.
+	if delta > 0 && a.serverIdx == n-1 {
+		a.openAddServerFromNav()
+		return nil
+	}
+	if delta < 0 && a.serverIdx == 0 {
+		a.openAddServerFromNav()
+		return nil
+	}
+
+	return a.switchServerByIndex(a.serverIdx + delta)
+}
+
+// serverPickerAddID is the sentinel PickerItem ID for the "[Add server]"
+// row in the server quick-switch picker. The \x00 prefix guarantees it can
+// never collide with a strconv.Itoa(serverIndex) value, and strconv.Atoi
+// on it fails (handled by the explicit equality check in the verb branch).
+const serverPickerAddID = "\x00add"
+
+// openServerSwitcher opens the shared picker as a server quick-switch
+// overlay: one row per configured server (the current one marked) plus a
+// trailing [Add server] row. Falls back to the wizard when no servers are
+// configured. Builds items and calls picker.Show directly (NOT via
+// openPicker/pickerCandidates, which are user/group candidate builders).
+func (a *App) openServerSwitcher() {
+	if a.appConfig == nil || len(a.appConfig.Servers) == 0 {
+		a.openAddServerFromNav()
+		return
+	}
+	// Clear overlays that must not paint over the picker: connectFailed
+	// (escape-hatch origin) and addServer (the `j`-from-Add-Server path,
+	// which doesn't switch, so it can't rely on switchServerByIndex's hide).
+	a.connectFailed.Hide()
+	a.addServer.Hide()
+	items := make([]PickerItem, 0, len(a.appConfig.Servers)+1)
+	for i, srv := range a.appConfig.Servers {
+		secondary := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
+		if i == a.serverIdx {
+			secondary += "  (current)"
+		}
+		items = append(items, PickerItem{
+			ID:        strconv.Itoa(i),
+			Primary:   srv.Name,
+			Secondary: secondary,
+			Search:    []string{srv.Host},
+		})
+	}
+	items = append(items, PickerItem{ID: serverPickerAddID, Primary: "[Add server]"})
+	a.picker.Show(PickerRequest{Verb: "switch_server", ShowFilter: true}, items)
 }
 
 // KeyChangeEvent is the tea.Msg form of a client-layer OnKeyWarning
@@ -1204,7 +1324,8 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if a.navMode {
 				switch msg.String() {
-				case "1", "2", "3", "4", "5", "6", "7", "8", "9",
+				case "h", "l", "j",
+					"1", "2", "3", "4", "5", "6", "7", "8", "9",
 					"g", "esc", "ctrl+g":
 					if cmd, handled := a.handleNavModeKey(msg); handled {
 						return a, cmd
@@ -1452,8 +1573,31 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
-		// Add server dialog intercepts keys when visible
+		// Add server dialog intercepts keys when visible. Add Server is a
+		// first-class slot in the server navigation ring (not a dead-end
+		// modal), so Ctrl+g stays the global nav prefix here — key
+		// generation moved off Ctrl+g to Alt+g + the [Generate new key]
+		// row so the prefix is free. Mirrors the connect-failed escape
+		// hatch above; the a.navMode gate is what keeps plain h/l/j typed
+		// in the form fields as ordinary text.
 		if a.addServer.IsVisible() {
+			if msg.String() == "ctrl+g" {
+				return a, a.enterNavMode()
+			}
+			if a.navMode {
+				switch msg.String() {
+				case "h", "l", "j",
+					"1", "2", "3", "4", "5", "6", "7", "8", "9",
+					"g", "esc", "ctrl+g":
+					if cmd, handled := a.handleNavModeKey(msg); handled {
+						return a, cmd
+					}
+				default:
+					// Non-nav key after the prefix: cancel nav mode and let
+					// the key fall through to the form as normal input.
+					a.exitNavMode()
+				}
+			}
 			var cmd tea.Cmd
 			a.addServer, cmd = a.addServer.Update(msg)
 			if !a.addServer.IsVisible() {
@@ -2064,7 +2208,19 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// resolved ID, never re-entering name resolution (#3). More
 		// verbs are added here per the §9 sequence; `/whois` is the
 		// proving milestone (#12).
+		var cmd tea.Cmd
 		switch msg.Request.Verb {
+		case "switch_server":
+			// Server quick-switch (server-nav-ux §9). IDs are opaque:
+			// either the add sentinel or a strconv server index. Unlike
+			// every other verb here, switchServerByIndex returns a connect
+			// tea.Cmd that MUST propagate via `return a, cmd` below — drop
+			// it and the picker switches config + UI but never dials.
+			if msg.SelectedID == serverPickerAddID {
+				a.openAddServerFromNav()
+			} else if idx, err := strconv.Atoi(msg.SelectedID); err == nil {
+				cmd = a.switchServerByIndex(idx)
+			}
 		case "/whois":
 			a.whoisReadout(msg.SelectedID)
 		case "/verify":
@@ -2105,7 +2261,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// construction; assert nothing changes on slash /add.
 			a.addConfirmForTarget(msg.SelectedID, msg.Request.SubjectUserID)
 		}
-		return a, nil
+		return a, cmd
 
 	case StatusSelectMsg:
 		// User picked a status from the StatusPicker modal. Same
@@ -2143,10 +2299,22 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.renameInFlight {
 				return a, nil
 			}
-			a.client.Enc().Encode(protocol.SetProfile{
+			if err := a.client.Enc().Encode(protocol.SetProfile{
 				Type:        "set_profile",
 				DisplayName: msg.DisplayName,
-			})
+			}); err != nil {
+				// Local encode/write failed — the request never left the client, so
+				// no self-`profile` (success) or server `error` will ever arrive.
+				// Do NOT set the in-flight marker; setting it would stick Settings on
+				// "Saving…" forever. Surface the failure where the user is looking.
+				if a.settings.IsVisible() {
+					a.settings.SetDisplayNameRenamePending(false)
+					a.settings.SetErrorNotice("Name change failed: could not send (" + err.Error() + ")")
+				} else {
+					a.statusBar.SetError("Name change failed: could not send")
+				}
+				return a, nil
+			}
 			a.renameInFlight = true
 			a.renameAttempted = msg.DisplayName
 			if a.settings.IsVisible() {
@@ -2686,24 +2854,35 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 
 	case AddServerMsg:
-		if a.appConfig != nil {
-			srv := config.ServerConfig{
-				Name:                 msg.Name,
-				Host:                 msg.Host,
-				Port:                 msg.Port,
-				RequestedDisplayName: msg.RequestedDisplayName,
-			}
-			// AddServer validates srv.Host (Phase 2 addition); the
-			// error path surfaces a clear status-bar message
-			// instead of the prior unconditional "Server added"
-			// false-success.
-			if err := config.AddServer(a.configDir, a.appConfig, srv); err != nil {
-				a.statusBar.SetError("Failed to add server: " + err.Error())
-			} else {
-				a.statusBar.SetError("Server added: " + msg.Name)
-			}
+		// Defensive: the nav ring can open Add Server from a no-config
+		// state (e.g. an ephemeral CLI session). Initialize an empty
+		// config so submit adds the first server instead of silently
+		// no-oping — a silent no-op would be worse than the old digit
+		// dead-end this feature removes.
+		if a.appConfig == nil {
+			a.appConfig = &config.Config{}
 		}
-		return a, nil
+		var cmd tea.Cmd
+		srv := config.ServerConfig{
+			Name:                 msg.Name,
+			Host:                 msg.Host,
+			Port:                 msg.Port,
+			RequestedDisplayName: msg.RequestedDisplayName,
+		}
+		// AddServer validates srv.Host and dedups on host:port; the error
+		// path surfaces a clear status-bar message instead of the prior
+		// unconditional "Server added" false-success.
+		if err := config.AddServer(a.configDir, a.appConfig, srv); err != nil {
+			a.statusBar.SetError("Failed to add server: " + err.Error())
+		} else {
+			// Ring UX: switch to (and connect) the just-added server.
+			// AddServer appended in place, so it is the last entry. The
+			// connect cmd from switchServerByIndex MUST be returned
+			// (below) or the new server is selected but never dialed.
+			a.statusBar.SetError("Server added: " + msg.Name)
+			cmd = a.switchServerByIndex(len(a.appConfig.Servers) - 1)
+		}
+		return a, cmd
 
 	case EmojiSelectedMsg:
 		if a.client != nil {
@@ -3563,6 +3742,20 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.err = msg.Err
 		a.statusBar.SetConnected(false)
+		// A current-server disconnect ends any in-flight display-name rename with
+		// an unknown outcome: the set_profile may or may not have been written, and
+		// no self-`profile`/error will arrive on this dead connection. Clear the
+		// pending marker so Settings doesn't stick on "Saving…"; the reconnect
+		// welcome self-`profile` re-renders the authoritative name (and still fires
+		// the success toast via case "profile" if it matches renameAttempted).
+		if a.renameInFlight {
+			a.renameInFlight = false
+			a.renameAttempted = ""
+			if a.settings.IsVisible() {
+				a.settings.SetDisplayNameRenamePending(false)
+				a.settings.SetErrorNotice("Connection lost — display-name change status unknown")
+			}
+		}
 		if a.connected || a.reconnectAttempt > 0 {
 			// Was previously connected — auto-reconnect with exponential backoff
 			a.connected = false
@@ -3843,6 +4036,10 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 		if idx >= 0 && idx < len(a.messages.messages) {
 			a.messages.cursor = idx
 			a.focus = FocusMessages
+			// Collapse the pinned bar so its expanded-state key grab (top of the
+			// KeyMsg handler) releases — otherwise the just-selected message
+			// couldn't be replied to / edited / actioned by keyboard.
+			a.pinnedBar.expanded = false
 		}
 
 	case "members":

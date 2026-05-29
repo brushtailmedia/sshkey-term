@@ -54,8 +54,8 @@ func keyMsg(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyEnter}
 	case "esc":
 		return tea.KeyMsg{Type: tea.KeyEsc}
-	case "ctrl+g":
-		return tea.KeyMsg{Type: tea.KeyCtrlG}
+	case "alt+g":
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}, Alt: true}
 	case "down":
 		return tea.KeyMsg{Type: tea.KeyDown}
 	case "up":
@@ -93,7 +93,12 @@ func TestAddServer_TabCyclesFields(t *testing.T) {
 			break
 		}
 	}
-	// Wrap around
+	// After the last field (fieldKey) comes the [Generate new key] row.
+	a, _ = a.Update(keyMsg("tab"))
+	if a.focused != a.focusGenRow() {
+		t.Errorf("Tab from key field should focus the gen row (%d), got %d", a.focusGenRow(), a.focused)
+	}
+	// One more Tab wraps to field 0 (the scanned-keys list is Down-only).
 	a, _ = a.Update(keyMsg("tab"))
 	if a.focused != 0 {
 		t.Errorf("focus should wrap to 0, got %d", a.focused)
@@ -109,29 +114,29 @@ func TestAddServer_EscHides(t *testing.T) {
 	}
 }
 
-func TestAddServer_CtrlGEntersGenerateMode(t *testing.T) {
+func TestAddServer_AltGEntersGenerateMode(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 	if a.mode != addServerGenerate {
-		t.Errorf("mode after Ctrl+G = %d, want addServerGenerate", a.mode)
+		t.Errorf("mode after Alt+g = %d, want addServerGenerate", a.mode)
 	}
 	if a.genFocused != 0 {
 		t.Errorf("genFocused = %d, want 0 (path)", a.genFocused)
 	}
 }
 
-func TestAddServer_CtrlGRequiresHost(t *testing.T) {
+func TestAddServer_AltGRequiresHost(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
-	// Host left empty — Ctrl+G should refuse to enter generate mode.
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	// Host left empty — Alt+g should refuse to enter generate mode.
+	a, _ = a.Update(keyMsg("alt+g"))
 	if a.mode != addServerForm {
-		t.Errorf("Ctrl+G with empty host should stay in form mode, got %d", a.mode)
+		t.Errorf("Alt+g with empty host should stay in form mode, got %d", a.mode)
 	}
 	if a.formErr == "" {
-		t.Error("Ctrl+G with empty host should set formErr")
+		t.Error("Alt+g with empty host should set formErr")
 	}
 	if !strings.Contains(a.formErr, "hostname") {
 		t.Errorf("formErr should mention hostname, got: %q", a.formErr)
@@ -141,14 +146,14 @@ func TestAddServer_CtrlGRequiresHost(t *testing.T) {
 	}
 }
 
-func TestAddServer_CtrlGRejectsWhitespaceOnlyHost(t *testing.T) {
+func TestAddServer_AltGRejectsWhitespaceOnlyHost(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	// Whitespace-only host — same treatment as empty.
 	a.inputs[1].SetValue("   ")
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 	if a.mode != addServerForm {
-		t.Errorf("Ctrl+G with whitespace host should stay in form, got mode=%d", a.mode)
+		t.Errorf("Alt+g with whitespace host should stay in form, got mode=%d", a.mode)
 	}
 	if a.formErr == "" {
 		t.Error("whitespace host should set formErr")
@@ -159,7 +164,7 @@ func TestAddServer_GenerateEscReturnsToForm(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 	if a.mode != addServerGenerate {
 		t.Fatal("precondition: should be in generate mode")
 	}
@@ -176,7 +181,7 @@ func TestAddServer_GenerateTabCyclesFields(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 	// 3 fields: path, pass, confirm
 	for want := 1; want < 3; want++ {
 		a, _ = a.Update(keyMsg("tab"))
@@ -194,7 +199,7 @@ func TestAddServer_GenerateEmptyPathRejected(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 	// Clear default path
 	a.genInputs[0].SetValue("")
 	a, _ = a.Update(keyMsg("enter"))
@@ -213,7 +218,7 @@ func TestAddServer_GeneratePassphraseMismatch(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 
 	dir := t.TempDir()
 	a.genInputs[0].SetValue(filepath.Join(dir, "newkey"))
@@ -231,7 +236,7 @@ func TestAddServer_GenerateRejectsInvalidDisplayName(t *testing.T) {
 	a.Show()
 	a.inputs[fieldHost].SetValue("chat.example.com")
 	a.inputs[fieldDisplayName].SetValue("bad+name") // DP9: '+' is banned.
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "generated_key")
@@ -262,7 +267,7 @@ func TestAddServer_GenerateExistingFileRejected(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 
 	dir := t.TempDir()
 	existingPath := filepath.Join(dir, "existing")
@@ -282,7 +287,7 @@ func TestAddServer_GenerateSuccessReturnsToForm(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 
 	dir := t.TempDir()
 	newPath := filepath.Join(dir, "generated_key")
@@ -568,11 +573,11 @@ func TestAddServer_KeyListStartY_NoNotice(t *testing.T) {
 	a.scannedKeys = nil
 	a.genNotice = ""
 
-	// With no keys, keyListStartY returns the base (form takes rows 0..13:
-	// header rows 0..3 + 5 fields * 2)
+	// With no keys: header rows 0..3 + 5 fields*2 (=14) + the [Generate new
+	// key] row + blank (+2) = 16.
 	y := a.keyListStartY()
-	if y != 14 {
-		t.Errorf("keyListStartY with no keys = %d, want 14", y)
+	if y != 16 {
+		t.Errorf("keyListStartY with no keys = %d, want 16", y)
 	}
 }
 
@@ -582,10 +587,10 @@ func TestAddServer_KeyListStartY_WithKeys(t *testing.T) {
 	a.scannedKeys = []keyEntry{{Path: "/tmp/k1", Type: "ed25519"}}
 	a.genNotice = ""
 
-	// With keys, header adds 2 lines (label + blank) → first key at 16
+	// 14 (fields) + 2 (gen row) + 2 (keys header) → first key at 18.
 	y := a.keyListStartY()
-	if y != 16 {
-		t.Errorf("keyListStartY with 1 key, no notice = %d, want 16", y)
+	if y != 18 {
+		t.Errorf("keyListStartY with 1 key, no notice = %d, want 18", y)
 	}
 }
 
@@ -595,10 +600,10 @@ func TestAddServer_KeyListStartY_WithNoticeAndKeys(t *testing.T) {
 	a.scannedKeys = []keyEntry{{Path: "/tmp/k1", Type: "ed25519"}}
 	a.genNotice = "✓ Key generated — back it up"
 
-	// Notice adds 2 lines (line + blank) + keys header 2 lines → 14 + 2 + 2 = 18
+	// 14 (fields) + 2 (gen row) + 2 (notice) + 2 (keys header) = 20.
 	y := a.keyListStartY()
-	if y != 18 {
-		t.Errorf("keyListStartY with notice + keys = %d, want 18", y)
+	if y != 20 {
+		t.Errorf("keyListStartY with notice + keys = %d, want 20", y)
 	}
 }
 
@@ -630,7 +635,7 @@ func TestAddServer_HandleMouse_ClickOnKeyEntry(t *testing.T) {
 	}
 	a.genNotice = ""
 
-	// First key is at keyListStartY() = 14
+	// First key is at keyListStartY() (computed dynamically; 16 with the gen row).
 	startY := a.keyListStartY()
 	a, _ = a.HandleMouse(tea.MouseMsg{
 		X:      10,
@@ -667,7 +672,7 @@ func TestAddServer_HandleMouse_IgnoresInGenerateMode(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 	if a.mode != addServerGenerate {
 		t.Fatal("should be in generate mode")
 	}
@@ -690,7 +695,7 @@ func TestAddServer_HideClearsPassphraseFields(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 	a.genInputs[1].SetValue("secretpass")
 	a.genInputs[2].SetValue("secretpass")
 
@@ -720,13 +725,13 @@ func TestAddServer_ShowClearsPassphraseFields(t *testing.T) {
 	}
 }
 
-func TestAddServer_CtrlGClearsPassphraseFields(t *testing.T) {
+func TestAddServer_AltGClearsPassphraseFields(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
 	a.inputs[1].SetValue("chat.example.com")
 
 	// Open generate, type a passphrase, Esc back to form
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 	a.genInputs[1].SetValue("typed-then-bailed")
 	a.genInputs[2].SetValue("typed-then-bailed")
 	a, _ = a.Update(keyMsg("esc"))
@@ -735,7 +740,7 @@ func TestAddServer_CtrlGClearsPassphraseFields(t *testing.T) {
 	}
 
 	// Re-enter generate — passphrase fields should be fresh
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 	if a.genInputs[1].Value() != "" {
 		t.Errorf("re-entering generate should clear passphrase, got %q", a.genInputs[1].Value())
 	}
@@ -786,37 +791,49 @@ func setupAddServerWithScannedKeys(t *testing.T) AddServerModel {
 	return a
 }
 
-func TestAddServer_DownFromKeyPathEntersKeyList(t *testing.T) {
+func TestAddServer_DownFromKeyFieldEntersGenRow(t *testing.T) {
 	a := setupAddServerWithScannedKeys(t)
 	a, _ = a.Update(keyMsg("down"))
 
-	if a.focused != len(a.inputs) {
-		t.Errorf("Down from the key field should enter list (focused=%d), got %d", len(a.inputs), a.focused)
+	if a.focused != a.focusGenRow() {
+		t.Errorf("Down from the key field should focus the gen row (%d), got %d", a.focusGenRow(), a.focused)
+	}
+}
+
+func TestAddServer_DownFromGenRowEntersKeyList(t *testing.T) {
+	a := setupAddServerWithScannedKeys(t)
+	a, _ = a.Update(keyMsg("down")) // key field → gen row
+	a, _ = a.Update(keyMsg("down")) // gen row → list
+
+	if a.focused != a.focusKeyList() {
+		t.Errorf("Down from the gen row should enter the list (%d), got %d", a.focusKeyList(), a.focused)
 	}
 	if a.keyCursor != 0 {
 		t.Errorf("entering list should set keyCursor=0, got %d", a.keyCursor)
 	}
 }
 
-func TestAddServer_DownFromKeyPathNoListWrapsToFirstField(t *testing.T) {
+func TestAddServer_DownFromGenRowNoListStays(t *testing.T) {
 	a := NewAddServer(nil)
 	a.Show()
-	a.scannedKeys = nil // explicit: no keys to enter
+	a.scannedKeys = nil // explicit: no keys to descend into
 	a.focused = fieldKey
 
-	a, _ = a.Update(keyMsg("down"))
+	a, _ = a.Update(keyMsg("down")) // key field → gen row
+	a, _ = a.Update(keyMsg("down")) // no list below → stays on the gen row
 
-	if a.focused != 0 {
-		t.Errorf("Down from the key field with empty list should wrap to field 0, got %d", a.focused)
+	if a.focused != a.focusGenRow() {
+		t.Errorf("Down from the gen row with no keys should stay on it (%d), got %d", a.focusGenRow(), a.focused)
 	}
 }
 
 func TestAddServer_DownInKeyListAdvancesCursor(t *testing.T) {
 	a := setupAddServerWithScannedKeys(t)
-	a, _ = a.Update(keyMsg("down")) // enter list
-	a, _ = a.Update(keyMsg("down")) // advance
+	a, _ = a.Update(keyMsg("down")) // → gen row
+	a, _ = a.Update(keyMsg("down")) // → list (cursor=0)
+	a, _ = a.Update(keyMsg("down")) // advance to cursor=1
 
-	if a.focused != len(a.inputs) {
+	if a.focused != a.focusKeyList() {
 		t.Errorf("should still be in list, focused=%d", a.focused)
 	}
 	if a.keyCursor != 1 {
@@ -826,45 +843,59 @@ func TestAddServer_DownInKeyListAdvancesCursor(t *testing.T) {
 
 func TestAddServer_DownAtBottomOfKeyListStays(t *testing.T) {
 	a := setupAddServerWithScannedKeys(t)
-	a, _ = a.Update(keyMsg("down")) // enter list (cursor=0)
+	a, _ = a.Update(keyMsg("down")) // → gen row
+	a, _ = a.Update(keyMsg("down")) // → list (cursor=0)
 	a, _ = a.Update(keyMsg("down")) // cursor=1 (last)
 	a, _ = a.Update(keyMsg("down")) // should stay at 1
 
 	if a.keyCursor != 1 {
 		t.Errorf("Down at bottom of list should stay at last index, got %d", a.keyCursor)
 	}
-	if a.focused != len(a.inputs) {
+	if a.focused != a.focusKeyList() {
 		t.Errorf("Down at bottom should not exit list, focused=%d", a.focused)
 	}
 }
 
 func TestAddServer_UpInKeyListDecrementsCursor(t *testing.T) {
 	a := setupAddServerWithScannedKeys(t)
-	a, _ = a.Update(keyMsg("down")) // enter list
+	a, _ = a.Update(keyMsg("down")) // → gen row
+	a, _ = a.Update(keyMsg("down")) // → list (cursor=0)
 	a, _ = a.Update(keyMsg("down")) // cursor=1
 	a, _ = a.Update(keyMsg("up"))   // back to 0
 
 	if a.keyCursor != 0 {
 		t.Errorf("Up in list should decrement cursor to 0, got %d", a.keyCursor)
 	}
-	if a.focused != len(a.inputs) {
+	if a.focused != a.focusKeyList() {
 		t.Errorf("Up from cursor=1 should stay in list, focused=%d", a.focused)
 	}
 }
 
-func TestAddServer_UpAtTopOfKeyListReturnsToKeyPath(t *testing.T) {
+func TestAddServer_UpAtTopOfKeyListReturnsToGenRow(t *testing.T) {
 	a := setupAddServerWithScannedKeys(t)
-	a, _ = a.Update(keyMsg("down")) // enter list at cursor=0
-	a, _ = a.Update(keyMsg("up"))   // exit back to the key field
+	a, _ = a.Update(keyMsg("down")) // → gen row
+	a, _ = a.Update(keyMsg("down")) // → list at cursor=0
+	a, _ = a.Update(keyMsg("up"))   // top of list → gen row
+
+	if a.focused != a.focusGenRow() {
+		t.Errorf("Up at top of list should return to the gen row (%d), got %d", a.focusGenRow(), a.focused)
+	}
+}
+
+func TestAddServer_UpFromGenRowReturnsToKeyField(t *testing.T) {
+	a := setupAddServerWithScannedKeys(t)
+	a, _ = a.Update(keyMsg("down")) // key field → gen row
+	a, _ = a.Update(keyMsg("up"))   // gen row → key field
 
 	if a.focused != fieldKey {
-		t.Errorf("Up at top of list should return to the key field, got %d", a.focused)
+		t.Errorf("Up from the gen row should return to the key field, got %d", a.focused)
 	}
 }
 
 func TestAddServer_EnterInKeyListSelectsKey(t *testing.T) {
 	a := setupAddServerWithScannedKeys(t)
-	a, _ = a.Update(keyMsg("down")) // enter list (cursor=0)
+	a, _ = a.Update(keyMsg("down")) // → gen row
+	a, _ = a.Update(keyMsg("down")) // → list (cursor=0)
 	a, _ = a.Update(keyMsg("down")) // cursor=1
 
 	a, _ = a.Update(keyMsg("enter"))
@@ -878,9 +909,20 @@ func TestAddServer_EnterInKeyListSelectsKey(t *testing.T) {
 	}
 }
 
+func TestAddServer_EnterOnGenRowEntersGenerate(t *testing.T) {
+	a := setupAddServerWithScannedKeys(t)
+	a.inputs[fieldHost].SetValue("chat.example.com")
+	a, _ = a.Update(keyMsg("down")) // key field → gen row
+	a, _ = a.Update(keyMsg("enter"))
+	if a.mode != addServerGenerate {
+		t.Errorf("Enter on the gen row should open generate mode, got %d", a.mode)
+	}
+}
+
 func TestAddServer_TabFromKeyListReturnsToFirstField(t *testing.T) {
 	a := setupAddServerWithScannedKeys(t)
-	a, _ = a.Update(keyMsg("down")) // enter list
+	a, _ = a.Update(keyMsg("down")) // → gen row
+	a, _ = a.Update(keyMsg("down")) // → list
 	a, _ = a.Update(keyMsg("tab"))
 
 	if a.focused != 0 {
@@ -888,19 +930,20 @@ func TestAddServer_TabFromKeyListReturnsToFirstField(t *testing.T) {
 	}
 }
 
-func TestAddServer_ShiftTabFromKeyListReturnsToKeyPath(t *testing.T) {
+func TestAddServer_ShiftTabFromKeyListReturnsToGenRow(t *testing.T) {
 	a := setupAddServerWithScannedKeys(t)
-	a, _ = a.Update(keyMsg("down"))      // enter list
+	a, _ = a.Update(keyMsg("down"))      // → gen row
+	a, _ = a.Update(keyMsg("down"))      // → list
 	a, _ = a.Update(keyMsg("shift+tab")) // exit upward
 
-	if a.focused != fieldKey {
-		t.Errorf("Shift+Tab from list should return to the key field, got %d", a.focused)
+	if a.focused != a.focusGenRow() {
+		t.Errorf("Shift+Tab from list should return to the gen row (%d), got %d", a.focusGenRow(), a.focused)
 	}
 }
 
-func TestAddServer_TabCyclesFieldsSkipsKeyList(t *testing.T) {
-	// Tab cycles 0..4 even when the list has entries — the list is
-	// only reachable via Down.
+func TestAddServer_TabCyclesFieldsThenGenRowSkipsKeyList(t *testing.T) {
+	// Tab cycles 0..4 then the [Generate new key] row even when the list has
+	// entries — the scanned-keys list is only reachable via Down.
 	a := setupAddServerWithScannedKeys(t)
 	a.focused = 0
 	a.inputs[0].Focus()
@@ -910,10 +953,15 @@ func TestAddServer_TabCyclesFieldsSkipsKeyList(t *testing.T) {
 			t.Errorf("Tab cycle: focused=%d, want %d", a.focused, want)
 		}
 	}
-	// One more Tab from the key field should wrap to field 0, not enter list.
+	// From the key field, Tab lands on the gen row (not the list).
+	a, _ = a.Update(keyMsg("tab"))
+	if a.focused != a.focusGenRow() {
+		t.Errorf("Tab from key field should focus the gen row (%d), got %d", a.focusGenRow(), a.focused)
+	}
+	// One more Tab wraps to field 0 (still skipping the list).
 	a, _ = a.Update(keyMsg("tab"))
 	if a.focused != 0 {
-		t.Errorf("Tab from key field should wrap to 0 (not enter list), got %d", a.focused)
+		t.Errorf("Tab from gen row should wrap to 0 (not enter list), got %d", a.focused)
 	}
 }
 
@@ -922,7 +970,8 @@ func TestAddServer_FormKeystrokeIgnoredInKeyList(t *testing.T) {
 	// should not insert into any input — the list zone has no
 	// editable target and the fall-through guard skips Update().
 	a := setupAddServerWithScannedKeys(t)
-	a, _ = a.Update(keyMsg("down")) // enter list
+	a, _ = a.Update(keyMsg("down")) // → gen row
+	a, _ = a.Update(keyMsg("down")) // → list
 	before := a.inputs[fieldKey].Value()
 
 	a, _ = a.Update(keyMsg("x"))
@@ -930,25 +979,26 @@ func TestAddServer_FormKeystrokeIgnoredInKeyList(t *testing.T) {
 	if a.inputs[fieldKey].Value() != before {
 		t.Errorf("typing in list should not modify inputs[fieldKey]: before=%q after=%q", before, a.inputs[fieldKey].Value())
 	}
-	if a.focused != len(a.inputs) {
+	if a.focused != a.focusKeyList() {
 		t.Errorf("typing in list should not change focus, got %d", a.focused)
 	}
 }
 
-func TestAddServer_CtrlGFromKeyListClampsFocus(t *testing.T) {
-	// Ctrl+G while in the list must clamp focused back into the form
+func TestAddServer_AltGFromKeyListClampsFocus(t *testing.T) {
+	// Alt+g while in the list must clamp focused back into the form
 	// range — Esc-back from generate calls inputs[focused].Focus()
 	// which would index out of bounds otherwise.
 	a := setupAddServerWithScannedKeys(t)
 	a.inputs[1].SetValue("chat.example.com")
-	a, _ = a.Update(keyMsg("down")) // enter list
-	if a.focused != len(a.inputs) {
-		t.Fatal("precondition: should be in list")
+	a, _ = a.Update(keyMsg("down")) // → gen row
+	a, _ = a.Update(keyMsg("down")) // → list
+	if a.focused != a.focusKeyList() {
+		t.Fatal("precondition: should be in the list")
 	}
 
-	a, _ = a.Update(keyMsg("ctrl+g"))
+	a, _ = a.Update(keyMsg("alt+g"))
 	if a.mode != addServerGenerate {
-		t.Fatalf("Ctrl+G should enter generate mode, got mode=%d", a.mode)
+		t.Fatalf("Alt+g should enter generate mode, got mode=%d", a.mode)
 	}
 
 	// Esc back — must not panic, must focus a real field.

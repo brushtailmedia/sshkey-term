@@ -1098,7 +1098,7 @@ Validates file exists and is Ed25519. Tilde-expanded.
 | `! borderline — cracked in hours` | amber | `HintWarn` | Submit shows a confirmation prompt: "Press Enter again to use it anyway, or edit to try a stronger one." Re-submit with the same passphrase proceeds. |
 | `✓ strong` / `✓ very strong` | green | `HintPass` | Submit proceeds silently. |
 
-Context-aware: the chosen display name (from the wizard's name step) is passed to zxcvbn so a passphrase containing the user's own name is penalized. The add-server dialog's generate-key path (reached via `Ctrl+g` in Settings → Add Server) reuses the same live-hint layout and additionally passes the server hostname as context, so passphrases containing `chat.example.com` or its substrings are also penalized.
+Context-aware: the chosen display name (from the wizard's name step) is passed to zxcvbn so a passphrase containing the user's own name is penalized. The add-server dialog's generate-key path (reached via the [Generate new key] row or `Alt`/`Option+g` in Add Server) reuses the same live-hint layout and additionally passes the server hostname as context, so passphrases containing `chat.example.com` or its substrings are also penalized.
 
 **Text-only on purpose.** No colored strength bar — color comes via a single styled word (`✗` red / `!` amber / `✓` green) rather than a 5-segment bar. Keeps the aesthetic consistent with the rest of the minimal Bubble Tea UI and degrades cleanly on monochrome terminals (the icons + labels stay legible without color). The `sshkey-ctl bootstrap-admin` CLI uses a 5-segment unicode bar instead (`▰▰▰▱▱`) because it runs in arbitrary terminals where color support is unpredictable and the line-based input can't update live — see the server repo's `bootstrap-admin` docs.
 
@@ -1232,7 +1232,9 @@ Arrow keys navigate, `Enter` on items with `[▶]` opens edit mode. "Manage devi
 
 ## Add Server Dialog (Settings → [Add server])
 
-The add-server dialog has two modes: the **form** (name / host / port / SSH key path) and the **generate-key sub-view** reached via `Ctrl+g`. The same dialog is used when adding a second (or Nth) server post-wizard.
+The add-server dialog has two modes: the **form** (name / host / port / your display name / SSH key path) and the **generate-key sub-view** reached via the selectable **[Generate new key]** row (Enter or click) or the `Alt`/`Option+g` shortcut. The same dialog is used when adding a second (or Nth) server post-wizard.
+
+`Ctrl+g` is NOT a generate shortcut here — it is the global server-navigation prefix, which stays live while Add Server is open because Add Server is a first-class slot in the server ring (`Ctrl+g h`/`l`/`j`/`1`-`9` switch servers or open the picker from within the dialog). See "Server navigation ring" / KEYBINDINGS.md.
 
 ### Form mode
 
@@ -1245,20 +1247,24 @@ The add-server dialog has two modes: the **form** (name / host / port / SSH key 
 │                                    │
 │  Port: │2222                       │
 │                                    │
+│  Your display name: │Alice         │
+│                                    │
 │  SSH key path: │~/.ssh/id_ed25519 │
+│                                    │
+│  [ Generate new key ]              │
 │                                    │
 │  Existing Ed25519 keys (click to use):
 │  ~/.ssh/id_ed25519                 │
 │  ~/.ssh/work_ed25519               │
 │                                    │
-│  Tab=next field  Ctrl+g=generate   │
-│  new key  Enter=add  Esc=cancel    │
+│  Tab=field  ↑/↓=keys  Enter=add/   │
+│  select  Alt+g=generate  Esc=cancel│
 └────────────────────────────────────┘
 ```
 
-`Ctrl+g` switches to the generate sub-view. Clicking a scanned key in the list populates the `SSH key path` field directly.
+The **[Generate new key]** row is a focus stop after the SSH key path field (reachable via Tab/Down, and by clicking it); Enter on it, a click, or `Alt`/`Option+g` switches to the generate sub-view. Clicking a scanned key in the list populates the `SSH key path` field directly.
 
-### Generate-key sub-view (Ctrl+g from the form)
+### Generate-key sub-view ([Generate new key] / Alt+g from the form)
 
 ```
 ┌─ Generate New Key ─────────────────┐
