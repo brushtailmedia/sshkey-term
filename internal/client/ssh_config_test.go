@@ -95,3 +95,14 @@ func TestBuildSSHClientConfig_PinsModernAlgorithms(t *testing.T) {
 		}
 	}
 }
+
+// S7: the client accepts only an Ed25519 host key. The server's host key is
+// always Ed25519 (a single AddHostKey), so pinning HostKeyAlgorithms stops a
+// downgraded or rogue server from negotiating a different host-key algorithm.
+func TestBuildSSHClientConfig_PinsEd25519HostKeyAlgorithm(t *testing.T) {
+	c := New(Config{Host: "chat.example.com", DataDir: t.TempDir()})
+	cfg := c.buildSSHClientConfig(testSigner(t))
+	if len(cfg.HostKeyAlgorithms) != 1 || cfg.HostKeyAlgorithms[0] != ssh.KeyAlgoED25519 {
+		t.Errorf("HostKeyAlgorithms = %v, want [%q]", cfg.HostKeyAlgorithms, ssh.KeyAlgoED25519)
+	}
+}

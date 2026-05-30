@@ -226,7 +226,14 @@ func (c *Client) buildSSHClientConfig(signer ssh.Signer) *ssh.ClientConfig {
 		User:            c.cfg.User,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: hostKeyCallback(c.cfg.DataDir, c.cfg.Host),
-		Timeout:         10 * time.Second,
+		// S7: pin the accepted host-key algorithm to Ed25519. The server's host
+		// key is always Ed25519 (a single AddHostKey), so a peer offering any
+		// other host-key type is illegitimate — pinning stops a downgraded or
+		// rogue server from negotiating a different host-key algorithm. (The
+		// server needs no equivalent: it can only advertise the one Ed25519 host
+		// key it holds.)
+		HostKeyAlgorithms: []string{ssh.KeyAlgoED25519},
+		Timeout:           10 * time.Second,
 	}
 }
 
