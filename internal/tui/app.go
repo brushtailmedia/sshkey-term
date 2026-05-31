@@ -131,15 +131,17 @@ type App struct {
 	// If /undo runs within undoWindow seconds, the kicked user is
 	// re-added via add_to_group. Cleared on any other admin action
 	// or on expiry. Tracks exactly one kick — there's no undo stack.
-	lastKickGroup  string
-	lastKickUserID string
-	lastKickTS     int64
-	deviceRevoked  DeviceRevokedModel
-	deviceMgr      DeviceMgrModel
-	quickSwitch    QuickSwitchModel
-	threadPanel    ThreadPanelModel
-	pinnedBar      PinnedBarModel
-	roomPins       map[string][]string // room_id -> pinned message IDs (context-scoped cache)
+	lastKickGroup   string
+	lastKickUserID  string
+	lastKickTS      int64
+	deviceRevoked   DeviceRevokedModel
+	newDeviceAlert  NewDeviceAlertModel
+	roomAttestation RoomAttestationAlertModel
+	deviceMgr       DeviceMgrModel
+	quickSwitch     QuickSwitchModel
+	threadPanel     ThreadPanelModel
+	pinnedBar       PinnedBarModel
+	roomPins        map[string][]string // room_id -> pinned message IDs (context-scoped cache)
 
 	// Config state
 	appConfig        *config.Config
@@ -327,7 +329,7 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		// join into a bogus keys dir. ServerKeysDir trusts its input
 		// per the §"Server data dir" contract, so the validation has
 		// to happen here at the closure boundary before derivation.
-		addServer: NewAddServer(func() []string {
+		addServer: NewAddServerWithConfigDir(configDir, func() []string {
 			if appCfg == nil {
 				return nil
 			}
@@ -342,6 +344,8 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		}),
 		retireConfirm:     NewRetireConfirm(),
 		deviceRevoked:     NewDeviceRevoked(),
+		newDeviceAlert:    NewNewDeviceAlert(),
+		roomAttestation:   NewRoomAttestationAlert(),
 		deviceMgr:         NewDeviceMgr(),
 		saveAttachment:    NewSaveAttachment(),
 		passphrase:        NewPassphrase(),
@@ -501,6 +505,14 @@ func (a *App) openSettingsPanel() {
 }
 
 func (a *App) switchServerByIndex(idx int) tea.Cmd {
+	return a.switchServerByIndexInternal(idx, false)
+}
+
+func (a *App) forceSwitchServerByIndex(idx int) tea.Cmd {
+	return a.switchServerByIndexInternal(idx, true)
+}
+
+func (a *App) switchServerByIndexInternal(idx int, force bool) tea.Cmd {
 	// Dismiss the Add Server overlay if a switch was initiated from the
 	// ring slot. This sits ABOVE the early-return (unlike connectFailed.Hide
 	// / passphrase.Hide below, which are after it) on purpose: re-selecting
@@ -508,7 +520,7 @@ func (a *App) switchServerByIndex(idx int) tea.Cmd {
 	// or `Ctrl+g <current digit>` — is a no-op switch that must still reveal
 	// the server underneath. No-op when the wizard isn't open.
 	a.addServer.Hide()
-	if a.appConfig == nil || idx < 0 || idx >= len(a.appConfig.Servers) || idx == a.serverIdx {
+	if a.appConfig == nil || idx < 0 || idx >= len(a.appConfig.Servers) || (!force && idx == a.serverIdx) {
 		return nil
 	}
 
@@ -1270,6 +1282,11 @@ func (a App) sidebarPreviewDims() (width, rows int) {
 //     legible (kitty graphics don't get overwritten by text repaints
 //     on their own).
 //
+//   - Nav popup visible: the Ctrl+g which-key popup is intentionally
+//     not a modal, but it still overlays text cells near the preview
+//     pane. Suppress rasterm while the popup is on-screen so the
+//     graphics layer cannot bleed through/around the hint.
+//
 //   - Cursor not on an image attachment in the messages pane: the
 //     "selection" is gone, no image to preview.
 //
@@ -1280,7 +1297,7 @@ func (a App) sidebarPreviewDims() (width, rows int) {
 // the user explicitly moves the cursor away from it (in messages
 // pane) or opens a modal that would overlap the preview.
 func (a App) computePreviewPath() string {
-	if a.anyModalVisible() {
+	if a.anyModalVisible() || a.navPopupVisible {
 		return ""
 	}
 	return a.messages.SelectedImagePath()
@@ -1570,6 +1587,20 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.deviceRevoked.IsVisible() {
 			var cmd tea.Cmd
 			a.deviceRevoked, cmd = a.deviceRevoked.Update(msg)
+			return a, cmd
+		}
+
+		// New-device alert (non-fatal) intercepts all keys while shown
+		if a.newDeviceAlert.IsVisible() {
+			var cmd tea.Cmd
+			a.newDeviceAlert, cmd = a.newDeviceAlert.Update(msg)
+			return a, cmd
+		}
+
+		// Room-attestation alert (F7, non-fatal) intercepts all keys while shown
+		if a.roomAttestation.IsVisible() {
+			var cmd tea.Cmd
+			a.roomAttestation, cmd = a.roomAttestation.Update(msg)
 			return a, cmd
 		}
 
@@ -2927,7 +2958,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// connect cmd from switchServerByIndex MUST be returned
 			// (below) or the new server is selected but never dialed.
 			a.statusBar.SetError("Server added: " + msg.Name)
-			cmd = a.switchServerByIndex(len(a.appConfig.Servers) - 1)
+			cmd = a.forceSwitchServerByIndex(len(a.appConfig.Servers) - 1)
 		}
 		return a, cmd
 
@@ -3338,7 +3369,18 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// after an early attempt used the append pattern; the
 				// symptom was a permanent "Downloading..." status-bar
 				// message because the download goroutine never ran.
-				if _, err := os.Stat(cachePath); err == nil {
+				// F12: att.FileID is sender-supplied — only consult the
+				// on-disk cache when it's a safe single path component, so a
+				// traversal id is never os.Stat'd or opened in the save modal
+				// here. An unsafe id takes the download branch, where
+				// DownloadFile re-validates and rejects it cleanly.
+				cached := false
+				if config.ValidFileID(att.FileID) {
+					if _, err := os.Stat(cachePath); err == nil {
+						cached = true
+					}
+				}
+				if cached {
 					a.saveAttachment.Show(cachePath, safeName, defaultPath)
 				} else {
 					a.statusBar.SetError("Downloading " + att.Name + "...")
@@ -3608,7 +3650,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// stale render forever — visible as "block-char preview
 		// stuck until app restart" on rasterm-capable terminals
 		// when the rasterm thumbnail finishes after first render.
-		if a.messages.filesDir != "" && msg.FileID != "" {
+		// F12: msg.FileID is sender-supplied; gate the join so a traversal
+		// id can't produce a path we invalidate or compare against.
+		if a.messages.filesDir != "" && config.ValidFileID(msg.FileID) {
 			localPath := filepath.Join(a.messages.filesDir, msg.FileID)
 			invalidateImageRenderCacheForPath(localPath)
 			if a.sidebar.previewRenderKey.path == localPath {
@@ -3906,6 +3950,16 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if a.deviceRevoked.IsVisible() {
 		var cmd tea.Cmd
 		a.deviceRevoked, cmd = a.deviceRevoked.HandleMouse(msg)
+		return a, cmd
+	}
+	if a.newDeviceAlert.IsVisible() {
+		var cmd tea.Cmd
+		a.newDeviceAlert, cmd = a.newDeviceAlert.HandleMouse(msg)
+		return a, cmd
+	}
+	if a.roomAttestation.IsVisible() {
+		var cmd tea.Cmd
+		a.roomAttestation, cmd = a.roomAttestation.HandleMouse(msg)
 		return a, cmd
 	}
 	if a.settings.IsVisible() {
@@ -7082,6 +7136,29 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			a.deviceRevoked.Show(m.DeviceID, m.Reason)
 		}
+	case "device_added":
+		// Shadow-device transparency (Tier 1): a brand-new device registered
+		// under this identity. NoteAddedDevice records it in the known-set and
+		// reports whether it's genuinely newly-seen (dedups against an earlier
+		// reconcile), so we alert at most once per device.
+		var m protocol.DeviceAdded
+		if err := json.Unmarshal(msg.Raw, &m); err == nil && a.client != nil {
+			if a.client.NoteAddedDevice(m.DeviceID) {
+				a.newDeviceAlert.Show(m.DeviceID, m.CreatedAt)
+			}
+		}
+	case "room_attestation_warning":
+		// F7: a room epoch key failed member-attestation verification and was
+		// rejected (fail-closed). Synthesized by the client layer (not a wire
+		// frame) and surfaced here, mirroring the device-alert path.
+		var m struct {
+			Room      string `json:"room"`
+			Generator string `json:"generator"`
+			Reason    string `json:"reason"`
+		}
+		if err := json.Unmarshal(msg.Raw, &m); err == nil {
+			a.roomAttestation.Show(m.Room, m.Generator, m.Reason)
+		}
 	case "device_list":
 		// Phase 17c Step 6: signal refresh completion for the
 		// "refreshing…" keypress-ack indicator.
@@ -7089,6 +7166,15 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		var m protocol.DeviceList
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
 			a.deviceMgr.SetDevices(m.Devices)
+			// Tier 1 reconcile: surface any device new to us since we last
+			// looked (covers one added while we were offline; the live
+			// device_added push covers the online case). First connect on a
+			// fresh client seeds silently. No-op without a client handle.
+			if a.client != nil {
+				for _, d := range a.client.ReconcileDevices(m.Devices) {
+					a.newDeviceAlert.Show(d.DeviceID, d.CreatedAt)
+				}
+			}
 		}
 	case "device_revoke_result":
 		var m protocol.DeviceRevokeResult
@@ -7981,6 +8067,8 @@ func (a *App) anyModalVisible() bool {
 		a.transferConfirm.IsVisible() ||
 		a.unverifyConfirm.IsVisible() ||
 		a.deviceRevoked.IsVisible() ||
+		a.newDeviceAlert.IsVisible() ||
+		a.roomAttestation.IsVisible() ||
 		a.deviceMgr.IsVisible() ||
 		a.keyWarning.IsVisible() ||
 		a.verify.IsVisible() ||
@@ -8327,6 +8415,12 @@ func (a App) viewBody() string {
 	}
 	if a.deviceRevoked.IsVisible() {
 		return a.deviceRevoked.View(a.width)
+	}
+	if a.newDeviceAlert.IsVisible() {
+		return a.newDeviceAlert.View(a.width)
+	}
+	if a.roomAttestation.IsVisible() {
+		return a.roomAttestation.View(a.width)
 	}
 	if a.deviceMgr.IsVisible() {
 		return a.deviceMgr.View(a.width)

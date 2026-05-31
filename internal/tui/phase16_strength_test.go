@@ -60,12 +60,12 @@ func TestRenderStrengthHint_HiddenTier(t *testing.T) {
 	}
 }
 
-// TestRenderStrengthHint_BlockIncludesText verifies the block tier
-// applies a style to the hint text without discarding it.
+// TestRenderStrengthHint_BlockIncludesText verifies the weak/red tier applies
+// a style to the hint text without discarding it.
 func TestRenderStrengthHint_BlockIncludesText(t *testing.T) {
 	got := renderStrengthHint(keygen.LiveHint{
 		Tier: keygen.HintBlock,
-		Text: "✗ weak — cracked in seconds",
+		Text: "weak — cracked in seconds",
 	})
 	if !strings.Contains(got, "weak") {
 		t.Errorf("block render = %q, want to contain hint text", got)
@@ -107,5 +107,75 @@ func TestWizard_KeygenUpdateRefreshesStrengthHint(t *testing.T) {
 	// A strong passphrase should produce HintPass.
 	if w.strengthHint.Tier != keygen.HintPass {
 		t.Errorf("strengthHint.Tier = %v, want HintPass for strong passphrase", w.strengthHint.Tier)
+	}
+}
+
+func TestWizard_KeyGenerateInitialViewShowsUnencryptedWarning(t *testing.T) {
+	w := NewWizard()
+	w.chosenName = "Alice"
+	w.resetKeyGenState()
+	w.step = WizardKeyGenerate
+
+	view := w.viewKeyGenerate()
+	if !strings.Contains(view, "Passphrase (recommended)") {
+		t.Fatalf("keygen view missing passphrase label:\n%s", view)
+	}
+	if !strings.Contains(view, "Leaving blank allows anyone with the key to access this account") {
+		t.Fatalf("keygen view missing immediate empty-passphrase warning:\n%s", view)
+	}
+}
+
+func TestAddServer_EnterGenerateShowsUnencryptedWarning(t *testing.T) {
+	a := NewAddServer(nil)
+	a.Show()
+	a.inputs[fieldHost].SetValue("chat.example.com")
+
+	var cmd tea.Cmd
+	a, cmd = a.enterGenerateMode()
+	if cmd != nil {
+		t.Fatal("enterGenerateMode returned unexpected command")
+	}
+	if a.mode != addServerGenerate {
+		t.Fatalf("mode = %v, want addServerGenerate", a.mode)
+	}
+	view := a.viewGenerate(100)
+	if !strings.Contains(view, "Leaving blank allows anyone with the key to access this account") {
+		t.Fatalf("add-server generate view missing immediate empty-passphrase warning:\n%s", view)
+	}
+}
+
+func TestWizard_KeyGenerateSavePathUsesHorizontalPan(t *testing.T) {
+	const longPath = "/Volumes/Home/username/.sshkey-term/.staging/id_ed25519"
+
+	w := NewWizard()
+	w.width = 40
+	w.step = WizardKeyGenerate
+	w.genPathInput.SetValue(longPath)
+	w.genPathInput.Focus()
+
+	view := w.viewKeyGenerate()
+	if strings.Contains(view, longPath) {
+		t.Fatalf("keygen view rendered full long path instead of panning:\n%s", view)
+	}
+	if got := w.genPathInput.Value(); got != longPath {
+		t.Fatalf("view mutated save path = %q, want %q", got, longPath)
+	}
+}
+
+func TestAddServer_KeyGenerateSavePathUsesHorizontalPan(t *testing.T) {
+	const longPath = "/Volumes/Home/username/.sshkey-term/example.com/keys/id_ed25519"
+
+	a := NewAddServer(nil)
+	a.Show()
+	a.mode = addServerGenerate
+	a.genInputs[0].SetValue(longPath)
+	a.genInputs[0].Focus()
+
+	view := a.viewGenerate(40)
+	if strings.Contains(view, longPath) {
+		t.Fatalf("add-server keygen view rendered full long path instead of panning:\n%s", view)
+	}
+	if got := a.genInputs[0].Value(); got != longPath {
+		t.Fatalf("view mutated save path = %q, want %q", got, longPath)
 	}
 }

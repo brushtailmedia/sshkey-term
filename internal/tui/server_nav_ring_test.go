@@ -402,7 +402,7 @@ func TestAddServerSubmitSwitches(t *testing.T) {
 		a := newNavModeAppHarness(t)
 		a.appConfig = nil
 		a.serverIdx = -1
-		model, _ := a.Update(AddServerMsg{Name: "First", Host: "127.0.0.5", Port: 2255})
+		model, cmd := a.Update(AddServerMsg{Name: "First", Host: "127.0.0.5", Port: 2255})
 		a = model.(App)
 		if a.appConfig == nil {
 			t.Fatal("nil-config submit should initialize the config, not no-op")
@@ -410,12 +410,48 @@ func TestAddServerSubmitSwitches(t *testing.T) {
 		if len(a.appConfig.Servers) != 1 {
 			t.Fatalf("server count = %d, want 1", len(a.appConfig.Servers))
 		}
+		if cmd == nil {
+			t.Fatal("first server add should still return a connect cmd")
+		}
+	})
+
+	t.Run("first server same-index add still refreshes cfg and connects", func(t *testing.T) {
+		a := newNavModeAppHarness(t)
+		a.appConfig = &config.Config{}
+		a.serverIdx = 0 // stale/no-config edge: normal navigation would treat idx 0 as current.
+		model, cmd := a.Update(AddServerMsg{Name: "First", Host: "127.0.0.5", Port: 2255})
+		a = model.(App)
+		if cmd == nil {
+			t.Fatal("same-index first add should force a connect cmd")
+		}
+		if a.cfg.Host != "127.0.0.5" {
+			t.Fatalf("cfg host = %q, want newly added host", a.cfg.Host)
+		}
+		if want := config.ServerKeyPath(a.configDir, "127.0.0.5"); a.cfg.KeyPath != want {
+			t.Fatalf("cfg key path = %q, want %q", a.cfg.KeyPath, want)
+		}
 	})
 }
 
 // --- Add Server [Generate new key] row (steps 6/8) --------------------------
 
 func TestAddServerGenerateRow(t *testing.T) {
+	t.Run("generate path uses active config dir", func(t *testing.T) {
+		configDir := t.TempDir()
+		a := NewAddServerWithConfigDir(configDir, nil)
+		a.Show()
+		a.inputs[fieldHost].SetValue("chat.example.com")
+
+		a, _ = a.enterGenerateMode()
+		if a.mode != addServerGenerate {
+			t.Fatalf("mode = %d, want generate", a.mode)
+		}
+		want := config.ServerKeyPath(configDir, "chat.example.com")
+		if got := a.genInputs[0].Value(); got != want {
+			t.Fatalf("generate save path = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("Tab from key field reaches the gen row", func(t *testing.T) {
 		a := NewAddServer(nil)
 		a.Show()

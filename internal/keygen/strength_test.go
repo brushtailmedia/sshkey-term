@@ -1,9 +1,9 @@
 package keygen
 
 // Phase 16 Gap 4 — tests for the client-side passphrase strength
-// validator. Mirrors the server-side test suite in sshkey-chat with
-// the same passphrase fixtures plus tier checks specific to the
-// three-tier client model (block / warn / silent).
+// advisory. User key passphrases are optional: blank creates an
+// unencrypted key, and weak non-empty passphrases are warned about but
+// not blocked.
 
 import (
 	"strings"
@@ -12,39 +12,32 @@ import (
 
 func TestValidateUserPassphrase_Empty(t *testing.T) {
 	r := ValidateUserPassphrase("")
-	if !r.Blocked {
-		t.Fatal("empty passphrase should be blocked")
+	if r.Blocked {
+		t.Fatal("empty passphrase should be allowed with an advisory")
 	}
-	if !strings.Contains(r.Message, "required") {
-		t.Errorf("empty error should mention 'required', got: %q", r.Message)
+	if !strings.Contains(r.Warning, "Leaving blank allows anyone with the key to access this account") {
+		t.Errorf("empty warning should mention local key risk, got: %q", r.Warning)
 	}
 }
 
-func TestValidateUserPassphrase_TooShort(t *testing.T) {
+func TestValidateUserPassphrase_TooShortAllowedWithWarning(t *testing.T) {
 	cases := []string{"a", "abc", "password", "hunter2hunt"}
 	for _, pass := range cases {
 		t.Run(pass, func(t *testing.T) {
 			r := ValidateUserPassphrase(pass)
-			if !r.Blocked {
-				t.Fatalf("expected %q to be blocked for length", pass)
+			if r.Blocked {
+				t.Fatalf("expected %q to be allowed with warning, got blocked: %q", pass, r.Message)
 			}
-			if !strings.Contains(r.Message, "at least") {
-				t.Errorf("short error should mention 'at least', got: %q", r.Message)
+			if r.Warning == "" {
+				t.Errorf("short passphrase %q should produce advisory warning", pass)
 			}
 		})
 	}
 }
 
-// TestValidateUserPassphrase_BlockTier covers passphrases at score 0-1
-// that should be hard-blocked under the user-tier policy. These are
-// passphrases that zxcvbn estimates would be cracked in seconds or
-// minutes — too weak even for warn-and-continue.
-//
-// Note: passphrases at score 2 are NOT in this test because the user
-// tier softens them to warn-and-continue (only the admin tier
-// hard-blocks at 2). For example "december252025" lands at score 2
-// on this side and shows a warning instead of blocking.
-func TestValidateUserPassphrase_BlockTier(t *testing.T) {
+// TestValidateUserPassphrase_WeakTierWarns covers passphrases at score 0-1.
+// These are allowed, but must produce a warning.
+func TestValidateUserPassphrase_WeakTierWarns(t *testing.T) {
 	cases := []struct {
 		name string
 		pass string
@@ -57,12 +50,11 @@ func TestValidateUserPassphrase_BlockTier(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := ValidateUserPassphrase(tc.pass)
-			if !r.Blocked {
-				t.Errorf("expected %q to be blocked, got result: %+v", tc.pass, r)
-				return
+			if r.Blocked {
+				t.Errorf("expected %q to be allowed with warning, got blocked: %q", tc.pass, r.Message)
 			}
-			if !strings.Contains(r.Message, "cracked in") {
-				t.Errorf("block message should mention crack time, got: %q", r.Message)
+			if !strings.Contains(r.Warning, "cracked in") {
+				t.Errorf("warning should mention crack time, got: %q", r.Warning)
 			}
 		})
 	}
@@ -151,26 +143,28 @@ func TestValidateUserPassphrase_WarnTier_ContractCheck(t *testing.T) {
 // rejected.
 func TestValidateUserPassphraseWithContext(t *testing.T) {
 	r := ValidateUserPassphraseWithContext("alicealicealice", []string{"alice"})
-	if !r.Blocked {
-		t.Errorf("expected blocked when passphrase is just the context word repeated, got: %+v", r)
+	if r.Blocked {
+		t.Errorf("expected context-heavy passphrase to be allowed with warning, got blocked: %q", r.Message)
+	}
+	if r.Warning == "" {
+		t.Errorf("expected warning when passphrase is just the context word repeated, got: %+v", r)
 	}
 }
 
-// TestValidationResult_TierShapeIsExclusive verifies the three-state
-// invariant: at most one of Blocked / Warning is set per result.
-// Catches accidental "both set" results that would confuse the TUI.
-func TestValidationResult_TierShapeIsExclusive(t *testing.T) {
+// TestValidationResult_NeverBlocks verifies the client-side keygen
+// contract: strength feedback is advisory-only.
+func TestValidationResult_NeverBlocks(t *testing.T) {
 	cases := []string{
 		"",
 		"abc",
-		"password1234",         // block
+		"password1234",
 		"correct horse battery staple", // strong
 		"alicealicealice",
 	}
 	for _, pass := range cases {
 		r := ValidateUserPassphrase(pass)
-		if r.Blocked && r.Warning != "" {
-			t.Errorf("passphrase %q: Blocked=true AND Warning set — shape invariant violated: %+v", pass, r)
+		if r.Blocked {
+			t.Errorf("passphrase %q: Blocked=true — advisory-only contract violated: %+v", pass, r)
 		}
 	}
 }

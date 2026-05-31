@@ -48,6 +48,12 @@ type SyncEpochKey struct {
 	Room       string `json:"room"`
 	Epoch      int64  `json:"epoch"`
 	WrappedKey string `json:"wrapped_key"`
+	// F7 attestation fields (forward-compat). Sync/history keys are
+	// historical-decryption-only and skip-verified, so these are carried but
+	// not relied upon; the server does not currently populate them.
+	Generator  string `json:"generator,omitempty"`
+	MemberHash string `json:"member_hash,omitempty"`
+	MemberSig  string `json:"member_sig,omitempty"`
 }
 
 type SyncComplete struct {
@@ -73,13 +79,13 @@ type Message struct {
 	ServerOrder int64    `json:"server_order,omitempty"` // server's per-conversation commit order (S2)
 	From        string   `json:"from"`
 	Room        string   `json:"room"`
-	TS        int64    `json:"ts"`
-	Epoch     int64    `json:"epoch"`
-	Payload   string   `json:"payload"`
-	FileIDs   []string `json:"file_ids,omitempty"`
-	Signature string   `json:"signature"`
-	EditedAt  int64    `json:"edited_at,omitempty"` // Phase 15
-	CorrID    string   `json:"corr_id,omitempty"`   // Phase 17c: originator-only ack echo
+	TS          int64    `json:"ts"`
+	Epoch       int64    `json:"epoch"`
+	Payload     string   `json:"payload"`
+	FileIDs     []string `json:"file_ids,omitempty"`
+	Signature   string   `json:"signature"`
+	EditedAt    int64    `json:"edited_at,omitempty"` // Phase 15
+	CorrID      string   `json:"corr_id,omitempty"`   // Phase 17c: originator-only ack echo
 }
 
 // Edit — room message edit envelope (Phase 15 client → server).
@@ -672,11 +678,11 @@ type Deleted struct {
 	ID          string `json:"id"`
 	ServerOrder int64  `json:"server_order,omitempty"` // preserved from the original message (S2)
 	DeletedBy   string `json:"deleted_by"`
-	TS        int64  `json:"ts"`
-	Room      string `json:"room,omitempty"`
-	Group     string `json:"group,omitempty"`
-	DM        string `json:"dm,omitempty"`
-	CorrID    string `json:"corr_id,omitempty"` // Phase 17c
+	TS          int64  `json:"ts"`
+	Room        string `json:"room,omitempty"`
+	Group       string `json:"group,omitempty"`
+	DM          string `json:"dm,omitempty"`
+	CorrID      string `json:"corr_id,omitempty"` // Phase 17c
 }
 
 // Typing
@@ -901,6 +907,11 @@ type EpochKey struct {
 	Room       string `json:"room"`
 	Epoch      int64  `json:"epoch"`
 	WrappedKey string `json:"wrapped_key"`
+	// F7 room member attestation (server-forwarded, opaque to the server).
+	// Mirror of the sshkey-chat struct — keep in sync.
+	Generator  string `json:"generator,omitempty"`   // userID that generated this epoch
+	MemberHash string `json:"member_hash,omitempty"` // SHA256(sort(member usernames))
+	MemberSig  string `json:"member_sig,omitempty"`  // generator's SignEpochRoster(room,epoch,member_hash)
 }
 
 type EpochTrigger struct {
@@ -921,6 +932,7 @@ type EpochRotate struct {
 	Epoch       int64             `json:"epoch"`
 	WrappedKeys map[string]string `json:"wrapped_keys"`
 	MemberHash  string            `json:"member_hash"`
+	MemberSig   string            `json:"member_sig,omitempty"` // F7: SignEpochRoster(room,epoch,member_hash)
 }
 
 type EpochConfirmed struct {
@@ -1063,6 +1075,15 @@ type DeviceRevoked struct {
 	Type     string `json:"type"`
 	DeviceID string `json:"device_id"`
 	Reason   string `json:"reason"`
+}
+
+// DeviceAdded is pushed by the server to a user's OTHER sessions when a
+// brand-new device registers under their identity (shadow-device
+// transparency, Tier 1). Mirror of the server-side struct — keep in sync.
+type DeviceAdded struct {
+	Type      string `json:"type"` // "device_added"
+	DeviceID  string `json:"device_id"`
+	CreatedAt string `json:"created_at"`
 }
 
 // Device management (user-scoped)

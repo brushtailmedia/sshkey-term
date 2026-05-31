@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
+	"github.com/brushtailmedia/sshkey-term/internal/config"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
@@ -248,6 +249,14 @@ func (m *MessagesModel) SetFilesDir(dir string) {
 // to the 🖼 placeholder naturally.
 func (m *MessagesModel) attachmentLocalPath(fileID string) string {
 	if m.filesDir == "" || fileID == "" {
+		return ""
+	}
+	// F12: fileID is sender-supplied. A traversal-shaped id must never be
+	// treated as a cached local path here — this feeds SelectedImagePath →
+	// RenderImageInline, which would open and decode the resolved file. Gate
+	// on the same validator as the write/download paths so we only ever join
+	// a safe single component onto filesDir.
+	if !config.ValidFileID(fileID) {
 		return ""
 	}
 	path := filepath.Join(m.filesDir, fileID)

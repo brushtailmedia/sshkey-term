@@ -21,7 +21,7 @@ import (
 func withPassthroughKeyCopy(t *testing.T) {
 	t.Helper()
 	prev := keyCopyFn
-	keyCopyFn = func(src, host, displayName string) (string, error) { return src, nil }
+	keyCopyFn = func(configDir, src, host, displayName string) (string, error) { return src, nil }
 	t.Cleanup(func() { keyCopyFn = prev })
 }
 
@@ -36,7 +36,7 @@ func withRecordingKeyCopy(t *testing.T) *string {
 	t.Helper()
 	var captured string
 	prev := keyCopyFn
-	keyCopyFn = func(src, host, displayName string) (string, error) {
+	keyCopyFn = func(configDir, src, host, displayName string) (string, error) {
 		captured = src
 		return src, nil
 	}
@@ -381,6 +381,32 @@ func TestAddServer_SubmitValidReturnsMsg(t *testing.T) {
 	}
 }
 
+func TestAddServer_SubmitCopiesIntoActiveConfigDir(t *testing.T) {
+	configDir := t.TempDir()
+	var gotConfigDir string
+	prev := keyCopyFn
+	keyCopyFn = func(configDir, src, host, displayName string) (string, error) {
+		gotConfigDir = configDir
+		return src, nil
+	}
+	t.Cleanup(func() { keyCopyFn = prev })
+
+	a := NewAddServerWithConfigDir(configDir, nil)
+	a.Show()
+	a.inputs[fieldName].SetValue("Test Server")
+	a.inputs[fieldHost].SetValue("chat.example.com")
+	a.inputs[fieldDisplayName].SetValue("Alice")
+	a.inputs[fieldKey].SetValue("~/.ssh/id_ed25519")
+
+	_, cmd := a.Update(keyMsg("enter"))
+	if cmd == nil {
+		t.Fatal("valid form should submit")
+	}
+	if gotConfigDir != configDir {
+		t.Fatalf("keyCopyFn configDir = %q, want active configDir %q", gotConfigDir, configDir)
+	}
+}
+
 func TestAddServer_SubmitDefaultsName(t *testing.T) {
 	withPassthroughKeyCopy(t)
 	a := NewAddServer(nil)
@@ -540,7 +566,7 @@ func TestCopyKeyForServer_RewritesManagedPubComment(t *testing.T) {
 func TestAddServer_SubmitRejectsInvalidDisplayName(t *testing.T) {
 	called := false
 	prev := keyCopyFn
-	keyCopyFn = func(src, host, displayName string) (string, error) { called = true; return src, nil }
+	keyCopyFn = func(configDir, src, host, displayName string) (string, error) { called = true; return src, nil }
 	t.Cleanup(func() { keyCopyFn = prev })
 
 	a := NewAddServer(nil)
@@ -746,29 +772,6 @@ func TestAddServer_AltGClearsPassphraseFields(t *testing.T) {
 	}
 	if a.genInputs[2].Value() != "" {
 		t.Errorf("re-entering generate should clear confirm, got %q", a.genInputs[2].Value())
-	}
-}
-
-func TestAddServer_HideClearsWeakPassConfirmed(t *testing.T) {
-	a := NewAddServer(nil)
-	a.Show()
-	a.weakPassConfirmed = "previously-warned"
-
-	a.Hide()
-
-	if a.weakPassConfirmed != "" {
-		t.Errorf("weakPassConfirmed should be cleared on Hide(), got %q", a.weakPassConfirmed)
-	}
-}
-
-func TestAddServer_ShowClearsWeakPassConfirmed(t *testing.T) {
-	a := NewAddServer(nil)
-	a.weakPassConfirmed = "stale"
-
-	a.Show()
-
-	if a.weakPassConfirmed != "" {
-		t.Errorf("weakPassConfirmed should be cleared on Show(), got %q", a.weakPassConfirmed)
 	}
 }
 

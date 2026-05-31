@@ -345,3 +345,43 @@ func TestHelpers_ComposeCorrectly(t *testing.T) {
 		t.Errorf("MessagesDBPath composed = %q, want %q", got, want)
 	}
 }
+
+// TestValidFileID is the canonical test for the audit-F12 path-safety
+// invariant. fileID is server/sender-supplied and gets joined onto FilesDir at
+// every read/write/stat/render site, so it must reject anything that isn't a
+// safe single path component. Legitimate server fileIDs ("file_" + nanoid over
+// [A-Za-z0-9_-]) must still pass.
+func TestValidFileID(t *testing.T) {
+	valid := []string{
+		"file_V1StGXR8_Z5jdHi6B-myT", // server format: file_ + 21-char nanoid (incl. _ and -)
+		"file_abc123",
+		"safename",
+		"a-b_c.d", // a dot INSIDE a name is fine — only "." / ".." are rejected
+	}
+	for _, id := range valid {
+		if !ValidFileID(id) {
+			t.Errorf("ValidFileID(%q) = false, want true (legitimate id)", id)
+		}
+	}
+
+	invalid := []string{
+		"",
+		".",
+		"..",
+		"../etc/passwd",
+		"../../../../etc/cron.d/evil",
+		"/etc/passwd",
+		"/absolute/path",
+		"sub/dir",
+		"foo/",            // trailing separator
+		"dir\\win",        // backslash (cross-platform defense-in-depth)
+		"..\\..\\windows", // windows-style traversal
+		"a/../../b",
+		"file_\x00evil", // embedded NUL
+	}
+	for _, id := range invalid {
+		if ValidFileID(id) {
+			t.Errorf("ValidFileID(%q) = true, want false (path-traversal risk)", id)
+		}
+	}
+}

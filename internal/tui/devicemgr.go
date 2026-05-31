@@ -101,7 +101,11 @@ func (d DeviceMgrModel) Update(msg tea.KeyMsg) (DeviceMgrModel, tea.Cmd) {
 		if d.cursor < len(d.devices)-1 {
 			d.cursor++
 		}
-	case "enter", "x":
+	case "x":
+		// Revoke is bound to `x` only (not Enter) — Enter is the most
+		// reflexively-pressed key in a list, and revoke is destructive
+		// (disconnects + blocks reconnect). `x` then a `y/n` confirm = two
+		// deliberate keystrokes.
 		if d.cursor >= len(d.devices) {
 			return d, nil
 		}
@@ -122,7 +126,7 @@ func (d DeviceMgrModel) Update(msg tea.KeyMsg) (DeviceMgrModel, tea.Cmd) {
 
 // HandleMouse maps click coordinates onto rows in the device list and
 // updates the cursor. A click doesn't trigger the revoke action (requires
-// keyboard Enter/x + y/n confirm) — this matches the "mouse selects,
+// keyboard x + y/n confirm) — this matches the "mouse selects,
 // keyboard acts" convention used elsewhere in the TUI.
 //
 // Layout (see View): border(1) + padding(1) + header(1) + blank(1)
@@ -213,7 +217,7 @@ func (d DeviceMgrModel) View(width int) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpDescStyle.Render("  ↑/↓=navigate  Enter/x=revoke  r=refresh  Esc=close"))
+	b.WriteString(helpDescStyle.Render("  ↑/↓=navigate  x=revoke  r=refresh  Esc=close"))
 	b.WriteString("\n\n")
 	b.WriteString(helpDescStyle.Render("  Note: device revocation does NOT protect against key extraction."))
 	b.WriteString("\n")

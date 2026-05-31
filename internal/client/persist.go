@@ -71,6 +71,36 @@ func (c *Client) storeRoomMessage(raw json.RawMessage, warnReplay bool) {
 		return
 	}
 
+	// F1: verify the sender's Ed25519 signature before accepting (verify-or-
+	// drop, mirroring the edit path). The server is untrusted for authorship,
+	// so an unverifiable message must not be stored/shown as authentic. Drop on
+	// an unknown sender key (not pinned), un-decodable payload/signature, or a
+	// failed signature. Room messages sign the ciphertext bytes over
+	// payload || room || epoch (crypto.SignRoom/VerifyRoom).
+	pubKey := c.pubKeyForUser(msg.From)
+	if pubKey == nil {
+		c.logger.Warn("message signature drop — unknown sender pubkey",
+			"context", "room", "id", msg.ID, "from", msg.From)
+		return
+	}
+	sigPayload, err := base64.StdEncoding.DecodeString(msg.Payload)
+	if err != nil {
+		c.logger.Warn("message signature drop — payload not base64",
+			"context", "room", "id", msg.ID)
+		return
+	}
+	sigBytes, err := base64.StdEncoding.DecodeString(msg.Signature)
+	if err != nil {
+		c.logger.Warn("message signature drop — signature not base64",
+			"context", "room", "id", msg.ID, "from", msg.From)
+		return
+	}
+	if !crypto.VerifyRoom(pubKey, sigPayload, msg.Room, msg.Epoch, sigBytes) {
+		c.logger.Warn("message signature drop — verification failed",
+			"context", "room", "id", msg.ID, "from", msg.From)
+		return
+	}
+
 	body := ""
 	replyTo := ""
 	var mentions []string
@@ -150,6 +180,32 @@ func (c *Client) storeGroupMessage(raw json.RawMessage, warnReplay bool) {
 		return
 	}
 
+	// F1: verify-or-drop before decrypt. Group messages sign the ciphertext
+	// bytes over payload || group || wrapped_keys (crypto.SignDM/VerifyDM).
+	pubKey := c.pubKeyForUser(msg.From)
+	if pubKey == nil {
+		c.logger.Warn("message signature drop — unknown sender pubkey",
+			"context", "group", "id", msg.ID, "from", msg.From)
+		return
+	}
+	sigPayload, err := base64.StdEncoding.DecodeString(msg.Payload)
+	if err != nil {
+		c.logger.Warn("message signature drop — payload not base64",
+			"context", "group", "id", msg.ID)
+		return
+	}
+	sigBytes, err := base64.StdEncoding.DecodeString(msg.Signature)
+	if err != nil {
+		c.logger.Warn("message signature drop — signature not base64",
+			"context", "group", "id", msg.ID, "from", msg.From)
+		return
+	}
+	if !crypto.VerifyDM(pubKey, sigPayload, msg.Group, msg.WrappedKeys, sigBytes) {
+		c.logger.Warn("message signature drop — verification failed",
+			"context", "group", "id", msg.ID, "from", msg.From)
+		return
+	}
+
 	payload, err := c.DecryptGroupMessage(msg.WrappedKeys, msg.Payload)
 	if err != nil {
 		// No wrapped key for us, or key material missing — drop the
@@ -197,6 +253,32 @@ func (c *Client) storeDMMessage(raw json.RawMessage, warnReplay bool) {
 
 	var msg protocol.DM
 	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+
+	// F1: verify-or-drop. DM messages sign the ciphertext bytes over
+	// payload || dm || wrapped_keys (crypto.SignDM/VerifyDM).
+	pubKey := c.pubKeyForUser(msg.From)
+	if pubKey == nil {
+		c.logger.Warn("message signature drop — unknown sender pubkey",
+			"context", "dm", "id", msg.ID, "from", msg.From)
+		return
+	}
+	sigPayload, err := base64.StdEncoding.DecodeString(msg.Payload)
+	if err != nil {
+		c.logger.Warn("message signature drop — payload not base64",
+			"context", "dm", "id", msg.ID)
+		return
+	}
+	sigBytes, err := base64.StdEncoding.DecodeString(msg.Signature)
+	if err != nil {
+		c.logger.Warn("message signature drop — signature not base64",
+			"context", "dm", "id", msg.ID, "from", msg.From)
+		return
+	}
+	if !crypto.VerifyDM(pubKey, sigPayload, msg.DM, msg.WrappedKeys, sigBytes) {
+		c.logger.Warn("message signature drop — verification failed",
+			"context", "dm", "id", msg.ID, "from", msg.From)
 		return
 	}
 
@@ -274,6 +356,14 @@ func (c *Client) maybeAutoPreviewAttachments(attachments []store.StoredAttachmen
 			continue
 		}
 		if a.Size <= 0 || a.Size > c.cfg.ImageAutoPreviewMaxBytes {
+			continue
+		}
+		// F12: a.FileID is sender-supplied. Reject traversal-shaped ids
+		// before turning one into a local path — otherwise a hostile
+		// `../../foo` could be os.Stat'd (existence oracle) and, on a hit,
+		// nudge a render of the recipient's own file. Mirrors the write/
+		// download guards; the download path below is already gated.
+		if !validFileID(a.FileID) {
 			continue
 		}
 		cachedPath := config.AttachmentPath(dataDir, a.FileID)

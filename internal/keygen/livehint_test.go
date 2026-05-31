@@ -9,37 +9,39 @@ import (
 	"testing"
 )
 
-// TestLivePassphraseHint_HiddenBelowMinLength verifies that
-// passphrases shorter than the minimum length produce HintHidden
-// (no indicator rendered). This is the length-gate that kills the
-// rolling "weak, weak, weak" noise during early keystrokes.
-func TestLivePassphraseHint_HiddenBelowMinLength(t *testing.T) {
-	for _, length := range []int{0, 1, 5, MinPassphraseLength - 1} {
-		pass := strings.Repeat("a", length)
-		h := LivePassphraseHint(pass, nil)
-		if h.Tier != HintHidden {
-			t.Errorf("length %d: tier = %v, want HintHidden", length, h.Tier)
-		}
-		if h.Text != "" {
-			t.Errorf("length %d: text = %q, want empty for hidden tier", length, h.Text)
-		}
+// TestLivePassphraseHint_EmptyWarnsUnencrypted verifies that the empty
+// passphrase state gives immediate guidance instead of rendering a silent
+// field labelled only "recommended".
+func TestLivePassphraseHint_EmptyWarnsUnencrypted(t *testing.T) {
+	h := LivePassphraseHint("", nil)
+	if h.Tier != HintWarn {
+		t.Errorf("tier = %v, want HintWarn for empty passphrase", h.Tier)
+	}
+	if !strings.Contains(h.Text, "⚠") {
+		t.Errorf("empty text = %q, want alert icon", h.Text)
+	}
+	if !strings.Contains(h.Text, "Leaving blank allows anyone with the key to access this account") {
+		t.Errorf("empty text = %q, want local key risk", h.Text)
 	}
 }
 
-// TestLivePassphraseHint_BlockTier verifies a weak passphrase at or
-// above the length floor produces a block-tier hint with the crack
-// time in the text.
-func TestLivePassphraseHint_BlockTier(t *testing.T) {
-	// "password1234" is >= 12 chars but zxcvbn hates it.
-	h := LivePassphraseHint("password1234", nil)
+// TestLivePassphraseHint_FirstCharacterRunsZxcvbn verifies there is no
+// length gate: the first typed character replaces the empty warning with
+// zxcvbn feedback.
+func TestLivePassphraseHint_FirstCharacterRunsZxcvbn(t *testing.T) {
+	h := LivePassphraseHint("a", nil)
 	if h.Tier != HintBlock {
-		t.Errorf("tier = %v, want HintBlock", h.Tier)
+		t.Errorf("tier = %v, want weak advisory", h.Tier)
 	}
 	if !strings.Contains(h.Text, "weak") {
-		t.Errorf("block text = %q, want to mention weakness", h.Text)
+		t.Errorf("text = %q, want to mention weakness", h.Text)
 	}
-	if !strings.Contains(h.Text, "cracked in") {
-		t.Errorf("block text = %q, want a crack-time estimate", h.Text)
+	if strings.Contains(h.Text, "unencrypted key") {
+		t.Errorf("text = %q, should no longer show empty-field warning", h.Text)
+	}
+	want := "weak — cracked in less than a second"
+	if h.Text != want {
+		t.Errorf("text = %q, want %q", h.Text, want)
 	}
 }
 
@@ -70,7 +72,7 @@ func TestLivePassphraseHint_RespectsContext(t *testing.T) {
 	// With "myserver" as context, zxcvbn dictionary-matches the
 	// substring. Should produce a less-favorable result.
 	withCtx := LivePassphraseHint(pass, []string{"myserver"})
-	// Both may be block tier, but tier with context should be <= tier
+	// Both may be weak tier, but tier with context should be <= tier
 	// without context (smaller HintTier values are worse).
 	if withCtx.Tier > withoutCtx.Tier {
 		t.Errorf("with-context tier (%v) should be <= without-context tier (%v)",

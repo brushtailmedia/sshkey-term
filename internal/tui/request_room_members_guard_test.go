@@ -1,10 +1,11 @@
 package tui
 
-// V8 static guard: exactly ONE production call site of
-// Client.RequestRoomMembers may remain — the explicit `r` refresh
-// handler. Every automatic UI path (panel open, sidebar movement,
-// context switch, mouse selection) must render from the local member
-// cache instead of fetching, or the fetch storm regresses.
+// V8 static guard: production call sites of Client.RequestRoomMembers are
+// restricted to a small allowlist — the explicit `r` refresh handler
+// (internal/tui/app.go) and F7's room-attestation roster refresh
+// (internal/client/epoch_verify.go). Every automatic UI path (panel open,
+// sidebar movement, context switch, mouse selection) must render from the
+// local member cache instead of fetching, or the fetch storm regresses.
 //
 // Modeled on internal/config/path_drift_test.go.
 
@@ -78,22 +79,37 @@ func TestRequestRoomMembers_SingleProductionCallSite(t *testing.T) {
 		t.Fatalf("walk error: %v", err)
 	}
 
-	if len(matches) != 1 {
+	// Two legitimate production call sites are allowed; any OTHER reintroduces
+	// the automatic-fetch-storm risk and fails:
+	//   1. internal/tui/app.go — the explicit `r` refresh handler.
+	//   2. internal/client/epoch_verify.go — F7's room-attestation roster
+	//      refresh: a rare, single-shot-per-suspect-epoch re-fetch to re-verify
+	//      a stashed epoch key before adopting or failing closed. NOT a UI path.
+	//      See f7-room-member-attestation.md §6.5.
+	const (
+		appRefresh    = "internal/tui/app.go"
+		f7Attestation = "internal/client/epoch_verify.go"
+	)
+	var appMatches []match
+	for _, m := range matches {
+		switch m.rel {
+		case appRefresh:
+			appMatches = append(appMatches, m)
+		case f7Attestation:
+			// allowed (security-critical, bounded — not a UI render path)
+		default:
+			t.Fatalf("unexpected RequestRoomMembers call site %s:%d — all automatic UI "+
+				"paths must render from the local member cache, not fetch.\n  %s", m.rel, m.line, m.text)
+		}
+	}
+	if len(appMatches) != 1 {
 		var b strings.Builder
-		for _, m := range matches {
+		for _, m := range appMatches {
 			b.WriteString("\n  " + m.rel + ":" + itoa(m.line) + "  " + m.text)
 		}
-		t.Fatalf("expected exactly 1 production RequestRoomMembers call site, found %d:%s\n\n"+
-			"All automatic UI paths must render from the local member cache. Only the explicit "+
-			"`r` refresh handler may call RequestRoomMembers.", len(matches), b.String())
+		t.Fatalf("expected exactly 1 app.go RequestRoomMembers call site (the `r` refresh handler), found %d:%s", len(appMatches), b.String())
 	}
-
-	// The single survivor must be the `r` refresh handler in app.go.
-	m := matches[0]
-	if m.rel != "internal/tui/app.go" {
-		t.Fatalf("the surviving RequestRoomMembers call is in %s; expected internal/tui/app.go (the `r` refresh handler)", m.rel)
-	}
-	assertInsideRoomMembersRefreshCase(t, filepath.Join(root, "internal/tui/app.go"), m.line)
+	assertInsideRoomMembersRefreshCase(t, filepath.Join(root, "internal/tui/app.go"), appMatches[0].line)
 }
 
 // assertInsideRoomMembersRefreshCase checks that the call at callLine is

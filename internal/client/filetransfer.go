@@ -196,7 +196,10 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 		// the auto-preview goroutine will simply do its normal download.
 		// Same eager-thumbnail goroutine spawned post-write so the
 		// sender's first inline render of their own upload is fast.
-		if c.cfg.DataDir != "" {
+		// F12: fileID here is server-supplied (the upload_complete id from
+		// pending.fileID). Skip this best-effort cache write for any unsafe
+		// value so a malicious server can't path-traverse it.
+		if c.cfg.DataDir != "" && validFileID(fileID) {
 			localPath := config.AttachmentPath(c.cfg.DataDir, fileID)
 			if err := os.MkdirAll(filepath.Dir(localPath), 0700); err == nil {
 				if err := os.WriteFile(localPath, data, 0600); err == nil {
@@ -323,8 +326,34 @@ func HandleDownloadError(fileID string, err error) {
 	}
 }
 
+// validFileID reports whether fileID is a safe single filesystem path
+// component for the local cache write (audit F12). fileID originates from a
+// server-relayed message's file_ids, so without this a malicious server could
+// supply "../../etc/x" or an absolute path and the post-decrypt os.WriteFile
+// below would land decrypted bytes anywhere on the recipient's disk
+// (path traversal / arbitrary-path write). Mirrors the Save-As sanitizer
+// (tui/saveattachment.go): reject empty / "." / ".." and any path separator or
+// NUL, and require Base(fileID) == fileID. Legitimate server fileIDs ("file_"
+// + nanoid over [A-Za-z0-9_-]) contain none of these, so this never
+// false-rejects a real download.
+// validFileID is the package-local alias for config.ValidFileID — the single
+// source of truth for attachment-path safety (audit F12), shared with the TUI
+// read/render paths. Kept as a thin wrapper so the existing write/delete call
+// sites and their test read naturally.
+func validFileID(fileID string) bool {
+	return config.ValidFileID(fileID)
+}
+
 // DownloadFile downloads and decrypts a file. Returns the local path.
 func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) {
+	// F12: fileID is server-relayed (from a message's file_ids) and is used
+	// below as the local cache filename. Reject anything that isn't a safe
+	// single path component before any work, so a malicious server cannot make
+	// the post-decrypt write escape filesDir.
+	if !validFileID(fileID) {
+		return "", fmt.Errorf("invalid file id")
+	}
+
 	c.mu.RLock()
 	dlChan := c.downloadChan
 	c.mu.RUnlock()
@@ -413,8 +442,10 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 		return "", fmt.Errorf("decrypt: %w", err)
 	}
 
-	// Save — only reached if both hash and GCM verification passed
-	localPath := filepath.Join(filesDir, fileID)
+	// Save — only reached if both hash and GCM verification passed. fileID was
+	// validated at function entry (validFileID); filepath.Base is
+	// defense-in-depth so the write provably stays inside filesDir (F12).
+	localPath := filepath.Join(filesDir, filepath.Base(fileID))
 	if err := os.WriteFile(localPath, plaintext, 0600); err != nil {
 		return "", err
 	}

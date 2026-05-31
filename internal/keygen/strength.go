@@ -12,13 +12,15 @@
 //
 // Score policy:
 //
-//	0-1 (seconds to minutes)  → block
-//	2   (hours)               → warn-and-continue
-//	3-4 (days to centuries)   → silent pass
+//	empty                    → warn: key will be unencrypted
+//	0-1 (seconds to minutes) → weak advisory
+//	2   (hours)              → borderline advisory
+//	3-4 (days to centuries)  → strong / very strong advisory
 //
-// The warn-and-continue tier is a softer floor than the server-side
-// admin keygen (which hard-blocks at 2). Regular users get the warning
-// but can proceed if they insist; admin keys can't.
+// User key passphrases are optional. The TUI shows this guidance live,
+// but does not block weak non-empty passphrases; if blank passphrases are
+// allowed, forcing a 12-character floor for non-blank passphrases is
+// inconsistent UX.
 package keygen
 
 import (
@@ -29,21 +31,19 @@ import (
 	"github.com/trustelem/zxcvbn/match"
 )
 
-// MinPassphraseLength is the hard floor below which any passphrase is
-// rejected regardless of zxcvbn score. 12 chars matches the server
-// side and is enough for a random passphrase to clear score 3.
-const MinPassphraseLength = 12
+// UnencryptedKeyWarning is the immediate empty-passphrase advisory shown by
+// the wizard and Add Server key-generation flows.
+const UnencryptedKeyWarning = "⚠ Leaving blank allows anyone with the key to access this account"
 
 // Score thresholds. See package doc for the meaning of each tier.
 const (
-	// MinUserBlockScore: any score below this is hard-rejected. A
-	// passphrase that zxcvbn estimates would be cracked in seconds or
-	// minutes is too weak to ship even with a warning.
-	MinUserBlockScore = 2
+	// MinUserBorderlineScore: scores below this render as "weak".
+	// They are allowed, but the live advisory should make the local
+	// device-theft risk obvious.
+	MinUserBorderlineScore = 2
 
-	// MinUserSilentScore: any score below this triggers a warning;
-	// at or above is silent pass. So scores of 2 produce a warning,
-	// scores of 3-4 produce no feedback at all.
+	// MinUserSilentScore: scores below this render a warning-style
+	// advisory; scores of 3-4 render as strong.
 	MinUserSilentScore = 3
 )
 
@@ -52,25 +52,17 @@ const (
 // file offline. Same value as the server side (10^10).
 const offlineFastGuessesPerSec = 1e10
 
-// ValidationResult captures the outcome of a strength check. The
-// caller (TUI keygen flow) uses the three fields to decide what to do:
-//
-//   - Blocked == true: hard reject, do not proceed regardless of
-//     anything else. Show Message as the error.
-//   - Blocked == false && Warning != "": passphrase is borderline;
-//     show Warning to the user and let them confirm whether to
-//     proceed anyway.
-//   - Blocked == false && Warning == "": silent pass.
+// ValidationResult captures advisory-only strength feedback. Blocked and
+// Message are retained for the existing caller/test shape, but user keygen
+// strength no longer blocks submission; weak values are warnings only.
 type ValidationResult struct {
 	Blocked bool
 	Warning string
 	Message string
 }
 
-// ValidateUserPassphrase runs strength validation on a user-chosen
-// passphrase for client-side keygen flows. Returns a ValidationResult
-// the TUI uses to decide between hard-block, warn-and-confirm, and
-// silent-pass.
+// ValidateUserPassphrase runs advisory-only strength validation on a
+// user-chosen passphrase for client-side keygen flows.
 func ValidateUserPassphrase(pass string) ValidationResult {
 	return ValidateUserPassphraseWithContext(pass, nil)
 }
@@ -80,18 +72,17 @@ func ValidateUserPassphrase(pass string) ValidationResult {
 type HintTier int
 
 const (
-	// HintHidden means the indicator should not render (passphrase is
-	// below MinPassphraseLength — showing weakness for a too-short
-	// passphrase is noisy and obvious).
+	// HintHidden means the indicator should not render. The keygen views use it
+	// only as the zero-value/off state; active passphrase fields show either the
+	// empty-passphrase warning, a zxcvbn advisory, or a success indicator.
 	HintHidden HintTier = iota
-	// HintBlock means the passphrase would be hard-rejected on submit.
-	// TUI renders in error style.
+	// HintBlock means "weak" in the live advisory. It is red, but still
+	// allowed; there is no hard-submit block.
 	HintBlock
-	// HintWarn means the passphrase is borderline and would require
-	// confirmation on submit. TUI renders in warning style.
+	// HintWarn means the passphrase is blank or borderline. TUI renders
+	// in warning style.
 	HintWarn
-	// HintPass means the passphrase is strong enough to submit
-	// silently. TUI renders in success/dim style.
+	// HintPass means the passphrase is strong. TUI renders in success style.
 	HintPass
 )
 
@@ -105,11 +96,9 @@ type LiveHint struct {
 }
 
 // LivePassphraseHint runs a fast strength check for every-keystroke
-// feedback under the passphrase input. Returns HintHidden when the
-// passphrase is shorter than MinPassphraseLength so the first N
-// keystrokes don't trigger a rolling "weak, weak, weak" indicator.
-// Once the length floor clears, returns a compact label matching the
-// tier the user would hit on submit (block / warn / pass).
+// feedback under the passphrase input. Blank passphrases immediately
+// show the unencrypted-key warning; any non-blank passphrase runs
+// zxcvbn from the first character.
 //
 // The text is deliberately shorter than the submit-time validation
 // messages: users re-reading the same long diagnostic on every
@@ -117,21 +106,21 @@ type LiveHint struct {
 // estimate appear live; the full pattern explanation is reserved for
 // the submit-time message.
 func LivePassphraseHint(pass string, context []string) LiveHint {
-	if len(pass) < MinPassphraseLength {
-		return LiveHint{Tier: HintHidden}
+	if pass == "" {
+		return LiveHint{Tier: HintWarn, Text: UnencryptedKeyWarning}
 	}
 	result := zxcvbn.PasswordStrength(pass, context)
 	crackTime := crackTimeDisplay(result.Guesses)
 	switch {
-	case result.Score < MinUserBlockScore:
+	case result.Score < MinUserBorderlineScore:
 		return LiveHint{
 			Tier: HintBlock,
-			Text: fmt.Sprintf("✗ weak — cracked in %s", crackTime),
+			Text: fmt.Sprintf("weak — cracked in %s", crackTime),
 		}
 	case result.Score < MinUserSilentScore:
 		return LiveHint{
 			Tier: HintWarn,
-			Text: fmt.Sprintf("! borderline — cracked in %s", crackTime),
+			Text: fmt.Sprintf("borderline — cracked in %s", crackTime),
 		}
 	default:
 		label := "strong"
@@ -150,49 +139,22 @@ func LivePassphraseHint(pass string, context []string) LiveHint {
 // zxcvbn will penalize if they appear in the passphrase.
 func ValidateUserPassphraseWithContext(pass string, context []string) ValidationResult {
 	if pass == "" {
-		return ValidationResult{
-			Blocked: true,
-			Message: "passphrase is required — generating an unencrypted key is unsafe",
-		}
-	}
-	if len(pass) < MinPassphraseLength {
-		return ValidationResult{
-			Blocked: true,
-			Message: fmt.Sprintf("passphrase must be at least %d characters (got %d)", MinPassphraseLength, len(pass)),
-		}
+		return ValidationResult{Warning: UnencryptedKeyWarning}
 	}
 
 	result := zxcvbn.PasswordStrength(pass, context)
-	switch {
-	case result.Score < MinUserBlockScore:
-		return ValidationResult{
-			Blocked: true,
-			Message: buildBlockMessage(result),
-		}
-	case result.Score < MinUserSilentScore:
+	if result.Score < MinUserSilentScore {
 		return ValidationResult{
 			Blocked: false,
 			Warning: buildWarnMessage(result),
 		}
-	default:
-		return ValidationResult{}
 	}
-}
-
-// buildBlockMessage formats a zxcvbn result into a hard-rejection
-// message shown when the user's passphrase is too weak to use.
-func buildBlockMessage(r zxcvbn.Result) string {
-	crackTime := crackTimeDisplay(r.Guesses)
-	reason := patternExplanation(r.Sequence)
-	return fmt.Sprintf("passphrase is too weak: could be cracked in %s — %s. Choose a stronger one (try 4+ unrelated words, or a random passphrase from a password manager).", crackTime, reason)
+	return ValidationResult{}
 }
 
 // buildWarnMessage formats a zxcvbn result into a warning message
-// shown when the passphrase is borderline. The message is a statement
-// of the weakness; the TUI appends a single confirmation instruction
-// after it (see wizard.go / addserver.go). Keep this function's output
-// free of question marks or "Continue anyway?" phrasing so the combined
-// text doesn't stutter.
+// shown when the passphrase is weak or borderline. This is advisory-only:
+// the TUI does not append confirmation wording or block submission.
 func buildWarnMessage(r zxcvbn.Result) string {
 	crackTime := crackTimeDisplay(r.Guesses)
 	reason := patternExplanation(r.Sequence)

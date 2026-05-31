@@ -396,6 +396,51 @@ func TestApp_ComputePreviewPath_PreservedOnFocusShiftToInput(t *testing.T) {
 		t.Errorf("modal open: computePreviewPath should clear, got %q", got)
 	}
 	a.help.Toggle() // close
+
+	// The Ctrl+g which-key popup is not a modal, but it still overlays text
+	// near the preview pane. Suppress rasterm previews while it is visible so
+	// kitty's graphics layer cannot bleed through/around the popup.
+	a.navPopupVisible = true
+	if got := a.computePreviewPath(); got != "" {
+		t.Errorf("nav popup visible: computePreviewPath should clear, got %q", got)
+	}
+	a.navPopupVisible = false
+}
+
+func TestApp_UpdateClearsPreviewPathWhenNavPopupReveals(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.messages.SetContext("room_test", "", "")
+	a.messages.SetFilesDir(t.TempDir())
+
+	imgFile := a.messages.filesDir + "/file_nav_popup"
+	if err := os.WriteFile(imgFile, []byte("fake-image-bytes"), 0600); err != nil {
+		t.Fatalf("seed image file: %v", err)
+	}
+	a.messages.messages = []DisplayMessage{{
+		ID: "msg_with_image",
+		Attachments: []DisplayAttachment{
+			{FileID: "file_nav_popup", IsImage: true},
+		},
+	}}
+	a.messages.cursor = 0
+
+	model, _ := a.Update(struct{}{})
+	a1 := model.(App)
+	if a1.sidebar.previewImagePath == "" {
+		t.Fatal("precondition: image selection should populate previewImagePath")
+	}
+
+	a1.navMode = true
+	a1.navPopupEnabled = true
+	a1.navModeTickGen = 7
+	model, _ = a1.Update(navPopupRevealMsg{Gen: 7})
+	a2 := model.(App)
+	if !a2.navPopupVisible {
+		t.Fatal("precondition: nav popup should reveal")
+	}
+	if a2.sidebar.previewImagePath != "" {
+		t.Errorf("nav popup reveal should clear previewImagePath, got %q", a2.sidebar.previewImagePath)
+	}
 }
 
 // TestAppView_PrependsKittyDeleteWhenBodyLacksPlacement verifies the

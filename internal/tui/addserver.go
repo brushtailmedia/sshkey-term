@@ -72,17 +72,12 @@ type AddServerModel struct {
 	// viewForm under the existing notice; cleared on each new submit.
 	formErr string
 
-	// Phase 16 Gap 4: zxcvbn warn-and-confirm state. When the user
-	// submits a borderline passphrase (warn tier), we display the
-	// warning and stash the passphrase here. If they re-submit with
-	// the same value unchanged, treat it as confirmation and proceed.
-	weakPassConfirmed string
-
 	// Live strength hint — recomputed on every keystroke while the
 	// generate-key dialog is open. Rendered as a compact one-line
-	// indicator under the passphrase input, hidden below
-	// MinPassphraseLength. Context includes hostname + display name
-	// (see addServerZxcvbnContext).
+	// indicator under the passphrase input. Empty passphrases show the
+	// unencrypted-key warning immediately; non-empty passphrases run
+	// zxcvbn from the first character. Context includes hostname +
+	// display name (see addServerZxcvbnContext).
 	strengthHint keygen.LiveHint
 
 	// scanDirsFn returns the list of per-server keys folders to walk
@@ -94,6 +89,12 @@ type AddServerModel struct {
 	// the scanner falls back to scanning ~/.ssh/ only, which is the
 	// natural test default.
 	scanDirsFn func() []string
+
+	// configDir is the active app config directory. Add Server must use the
+	// same root as App.switchServerByIndex, otherwise it can copy/generate a key
+	// under the default config dir while the connection dials with a key path
+	// derived from a custom runtime config dir.
+	configDir string
 }
 
 // AddServerMsg is sent when the user confirms adding a server. The
@@ -112,11 +113,11 @@ type AddServerMsg struct {
 }
 
 // keyCopyFn is the function the submit handler uses to copy keys
-// into the managed folder. Production points it at copyKeyForServer;
+// into the managed folder. Production points it at copyKeyForServerInConfigDir;
 // tests can swap it for a passthrough so they don't need real key
 // files on disk. Package-level variable so the swap is local-effect
 // without exposing a fake interface to callers.
-var keyCopyFn = copyKeyForServer
+var keyCopyFn = copyKeyForServerInConfigDir
 
 // copyKeyForServer copies an SSH key (private + .pub) into the
 // app-managed folder under a host-derived filename, returning the
@@ -145,15 +146,22 @@ var keyCopyFn = copyKeyForServer
 // Same physical bytes in two folders = same cryptographic identity.
 // Whether you WANT one identity across servers vs separate keys
 // per server is a security choice the user makes by selecting
-// (reuse) vs generating (Ctrl+G).
+// (reuse) vs generating (Alt+g / Option+g on macOS).
 //
 // Source-equals-destination is idempotent (no-op, returns the
 // path). Destination-already-exists is an error rather than a
 // silent overwrite. Host validation runs first — defense in depth
 // against malformed values reaching the filesystem layer.
 func copyKeyForServer(srcKeyPath, host, displayName string) (string, error) {
+	return copyKeyForServerInConfigDir(config.DefaultConfigDir(), srcKeyPath, host, displayName)
+}
+
+func copyKeyForServerInConfigDir(configDir, srcKeyPath, host, displayName string) (string, error) {
 	if err := config.ValidateHost(host); err != nil {
 		return "", err
+	}
+	if strings.TrimSpace(configDir) == "" {
+		configDir = config.DefaultConfigDir()
 	}
 	src := config.ExpandUserPath(srcKeyPath)
 
@@ -174,7 +182,6 @@ func copyKeyForServer(srcKeyPath, host, displayName string) (string, error) {
 		return "", err
 	}
 
-	configDir := config.DefaultConfigDir()
 	keysDir := config.ServerKeysDir(configDir, host)
 	if err := os.MkdirAll(keysDir, 0700); err != nil {
 		return "", fmt.Errorf("create keys dir (%s): %w", keysDir, err)
@@ -232,8 +239,8 @@ func pubLineWithComment(pubData []byte, displayName string) ([]byte, error) {
 
 // addServerZxcvbnContext collects form-field values to pass to zxcvbn
 // as context strings, so a passphrase containing the requested display name
-// or hostname the user just typed gets penalized. Mirrors the wizard's
-// ValidateUserPassphraseWithContext call which passes the chosen display name.
+// or hostname the user just typed gets penalized. Mirrors the wizard's live
+// hint context, which passes the chosen display name.
 // Uses the requested-display-name field (NOT the server label, which is an
 // arbitrary "Home"/"Work" tag and poor passphrase context) plus the host. Port
 // is omitted (low signal; usually just digits).
@@ -251,13 +258,23 @@ func addServerZxcvbnContext(a AddServerModel) []string {
 	return ctx
 }
 
-// NewAddServer constructs the Add Server dialog. The scanDirsFn
+// NewAddServer constructs the Add Server dialog with the default app config
+// directory. Production code should prefer NewAddServerWithConfigDir so key
+// generation/copying follows the active runtime config root.
+func NewAddServer(scanDirsFn func() []string) AddServerModel {
+	return NewAddServerWithConfigDir(config.DefaultConfigDir(), scanDirsFn)
+}
+
+// NewAddServerWithConfigDir constructs the Add Server dialog. The scanDirsFn
 // callback returns the list of per-server keys folders to include in
 // the dialog's "Existing Ed25519 keys" list at scan time (called from
 // rescanEd25519Keys). May be nil — the scanner falls back to ~/.ssh/
 // only, which is the natural default for tests and for the first-run
 // case where no servers exist yet.
-func NewAddServer(scanDirsFn func() []string) AddServerModel {
+func NewAddServerWithConfigDir(configDir string, scanDirsFn func() []string) AddServerModel {
+	if strings.TrimSpace(configDir) == "" {
+		configDir = config.DefaultConfigDir()
+	}
 	labels := []string{"Name", "Host", "Port", "Your display name", "SSH key path"}
 
 	inputs := make([]textinput.Model, 5)
@@ -281,11 +298,11 @@ func NewAddServer(scanDirsFn func() []string) AddServerModel {
 		genInputs[i].Prompt = ""
 	}
 	// genInputs[0] (the key save-path) intentionally starts empty.
-	// The Ctrl+G handler populates it with `config.ServerKeyPath(
+	// The Alt+g handler / [Generate new key] row populates it with `config.ServerKeyPath(
 	// configDir, host)` once the user has typed a hostname — there
 	// is no useful host-independent default under the per-server
 	// keys-folder layout, and the only path into the generate view
-	// is Ctrl+G (which always overwrites this value).
+	// is the generate action (which always overwrites this value).
 	genInputs[1].Placeholder = "passphrase"
 	genInputs[1].EchoMode = textinput.EchoPassword
 	genInputs[2].Placeholder = "confirm passphrase"
@@ -296,7 +313,15 @@ func NewAddServer(scanDirsFn func() []string) AddServerModel {
 		labels:     labels,
 		genInputs:  genInputs,
 		scanDirsFn: scanDirsFn,
+		configDir:  configDir,
 	}
+}
+
+func (a AddServerModel) effectiveConfigDir() string {
+	if strings.TrimSpace(a.configDir) != "" {
+		return a.configDir
+	}
+	return config.DefaultConfigDir()
 }
 
 func (a *AddServerModel) Show() {
@@ -307,8 +332,7 @@ func (a *AddServerModel) Show() {
 	a.genErr = ""
 	a.genNotice = ""
 	a.formErr = ""
-	a.weakPassConfirmed = ""
-	a.strengthHint = keygen.LiveHint{}
+	a.strengthHint = keygen.LivePassphraseHint("", addServerZxcvbnContext(*a))
 	for i := range a.inputs {
 		if i == fieldPort {
 			a.inputs[i].SetValue("2222")
@@ -320,7 +344,7 @@ func (a *AddServerModel) Show() {
 	// textinput model retains values across Hide/Show, and we don't
 	// want a passphrase typed previously to be lurking in the field
 	// or in process memory longer than necessary. Path is reset on
-	// Ctrl+G entry from the host-derived default; clearing here is
+	// generate-key entry from the host-derived default; clearing here is
 	// belt-and-suspenders.
 	a.genInputs[1].SetValue("")
 	a.genInputs[2].SetValue("")
@@ -335,15 +359,11 @@ func (a *AddServerModel) Hide() {
 	a.genErr = ""
 	a.genNotice = ""
 	a.formErr = ""
-	// Clear sensitive / per-session state. weakPassConfirmed is the
-	// "you've been warned about this borderline passphrase" mark — if
-	// it survived Hide(), the user could close+reopen and silently
-	// get the warned passphrase accepted on first Enter. strengthHint
-	// is the live zxcvbn indicator; keeping a stale one would briefly
-	// flash a wrong reading on the next open before the first keystroke
-	// recomputes it. Passphrase fields zeroed for the same reason as
-	// in Show() — minimize cleartext-in-memory window.
-	a.weakPassConfirmed = ""
+	// Clear sensitive / per-session state. strengthHint is the live zxcvbn
+	// indicator; keeping a stale one would briefly flash a wrong reading on the
+	// next open before the first keystroke recomputes it. Passphrase fields
+	// zeroed for the same reason as in Show() — minimize cleartext-in-memory
+	// window.
 	a.strengthHint = keygen.LiveHint{}
 	a.genInputs[1].SetValue("")
 	a.genInputs[2].SetValue("")
@@ -434,10 +454,10 @@ func (a AddServerModel) enterGenerateMode() (AddServerModel, tea.Cmd) {
 	for i := range a.inputs {
 		a.inputs[i].Blur()
 	}
-	a.genInputs[0].SetValue(config.ServerKeyPath(config.DefaultConfigDir(), host))
+	a.genInputs[0].SetValue(config.ServerKeyPath(a.effectiveConfigDir(), host))
 	a.genInputs[1].SetValue("")
 	a.genInputs[2].SetValue("")
-	a.strengthHint = keygen.LiveHint{}
+	a.strengthHint = keygen.LivePassphraseHint("", addServerZxcvbnContext(a))
 	a.genFocused = 0
 	a.genInputs[0].Focus()
 	a.genErr = ""
@@ -616,7 +636,7 @@ func (a AddServerModel) updateForm(msg tea.KeyMsg) (AddServerModel, tea.Cmd) {
 		// Source-equals-destination is idempotent (no-op). See
 		// copyKeyForServer for the rationale. Indirection via
 		// keyCopyFn is so tests can swap in a passthrough.
-		if _, err := keyCopyFn(key, host, displayName); err != nil {
+		if _, err := keyCopyFn(a.effectiveConfigDir(), key, host, displayName); err != nil {
 			a.formErr = err.Error()
 			return a, nil
 		}
@@ -648,7 +668,7 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 	switch msg.String() {
 	case "esc":
 		// Return to form mode without generating. Defensive clamp:
-		// Ctrl+G already pulls focused back into the form range, but
+		// Esc from generate mode pulls focused back into the form range, but
 		// if anything ever leaves it as the list-sentinel value here
 		// we'd index inputs out of bounds.
 		a.mode = addServerForm
@@ -700,39 +720,11 @@ func (a AddServerModel) updateGenerate(msg tea.KeyMsg) (AddServerModel, tea.Cmd)
 			displayName = validated
 		}
 
-		// Phase 16 Gap 4: zxcvbn passphrase strength check. Same
-		// three-tier policy as the wizard:
-		//   - block tier: hard error, user must change passphrase
-		//   - warn tier: show warning, set weakPassConfirmed; if the
-		//     user re-submits with the same value, proceed
-		//   - silent pass: proceed immediately
-		// Empty passphrase is allowed (matches existing behavior;
-		// generates an unencrypted key).
-		if pass != "" {
-			// Pass hostname + username as zxcvbn context so passphrases
-			// containing either (e.g. "sshkey.example.com" or the
-			// chosen display name) get penalized. Mirrors the wizard's
-			// context-awareness — main form inputs are available here
-			// because the user fills the form before opening the
-			// keygen dialog.
-			context := addServerZxcvbnContext(a)
-			result := keygen.ValidateUserPassphraseWithContext(pass, context)
-			switch {
-			case result.Blocked:
-				a.genErr = result.Message
-				a.weakPassConfirmed = ""
-				return a, nil
-			case result.Warning != "":
-				if a.weakPassConfirmed != pass {
-					a.weakPassConfirmed = pass
-					a.genErr = result.Warning + " Press Enter again to use it anyway, or edit to try a stronger one."
-					return a, nil
-				}
-				// User has already seen the warning and re-submitted
-				// with the same passphrase — fall through to keygen.
-			}
-		}
-		a.weakPassConfirmed = ""
+		// Passphrase strength is advisory-only. Blank passphrases are
+		// allowed, so short/weak non-blank passphrases must not be
+		// rejected. The live hint carries the warning; submit only
+		// enforces mechanical validity such as path presence, matching
+		// confirmation, display-name validity, and no overwrite.
 
 		// Don't silently overwrite an existing file
 		expanded := config.ExpandUserPath(path)
@@ -934,6 +926,12 @@ func (a AddServerModel) viewForm(width int) string {
 }
 
 func (a AddServerModel) viewGenerate(width int) string {
+	inputWidth := keygenInputWidth(width)
+	genInputs := append([]textinput.Model(nil), a.genInputs...)
+	for i := range genInputs {
+		setKeygenInputWidths(inputWidth, &genInputs[i])
+	}
+
 	var b strings.Builder
 
 	b.WriteString(searchHeaderStyle.Render(" Generate New Key"))
@@ -942,10 +940,11 @@ func (a AddServerModel) viewGenerate(width int) string {
 	genLabels := []string{"Save to", "Passphrase (recommended)", "Confirm passphrase"}
 	for i, label := range genLabels {
 		b.WriteString("  " + label + ":\n")
-		b.WriteString("  " + a.genInputs[i].View() + "\n")
+		b.WriteString("  " + genInputs[i].View() + "\n")
 		// Phase 16 Gap 4: live strength hint under the passphrase
-		// input (index 1 only). Hidden under MinPassphraseLength —
-		// renderStrengthHint returns an empty string for HintHidden.
+		// input (index 1 only). Empty shows the unencrypted-key
+		// advisory immediately; typing any character switches to
+		// zxcvbn feedback.
 		if i == 1 {
 			if hint := renderStrengthHint(a.strengthHint); hint != "" {
 				b.WriteString("  " + hint + "\n")

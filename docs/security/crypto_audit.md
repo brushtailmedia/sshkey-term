@@ -5,9 +5,14 @@ its **enforcement**. Date: 2026-05-30.
 
 > **Status: complete (2026-05-30).** 12 findings (F1–F12): **four HIGH**
 > (F1, F6, F7, F12), one MEDIUM (F11), the rest LOW/INFO. The cryptographic
-> primitives are sound; the gaps are **missing receive-side verification** plus
-> one **path-traversal** in the file-cache write (F12). See the Bottom line and
-> Recommended priority sections. Code-level review, not a professional audit.
+> primitives are sound; the gaps were **missing receive-side verification** plus
+> one **path-traversal** in the file-cache write. **F1** (normal-message
+> verify-or-drop) and **F12** (path traversal) are **fixed (2026-05-30)**, and
+> **F7** (room member attestation) is **fixed (2026-05-31)** — the rotator now
+> signs the member set and members verify-or-fail-closed (cross-repo; see F7).
+> The **one remaining HIGH** is **F6** (deletes/reactions/pins unauthenticated).
+> See the Bottom line and Recommended priority sections. Code-level review, not a
+> professional audit.
 
 ## Scope & threat model
 
@@ -29,17 +34,17 @@ its **enforcement**. Date: 2026-05-30.
 
 | ID | Severity | Title |
 |----|----------|-------|
-| F1 | **HIGH** | Normal messages signed on send but never verified on receive (impersonation in rooms/group-DMs) |
+| F1 | **HIGH** | Normal messages signed on send but never verified on receive (impersonation in rooms/group-DMs) — *✅ fixed 2026-05-30 (verify-or-drop on room/group/DM receipt)* |
 | F6 | **HIGH** | Deletes / reactions / un-reacts / pins are not authenticated on receipt (server can forge + misattribute) |
-| F7 | **HIGH** (design-dependent) | Room epoch-key recipients are the server's trigger list; `MemberHash` never verified → a malicious server can add an eavesdropper to a room |
-| F12 | **HIGH** | Path traversal via unsanitized `fileID` in the download cache write → arbitrary-path file write |
+| F7 | **HIGH** (design-dependent) | Room epoch-key recipients are the server's trigger list; `MemberHash` never verified → a malicious server can add an eavesdropper to a room — *✅ fixed 2026-05-31 (signed member attestation + verify-or-fail-closed, cross-repo)* |
+| F12 | **HIGH** | Path traversal via unsanitized `fileID` in the download cache write → arbitrary-path file write — *✅ fixed 2026-05-30 (write/delete sites); read/render cache paths closed 2026-05-31 → `config.ValidFileID` now gates every fileID→path site* |
 | F11 | MEDIUM | File-download integrity uses a server-provided hash; room files are substitutable |
 | F2 | LOW–MED | Send-path signatures lack length-prefixing / domain separation |
 | F8 | INFO (design) | No forward secrecy / post-compromise security — identity-key compromise decrypts all past + future |
 | F9 | LOW | Room content reuses the epoch key with random 96-bit nonces (~2³² birthday bound per epoch) |
 | F3 | LOW | `SafetyNumber` is entropy-lossy and short (24 digits) |
 | F4 | LOW | TOFU pin overwritten to the changed key before the user decides |
-| F10 | INFO | Unencrypted key-generation branch exists (gated by the mandatory-passphrase UI) |
+| F10 | INFO | Unencrypted key-generation branch exists — *✅ resolved 2026-05-31 (intentional user choice; strength now advisory-only + explicit blank warning, replacing the incoherent allow-blank-but-block-weak gate)* |
 | F5 | INFO | `Encrypt`/`Decrypt` don't assert a 256-bit key |
 
 ## Bottom line
@@ -47,33 +52,34 @@ its **enforcement**. Date: 2026-05-30.
 The cryptographic **primitives are implemented correctly** — sound AEAD / ECIES
 / Ed25519 / HKDF construction, `crypto/rand` everywhere (zero `math/rand` in the
 tree), correct Ed25519↔X25519 conversions, passphrase-encrypted keys at `0600`,
-whole-DB SQLCipher at rest, no hardcoded secrets. **The gap is enforcement on
-the receive side: the client verifies almost nothing it receives.** Only message
-**edits** and file **content-hashes** are verified; **normal messages, deletes,
-reactions, un-reacts, and pins are accepted on the server's word** — the actor is
-read from a server-authored envelope field with no signature check (F1, F6). And
-**room** key distribution trusts the server's membership list with no
-`MemberHash` verification (F7). Against the project's own "untrusted server"
-threat model, that currently means:
+whole-DB SQLCipher at rest, no hardcoded secrets. **The main gap was enforcement
+on the receive side**, and it is now **partly closed**: message **edits**,
+**normal messages** (room/group/DM — F1, fixed), and file **content-hashes** are
+verified-or-dropped. Still unverified: **deletes, reactions, un-reacts, and pins
+are accepted on the server's word** — the actor is read from a server-authored
+envelope field with no signature check (F6). And **room** key distribution trusts
+the server's membership list with no `MemberHash` verification (F7). Against the
+project's own "untrusted server" threat model, that currently means:
 
 - **DM / group-DM content confidentiality vs the server: holds** — per-message
   keys are wrapped only for the chosen peers; the server never sees them.
 - **Room content confidentiality vs an *active* server: does NOT hold** — the
   server can list itself / a colluder as an epoch-key recipient (F7).
-- **Message & action authenticity vs the server: does NOT hold** for normal
-  messages, deletes, reactions, pins (F1, F6) — only *edits* are authenticated.
+- **Message authenticity vs the server: now holds** for normal room/group/DM
+  messages (F1, fixed) and *edits*. **Action authenticity still does NOT hold**
+  for deletes, reactions, un-reacts, and pins (F6).
 - **No forward secrecy** (F8): identity-key compromise → all history + future.
 - **File handling vs the server:** room-file *content* can be substituted (F11),
   and an unsanitized `fileID` lets a malicious server write decrypted content to
   an **arbitrary path** on the recipient's disk (F12 — path traversal, RCE-class).
 
 The encouraging part: **every gap is a missing verification call, not a broken
-primitive** — and the **edit path already demonstrates the correct
-verify-or-drop + domain-separation + msgID-binding pattern.** Extending that to
-the send-path message handlers and the delete/react/pin handlers, plus a
-`MemberHash` check on epoch-key receipt, closes F1/F6/F7. These are most likely
-**pre-launch deferrals** (the app has no users yet), but they must land before
-the E2E claims hold against a real adversary.
+primitive** — and the **edit path already demonstrated the correct verify-or-drop
+pattern.** That pattern has now been extended to the **normal-message handlers
+(F1, fixed)**; extending it to the delete/react/pin handlers (F6), plus a
+`MemberHash` check on epoch-key receipt (F7), closes the remaining authenticity
+gaps. These are **pre-launch items** (the app has no users yet), but they must
+land before the E2E claims hold against a real adversary.
 
 ---
 
@@ -133,6 +139,22 @@ mirroring the edit path's verify-or-drop. Confirm whether the omission is an
 intentional pre-launch deferral; if so, track it explicitly — it is the single
 finding that most changes the security story.
 
+> **Fixed (2026-05-30).** `storeRoomMessage` / `storeGroupMessage` /
+> `storeDMMessage` (`internal/client/persist.go`) now **verify-or-drop** every
+> inbound message **before** it is decrypted or stored, mirroring the edit path:
+> resolve the sender's Ed25519 key via `pubKeyForUser` (live profile → pinned-key
+> fallback; **nil ⇒ drop**), base64-decode the payload + signature, then check
+> `crypto.VerifyRoom` (room — over `payload ‖ room ‖ epoch`) or `crypto.VerifyDM`
+> (group/DM — over `payload ‖ conversation ‖ wrapped_keys`). Any failure —
+> unknown/unresolvable sender, un-decodable fields, or a bad signature — logs a
+> `Warn` and returns without storing. A malicious server can no longer attribute a
+> decryptable ciphertext to a sender who didn't sign it. Tests:
+> `message_verify_test.go` (15 cases: valid → stored; garbage / unsigned /
+> unknown-sender / context-rebound → dropped, across room/group/DM). **Scope:**
+> uses the existing canonical forms — see **F2**, now elevated from academic since
+> verification is live. Does **not** cover deletes/reactions/un-reacts/pins
+> (**F6**) or the room `MemberHash` (**F7**), which remain open.
+
 ## F2 — Send-path canonical signing forms lack length-prefixing / domain separation (LOW–MED)
 
 `SignRoom = payload ‖ room ‖ epoch` and
@@ -150,10 +172,14 @@ The team already fixed exactly this for **edits**: `SignRoomEdit` /
 `SignDMEdit` (crypto.go:244,268) prepend a domain tag (`"edit_room:"` /
 `"edit_dm:"`) and a **length-prefixed** `msgID` — with a comment describing the
 substitution attack. The base send-path forms never got the same treatment.
-Largely academic while **F1** stands (nothing is verified), but when F1 is
-closed, the send forms must use the hardened canonical shape. (`MemberHash`
-concatenates usernames with no delimiter too — same pattern; impact bounded by
-the nanoid username format.)
+This was academic while F1 stood (nothing verified `SignRoom`/`SignDM`); **with
+F1 now fixed — verification is live — hardening these forms moves from academic to
+recommended.** In practice the AEAD layer still blocks the boundary/cross-context
+reinterpretation (a reinterpreted signature only verifies if the substituted
+ciphertext also decrypts under a key the server cannot forge a GCM tag for), so
+this stays LOW–MED, but the forms should be hardened as defense-in-depth rather
+than relying on that coincidence. (`MemberHash` concatenates usernames with no
+delimiter too — same pattern; impact bounded by the nanoid username format.)
 
 **Recommendation.** Adopt domain tags + length-prefixed variable fields for
 `SignRoom`/`SignDM` (and `wrappedKeysCanonical` entries), as the edit forms do.
@@ -218,6 +244,8 @@ form) + verify-or-drop on receipt, consistent with the edit path.
 > column above. F6 stands as HIGH on that basis.
 
 ## F7 — Room epoch-key recipients are server-supplied; `MemberHash` never verified (HIGH, design-dependent)
+
+> **Fixed (2026-05-31) — signed member attestation + verify-or-fail-closed (cross-repo).** The key finding refined the fix: the missing primitive was a **generator signature**, not pubkey-binding — an *unsigned* `member_hash` is forgeable by the relay (it could rewrite it per-victim). Now the rotating client signs `(room, epoch, member_hash)` with its identity key (`crypto.SignEpochRoster`, domain `epoch_roster:v1`); the server stores it per `(room,epoch)` atomically with the key batch and forwards `generator/member_hash/member_sig` on every current-epoch `epoch_key`; each member verifies the signature against the generator's **pinned** key (`VerifyEpochRoster`), recomputes `MemberHash(local_roster)`, and **fail-closes** (does not adopt the key; warns) on any mismatch — with one `room_members` refresh first to absorb a lagging roster. A **sync-path guard** keeps sync/history keys decryption-only so they can't establish the current epoch and bypass the check. Username-set hash for v1 (key-substitution stays reactively self-detecting; device-pubkey binding deferred to the per-device-keys work via the `v1` version tag). Tests: server `epoch_attestation_test.go`; client `crypto/epoch_roster_test.go` + `client/epoch_verify_test.go` (valid→adopt; forged/missing/unknown-generator→fail-closed; mismatch→refresh-then-fail-closed; absent-roster→adopt-on-refresh). The server-side note below (honest server builds the recipient list authoritatively) still holds — F7 adds the cross-client check that makes a *malicious* server's covert injection detectable. Full design: `docs/planning/open/f7-room-member-attestation.md`.
 
 `handleEpochTrigger` (`epoch.go:23`) wraps the new room epoch key for
 **`trigger.Members`** — the recipient list (usernames + pubkeys) supplied by the
@@ -286,16 +314,47 @@ per epoch — but a counter-based nonce (or a documented per-epoch cap) would
 remove the bound. **DMs/group-DMs are immune** (fresh per-message key → one nonce
 per key).
 
-## F10 — Unencrypted key-generation branch exists, gated by the UI (INFO)
+## F10 — Unencrypted key-generation branch (INFO — ✅ resolved 2026-05-31)
 
 `generateEd25519KeyFile` (`internal/tui/keygen.go:37-41`) writes an
 **unencrypted** OpenSSH key when `passphrase == ""` (else
-`MarshalPrivateKeyWithPassphrase`, bcrypt-pbkdf). The wizard / add-server flows
-gate this with mandatory passphrase validation (`internal/keygen/strength.go`:
-12-char min + zxcvbn floor; "generating an unencrypted key is unsafe"), so it's
-unreachable through the UI — but the generator itself would write plaintext if a
-future caller passed `""`. **Recommendation:** hard-fail on empty passphrase
-inside `generateEd25519KeyFile` (defense in depth).
+`MarshalPrivateKeyWithPassphrase`, bcrypt-pbkdf). This branch is **intentional
+and supported** — a blank passphrase is the user's choice, matching `ssh-keygen`
+(which allows empty passphrases and enforces no strength when one is set). The
+real issue was never the branch; it was the *inconsistency* in how the UI
+treated it.
+
+> **Resolved (2026-05-31).** The original write-up here described the UI as
+> gating this with "mandatory passphrase validation (12-char min + zxcvbn
+> floor)" — which was both **inaccurate** and **incoherent**:
+>
+> - *Inaccurate:* a blank passphrase was always allowed. The validator's
+>   `pass == ""` → "passphrase is required" branch was **dead code** — both
+>   callers (`wizard.go`, `addserver.go`) short-circuited it with a `pass != ""`
+>   guard, so empty never reached validation.
+> - *Incoherent:* a blank passphrase sailed through, but a *non-blank* one under
+>   12 chars (or below zxcvbn score 2) was **hard-blocked**. The policy forbade
+>   the middle while permitting both ends — nudging friction-averse users toward
+>   the strictly-worse unencrypted option, since "weak-but-something" is strictly
+>   more at-rest protection than "nothing."
+>
+> Passphrase strength is now **advisory-only** for user keys
+> (`internal/keygen/strength.go`): the `MinPassphraseLength` floor is removed,
+> `ValidationResult.Blocked` is never set (kept vestigial for call/test shape;
+> `TestValidationResult_NeverBlocks` enforces it), weak/short non-blank
+> passphrases get a live warning but submit freely, and the **blank** choice now
+> surfaces an immediate explicit warning (`UnencryptedKeyWarning` — "anyone with
+> the key can access this account"). That warning matters more than any
+> weak-passphrase gate: a blank passphrase also leaves **local message history
+> readable**, since the SQLCipher DB key derives from the same Ed25519 seed.
+> Both keygen flows drop the old block / warn-and-confirm gate; the
+> confirm-passphrase match check is unchanged. The original "hard-fail on empty
+> inside `generateEd25519KeyFile`" recommendation is **deliberately not taken** —
+> the opposite direction was chosen: keep the branch, make it a coherent,
+> informed user choice. The server-side **admin** keygen stays strict
+> (hard-blocks at zxcvbn score 2 — different blast radius). Tests:
+> `internal/keygen/strength_test.go` + `livehint_test.go`,
+> `internal/tui/{addserver,wizard,phase16_strength}_test.go`.
 
 ## F11 — File-download integrity check uses a server-provided hash; room files are substitutable (MEDIUM)
 
@@ -348,6 +407,37 @@ not. **Recommendation:** validate `fileID` against the nanoid format (or
 `filepath.Base` + reject separators) before any `filepath.Join`, at both
 `filetransfer.go:417` and the upload-cache path.
 
+> **Fixed (2026-05-30; read paths closed 2026-05-31).** The path-safety
+> invariant lives in one place — `config.ValidFileID` (rejects any fileID that
+> isn't a safe single path component: empty / `.` / `..` / path separators / NUL;
+> requires `Base(fileID) == fileID`) — with client `validFileID` delegating to
+> it so both the `client` and `tui` packages share the same check.
+>
+> **Write/delete sites (2026-05-30):** the **download** cache write
+> (`DownloadFile`, plus `filepath.Base` at the write as defense-in-depth), the
+> **upload** cache write (`AttachmentPath`, skipped on an unsafe id), and — beyond
+> the original finding — `cleanupAttachmentFiles`' `os.Remove`, which was an
+> **arbitrary-file-delete** via the same root cause.
+>
+> **Read/render sites (2026-05-31):** the remaining cache-hit paths are now gated
+> too, so the same fileID can't be turned into a local path that gets stat'd,
+> read, or decoded. These are *not* `os.Stat`-only as previously noted — they feed
+> the inline-image renderer: `tui/messages.go`'s `attachmentLocalPath`
+> (→ `SelectedImagePath` → `RenderImageInline`, which **opens + decodes** the
+> file), `persist.go`'s auto-preview cache check (the size gate uses the *claimed*
+> `a.Size`, not the actual file), and `app.go`'s save-attachment cache check +
+> render-cache invalidation. Left unfixed, a traversal fileID from the (sender-
+> controlled) E2E attachment metadata was a weak **file-existence oracle** plus a
+> path to **read + decode the recipient's own local file** in their own view (no
+> exfiltration to the attacker, no write/delete) — low severity, but a real
+> path-confusion residual feeding an arbitrary local file to the image decoder.
+>
+> Legitimate fileIDs (`file_` + nanoid) are unaffected. Tests:
+> `config/paths_test.go` (`TestValidFileID`, canonical),
+> `client/filetransfer_fileid_test.go` (write paths, via delegation),
+> `tui/attachment_path_guard_test.go` (read path rejects a traversal that would
+> otherwise resolve to a real file outside `filesDir`).
+
 ---
 
 ## Verified-correct (no issue found)
@@ -377,7 +467,7 @@ not. **Recommendation:** validate `fileID` against the nanoid format (or
 - **Private key at rest:** OpenSSH format, passphrase-encrypted via
   `ssh.MarshalPrivateKeyWithPassphrase` (bcrypt-pbkdf), mode `0600` (parent dirs
   `0700`); decrypted **in memory only** — never written back to disk in plaintext.
-  (See F10 for the gated empty-pass branch.)
+  (See F10 for the user-chosen empty-pass branch — advisory-only, resolved.)
 - **DB at rest:** whole-DB SQLCipher, keyed by `DeriveDBKey` = HKDF-SHA256 of the
   Ed25519 seed (info `"sshkey-chat local db"`); `Open` refuses an empty key.
 - **DM / group-DM content confidentiality vs the server:** per-message keys are
@@ -399,33 +489,51 @@ not. **Recommendation:** validate `fileID` against the nanoid format (or
       key — safe).
 - [x] **Authenticity of deletes / reactions / un-reacts / pins** → F6 (none
       verified on receipt).
-- [x] **Private key at-rest + keygen** → clean (above) + F10 (gated empty-pass
-      branch, INFO).
+- [x] **Private key at-rest + keygen** → clean (above) + F10 (user-chosen
+      empty-pass branch, INFO — resolved 2026-05-31, strength now advisory-only).
 - [x] **Attachment / file crypto (upload + download)** → group/DM files use
       fresh per-file keys (safe); room files reuse the epoch key; download
       integrity uses a *server-provided* hash → **F11** (room-file substitution);
       `fileID` unsanitized in the cache write → **F12** (path traversal). The
       user-facing Save-As path *is* sanitized (verified-correct).
 - [x] **Randomness sweep** → clean (`crypto/rand` everywhere; no `math/rand`).
-- [x] **Downgrade / skip-verify** → the *de facto* skip-verify **is** F1/F6 (no
-      verification is performed on the normal receive paths at all); no separate
+- [x] **Downgrade / skip-verify** → the *de facto* skip-verify was F1/F6 (the
+      normal receive paths performed no verification). **F1 is now fixed** (normal
+      messages verify-or-drop); F6 (deletes/reactions/pins) remains. No separate
       negotiated-downgrade path was found.
 
 ## Recommended priority
 
-1. **F12** — sanitize `fileID` before the cache write (`filepath.Base` + nanoid
-   format check). Cheapest fix, removes an arbitrary-path-write / RCE-class
-   primitive.
-2. **F1 + F6** — wire up verify-or-drop for normal messages and
-   delete/react/pin, reusing the edit path's pattern (domain tag, length-prefixed
-   msgID, actor binding). Highest impact; closes the authenticity gap.
-3. **F7 + F11** — verify `MemberHash` on epoch-key receipt (or document rooms as
-   server-trusted for membership); commit the file content-hash in the E2E
-   payload (closes room-file substitution).
-4. **F2** — harden the `SignRoom`/`SignDM` canonical forms (do this *with* F1).
-5. **F8 / F9 / F3 / F4 / F5 / F10** — document the FS posture; counter nonces;
-   stronger safety number; stricter pin-on-change; key-length + empty-pass
-   asserts.
+1. **F12** — ✅ **Done (2026-05-30; read paths closed 2026-05-31):** the
+   path-safety check is now `config.ValidFileID` (client `validFileID` delegates),
+   gating **every** server/sender-fileID → path site. Write/delete (2026-05-30):
+   download + upload cache writes + the `cleanupAttachmentFiles` `os.Remove`
+   (removed the arbitrary-path-write / RCE-class primitive and an arbitrary-delete).
+   Read/render (2026-05-31): `attachmentLocalPath`, the auto-preview cache check,
+   and `app.go`'s save-cache + render-cache-invalidation — closing the
+   existence-oracle / read-and-decode-own-file residual. Tests:
+   `config/paths_test.go`, `filetransfer_fileid_test.go`,
+   `tui/attachment_path_guard_test.go`.
+2. **F1** — ✅ **Done (2026-05-30):** verify-or-drop on every inbound room/group/DM
+   message (`SignRoom`/`SignDM` against the sender's pinned key, mirroring the edit
+   path) — `persist.go` `storeRoomMessage` / `storeGroupMessage` / `storeDMMessage`.
+   Test: `message_verify_test.go`. **F6** (deletes / reactions / un-reacts / pins)
+   is the remaining authenticity gap: apply the same verify-or-drop + actor-binding
+   there next — a cross-repo protocol change, since those envelopes carry no
+   signature today.
+3. **F7** — ✅ **Done (2026-05-31):** signed room member attestation + verify-or-fail-closed
+   (cross-repo; rotator signs `(room,epoch,member_hash)`, members verify against the
+   generator's pinned key and compare to their own roster, with a sync-path guard). See
+   the F7 section. **F11** remains: commit the file content-hash in the E2E payload to
+   close room-file substitution (server-provided download hash gives no integrity vs a
+   malicious server).
+4. **F2** — harden the `SignRoom`/`SignDM` canonical forms. **Now live** since F1+F7
+   verify against them (was academic when nothing verified); the AEAD layer still blocks
+   the reinterpretation in practice, so still LOW–MED, but worth doing as defense-in-depth.
+5. **F8 / F9 / F3 / F4 / F5** — document the FS posture; counter nonces;
+   stronger safety number; stricter pin-on-change; key-length assert.
+   *(F10 resolved 2026-05-31 — empty-pass is now a coherent, advisory-only user
+   choice; see above.)*
 
 > **Caveat restated:** this is a careful *code-level* review, not a professional
 > audit or formal proof. It covers the **term client** only — the server

@@ -28,10 +28,9 @@ var (
 	// Phase 16 Gap 4 live strength hint palette (Phase 18 doc sync
 	// note: used by wizard.go and addserver.go for the one-line
 	// indicator under the passphrase input field):
-	//   - strengthHintBlockStyle: red — hard reject on submit
-	//   - strengthHintWarnStyle: amber — borderline, requires
-	//     press-Enter-again confirmation on submit
-	//   - strengthHintPassStyle: green dim — passes silently
+	//   - strengthHintBlockStyle: red — weak advisory, still allowed
+	//   - strengthHintWarnStyle: amber — blank/borderline advisory
+	//   - strengthHintPassStyle: green — strong advisory
 	strengthHintBlockStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#EF4444"))
 	strengthHintWarnStyle = lipgloss.NewStyle().

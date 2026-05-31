@@ -695,10 +695,9 @@ func TestWizard_KeyGenerateEscClearsPassphraseState(t *testing.T) {
 	w := NewWizard()
 	advanceToKeyGenerate(t, &w)
 
-	// Type passphrase + simulate having seen a weak-pass warning.
+	// Type passphrase state that should not survive leaving key generation.
 	w.genPassInput.SetValue("typed-then-bailed")
 	w.genConfirm.SetValue("typed-then-bailed")
-	w.weakPassConfirmed = "typed-then-bailed"
 
 	sendSpecial(&w, tea.KeyEsc)
 
@@ -711,9 +710,6 @@ func TestWizard_KeyGenerateEscClearsPassphraseState(t *testing.T) {
 	if w.genConfirm.Value() != "" {
 		t.Errorf("Esc should clear confirm, got %q", w.genConfirm.Value())
 	}
-	if w.weakPassConfirmed != "" {
-		t.Errorf("Esc should clear weakPassConfirmed, got %q", w.weakPassConfirmed)
-	}
 }
 
 func TestWizard_KeyGenerateReentryClearsPassphraseState(t *testing.T) {
@@ -723,7 +719,6 @@ func TestWizard_KeyGenerateReentryClearsPassphraseState(t *testing.T) {
 	// Leave behind some state, Esc back to KeySelect.
 	w.genPassInput.SetValue("from-first-visit")
 	w.genConfirm.SetValue("from-first-visit")
-	w.weakPassConfirmed = "from-first-visit"
 	sendSpecial(&w, tea.KeyEsc)
 	if w.step != WizardKeySelect {
 		t.Fatal("precondition: should be at KeySelect after Esc")
@@ -744,28 +739,20 @@ func TestWizard_KeyGenerateReentryClearsPassphraseState(t *testing.T) {
 	if w.genConfirm.Value() != "" {
 		t.Errorf("re-entry: confirm should be cleared, got %q", w.genConfirm.Value())
 	}
-	if w.weakPassConfirmed != "" {
-		t.Errorf("re-entry: weakPassConfirmed should be cleared, got %q", w.weakPassConfirmed)
-	}
 }
 
 func TestWizard_KeyGenerateSuccessClearsPassphraseState(t *testing.T) {
 	w := NewWizard()
 	advanceToKeyGenerate(t, &w)
 
-	// Path to a temp file, no passphrase (lets keygen pass without
-	// triggering the zxcvbn block tier — the wizard allows empty
-	// passphrases for unencrypted keys). We still set values to
-	// confirm clearing happens regardless.
+	// Path to a temp file, no passphrase (allowed; creates an
+	// unencrypted key). We still set values to confirm clearing happens
+	// regardless.
 	tmpDir := t.TempDir()
 	keyPath := filepath.Join(tmpDir, "wiz_clear_state")
 	w.genPathInput.SetValue(keyPath)
 	w.genPassInput.SetValue("")
 	w.genConfirm.SetValue("")
-	// Pretend a weakPassConfirmed mark was set during a prior submit
-	// of a different (warned-tier) value — should be reset on success.
-	w.weakPassConfirmed = "old-warned-value"
-
 	sendSpecial(&w, tea.KeyEnter)
 
 	if w.step != WizardBackup {
@@ -776,8 +763,5 @@ func TestWizard_KeyGenerateSuccessClearsPassphraseState(t *testing.T) {
 	}
 	if w.genConfirm.Value() != "" {
 		t.Errorf("success: confirm should be cleared, got %q", w.genConfirm.Value())
-	}
-	if w.weakPassConfirmed != "" {
-		t.Errorf("success: weakPassConfirmed should be cleared, got %q", w.weakPassConfirmed)
 	}
 }

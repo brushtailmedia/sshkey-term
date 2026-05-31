@@ -68,11 +68,11 @@ func TestPathDrift_NoUnmanagedJoins(t *testing.T) {
 		// fallback. Save-destination concern, not managed-path.
 		"internal/tui/saveattachment.go": {320: "defaultSaveDir home resolution"},
 		// Wizard's Documents/sshkey-backup default. Save destination.
-		"internal/tui/wizard.go": {132: "Documents/sshkey-backup export default"},
+		"internal/tui/wizard.go": {124: "Documents/sshkey-backup export default"},
 		// keyselector's ~/.ssh/ scanner input — external read source.
 		"internal/tui/keyselector.go": {64: "external ~/.ssh/ scanner input"},
 		// Reverse-tilde display normalization (single-site UI helper).
-		"internal/tui/addserver.go": {916: "reverse-tilde display normalization"},
+		"internal/tui/addserver.go": {878: "reverse-tilde display normalization"},
 	}
 
 	root := repoRootForTest(t)

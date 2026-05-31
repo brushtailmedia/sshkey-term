@@ -22,11 +22,11 @@ func newNavModeAppHarness(t *testing.T) App {
 	a.memberPanel = NewMemberPanel()
 	a.search = NewSearch()
 	a.settings = NewSettings()
-	a.addServer = NewAddServer(nil)
 	a.statusBar = NewStatusBar()
 	a.navModePopupDelay = 2 * time.Second
 	a.navPopupEnabled = true
 	a.configDir = t.TempDir()
+	a.addServer = NewAddServerWithConfigDir(a.configDir, nil)
 	a.appConfig = &config.Config{
 		Device: config.DeviceConfig{ID: "dev_nav_mode"},
 		Servers: []config.ServerConfig{

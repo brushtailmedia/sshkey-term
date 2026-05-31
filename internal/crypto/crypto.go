@@ -369,6 +369,46 @@ func MemberHash(members []string) string {
 	return fmt.Sprintf("SHA256:%x", h.Sum(nil))
 }
 
+// SignEpochRoster signs a room epoch's member attestation (F7). The rotating
+// client signs the MemberHash it computed over the set it wrapped the epoch key
+// for, binding it to (room, epoch). Verifiers check it against the generator's
+// pinned key, then compare MemberHash to their own roster — so a relay cannot
+// rewrite the hash to match a victim's roster (an unsigned hash is forgeable).
+//
+// Canonical form (domain-separated + length-prefixed, per the F2 lesson; the
+// "v1" tag is the version hook for a future device-set hash under Tier 2):
+//
+//	Sign("epoch_roster:v1" || uint32_be(len(room)) || room || uint64_be(epoch) || uint32_be(len(memberHash)) || memberHash)
+func SignEpochRoster(privKey ed25519.PrivateKey, room string, epoch int64, memberHash string) []byte {
+	return ed25519.Sign(privKey, buildEpochRosterCanonical(room, epoch, memberHash))
+}
+
+// VerifyEpochRoster verifies a SignEpochRoster signature. Returns false on any
+// mismatch (wrong room/epoch/hash, or a signature from a different domain).
+func VerifyEpochRoster(pubKey ed25519.PublicKey, room string, epoch int64, memberHash string, sig []byte) bool {
+	return ed25519.Verify(pubKey, buildEpochRosterCanonical(room, epoch, memberHash), sig)
+}
+
+// buildEpochRosterCanonical constructs the SignEpochRoster / VerifyEpochRoster
+// input bytes. Shared so Sign and Verify cannot drift.
+func buildEpochRosterCanonical(room string, epoch int64, memberHash string) []byte {
+	const tag = "epoch_roster:v1"
+	out := make([]byte, 0, len(tag)+4+len(room)+8+4+len(memberHash))
+	out = append(out, tag...)
+	var roomLen [4]byte
+	binary.BigEndian.PutUint32(roomLen[:], uint32(len(room)))
+	out = append(out, roomLen[:]...)
+	out = append(out, []byte(room)...)
+	var epochBytes [8]byte
+	binary.BigEndian.PutUint64(epochBytes[:], uint64(epoch))
+	out = append(out, epochBytes[:]...)
+	var mhLen [4]byte
+	binary.BigEndian.PutUint32(mhLen[:], uint32(len(memberHash)))
+	out = append(out, mhLen[:]...)
+	out = append(out, []byte(memberHash)...)
+	return out
+}
+
 // ParseSSHPubKey extracts an ed25519.PublicKey from an SSH authorized_key format string.
 func ParseSSHPubKey(authorizedKey string) (ed25519.PublicKey, error) {
 	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authorizedKey))

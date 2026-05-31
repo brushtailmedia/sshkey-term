@@ -61,18 +61,10 @@ type WizardModel struct {
 	genConfirm   textinput.Model
 	genFocused   int // 0=path, 1=pass, 2=confirm
 
-	// Phase 16 Gap 4: zxcvbn warn-and-confirm state. When the user
-	// submits a borderline passphrase (warn tier), we display the
-	// warning and remember the passphrase. If they submit again with
-	// the same passphrase unchanged, we treat it as confirmation and
-	// proceed. If they edit the passphrase first, the warning resets.
-	weakPassConfirmed string
-
 	// Live strength hint — recomputed on every keystroke in the keygen
 	// step. Shown as a compact one-line indicator under the passphrase
-	// field once the passphrase meets MinPassphraseLength. Hidden
-	// below the floor to kill "weak, weak, weak" rolling noise while
-	// the user is still typing.
+	// field. Empty passphrases show the unencrypted-key warning immediately;
+	// non-empty passphrases run zxcvbn from the first character.
 	strengthHint keygen.LiveHint
 
 	// Import
@@ -284,8 +276,8 @@ func (w WizardModel) updateKeySelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			// Generate new key. Clear any state the user might have
 			// left from a previous visit to this step (typed
-			// passphrase, weak-pass warning mark, stale strength hint)
-			// so re-entry is a fresh slate.
+			// passphrase, stale strength hint) so re-entry is a
+			// fresh slate.
 			w.resetKeyGenState()
 			w.step = WizardKeyGenerate
 			w.genPathInput.Focus()
@@ -355,8 +347,8 @@ func (w WizardModel) updateKeyGenerate(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return w.doGenerateKey()
 	case "esc":
 		// Bail back to KeySelect — user changed their mind. Don't
-		// leave a typed passphrase, warned-mark, or stale strength
-		// hint behind; the next visit (whether back here or to a
+		// leave a typed passphrase or stale strength hint behind;
+		// the next visit (whether back here or to a
 		// different keysource) shouldn't see prior in-progress work.
 		w.resetKeyGenState()
 		w.step = WizardKeySelect
@@ -397,36 +389,11 @@ func (w WizardModel) doGenerateKey() (tea.Model, tea.Cmd) {
 		return w, nil
 	}
 
-	// Phase 16 Gap 4: zxcvbn passphrase strength check. Skipped when
-	// the passphrase is empty (the wizard allows generating an
-	// unencrypted key, marked "Passphrase (recommended)" in the UI).
-	// For non-empty passphrases:
-	//   - block tier: hard error, user must change passphrase
-	//   - warn tier: show warning, set weakPassConfirmed; if the user
-	//     submits AGAIN with the same passphrase unchanged, proceed
-	//   - silent pass: proceed immediately
-	if pass != "" {
-		result := keygen.ValidateUserPassphraseWithContext(pass, []string{w.chosenName})
-		switch {
-		case result.Blocked:
-			w.err = result.Message
-			w.weakPassConfirmed = ""
-			return w, nil
-		case result.Warning != "":
-			if w.weakPassConfirmed != pass {
-				// First submit with this borderline passphrase —
-				// stash it and show the warning. Next submit with
-				// the same value will be treated as confirmation.
-				w.weakPassConfirmed = pass
-				w.err = result.Warning + " Press Enter again to use it anyway, or edit to try a stronger one."
-				return w, nil
-			}
-			// User has already seen the warning and submitted again
-			// with the same passphrase — fall through to keygen.
-		}
-	}
-	// Reset any stashed warning state once we're committed to proceeding.
-	w.weakPassConfirmed = ""
+	// Passphrase strength is advisory-only. Blank passphrases are a
+	// deliberate user choice (unencrypted key), so non-blank weak
+	// passphrases must not be harder to use than blank ones. The live
+	// hint above carries the warning; submit only enforces mechanical
+	// validity such as path presence and matching confirmation.
 
 	// Expand ~ for storing in result (generateEd25519KeyFile does its own expansion)
 	expandedPath := config.ExpandUserPath(path)
@@ -442,9 +409,9 @@ func (w WizardModel) doGenerateKey() (tea.Model, tea.Cmd) {
 	w.err = ""
 	w.step = WizardBackup
 	// Passphrase is consumed by generateEd25519KeyFile above and has
-	// no further use — wipe it (along with the warned-mark and live
-	// hint) so it doesn't sit in cleartext memory through the
-	// remaining wizard steps. Most important of the three call sites:
+	// no further use — wipe it (along with the live hint) so it doesn't
+	// sit in cleartext memory through the remaining wizard steps. Most
+	// important of the three call sites:
 	// the wizard's lifetime past this point is whatever it takes the
 	// user to read Backup → Export → Share → Server, which can be
 	// minutes. Treating the passphrase as ephemeral matches what an
@@ -747,8 +714,8 @@ func (w *WizardModel) setGenFocus(idx int) {
 }
 
 // resetKeyGenState zeros transient state owned by the keygen step:
-// the two passphrase fields, the weakPassConfirmed warned-mark, and
-// the live strength hint. Called on every transition into / out of /
+// the two passphrase fields and the live strength hint. Called on every
+// transition into / out of /
 // past WizardKeyGenerate so that:
 //
 //   - Entering the step (from KeySelect "Generate new key") is a
@@ -767,8 +734,7 @@ func (w *WizardModel) setGenFocus(idx int) {
 func (w *WizardModel) resetKeyGenState() {
 	w.genPassInput.SetValue("")
 	w.genConfirm.SetValue("")
-	w.weakPassConfirmed = ""
-	w.strengthHint = keygen.LiveHint{}
+	w.strengthHint = keygen.LivePassphraseHint("", []string{w.chosenName})
 }
 
 // copyKeyToManagedStoreAndRewriteName copies an existing private/public key
@@ -1026,24 +992,28 @@ func (w WizardModel) viewKeyImport() string {
 }
 
 func (w WizardModel) viewKeyGenerate() string {
+	inputWidth := keygenInputWidth(w.width)
+	genPathInput := w.genPathInput
+	genPassInput := w.genPassInput
+	genConfirm := w.genConfirm
+	setKeygenInputWidths(inputWidth, &genPathInput, &genPassInput, &genConfirm)
+
 	var b strings.Builder
 	b.WriteString(searchHeaderStyle.Render(" Generate Key"))
 	b.WriteString("\n\n")
 	b.WriteString("  Save to:\n")
-	b.WriteString("  " + w.genPathInput.View() + "\n\n")
+	b.WriteString("  " + genPathInput.View() + "\n\n")
 	b.WriteString("  Passphrase (recommended):\n")
-	b.WriteString("  " + w.genPassInput.View() + "\n")
+	b.WriteString("  " + genPassInput.View() + "\n")
 	// Phase 16 Gap 4: live strength indicator, one line under the
-	// passphrase field. Hidden until the passphrase reaches
-	// MinPassphraseLength (12 chars) so early keystrokes don't show
-	// a rolling "too short" annotation. renderStrengthHint returns
-	// empty for HintHidden, so the caller doesn't need to branch.
+	// passphrase field. Empty shows the unencrypted-key advisory
+	// immediately; typing any character switches to zxcvbn feedback.
 	if hint := renderStrengthHint(w.strengthHint); hint != "" {
 		b.WriteString("  " + hint + "\n")
 	}
 	b.WriteString("\n")
 	b.WriteString("  Confirm passphrase:\n")
-	b.WriteString("  " + w.genConfirm.View() + "\n\n")
+	b.WriteString("  " + genConfirm.View() + "\n\n")
 	b.WriteString(helpDescStyle.Render("  ⚠ A passphrase protects your key if your\n  device is stolen. Strongly recommended."))
 	b.WriteString("\n\n")
 	b.WriteString(helpDescStyle.Render("  Tab=next field  Enter=generate  Esc=back"))

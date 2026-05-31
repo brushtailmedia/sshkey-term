@@ -108,14 +108,29 @@ type Client struct {
 	// server and the client refetches on reconnect. The LOCAL user's
 	// admin flag IS persisted (groups.is_admin column) for pre-check
 	// survival across restart.
-	groupAdmins    map[string]map[string]bool  // group DM ID -> set of admin userIDs
-	dms            map[string][2]string        // 1:1 DM ID -> [userA, userB]
-	retired        map[string]string           // retired userID -> retired_at timestamp
-	epochKeys      map[string]map[int64][]byte // room -> epoch -> unwrapped key
-	currentEpoch   map[string]int64            // room -> current epoch number
-	seqCounters    map[string]int64            // "room:x" or "group:x" or "dm:x" -> next seq
-	hasPendingKeys bool                        // true when admin_notify arrived (cleared on list refresh)
-	pendingKeys    []protocol.PendingKeyEntry  // populated by pending_keys_list
+	groupAdmins  map[string]map[string]bool  // group DM ID -> set of admin userIDs
+	dms          map[string][2]string        // 1:1 DM ID -> [userA, userB]
+	retired      map[string]string           // retired userID -> retired_at timestamp
+	epochKeys    map[string]map[int64][]byte // room -> epoch -> unwrapped key
+	currentEpoch map[string]int64            // room -> current epoch number
+	// pendingEpochAtt (F7) stashes a signature-verified epoch_key whose member
+	// hash didn't match the local roster (or whose roster wasn't loaded yet),
+	// while we request a fresh room_members_list. Drained — single-shot — when
+	// that list arrives (drainPendingEpochAttestation): match → adopt, else
+	// fail-closed. room ID -> stashed key. Protected by c.mu.
+	pendingEpochAtt map[string]protocol.EpochKey
+	// rotatedEpoch (F7) records the epoch THIS client generated in
+	// handleEpochTrigger and is awaiting epoch_confirmed for. Only the rotator
+	// may advance currentEpoch via epoch_confirmed (it trusts its own
+	// generated set); every other member advances ONLY via a verified
+	// epoch_key. Without this gate, a malicious server could deliver the
+	// current epoch's key via the (skip-verified) sync path and then send
+	// epoch_confirmed to a non-rotator to advance currentEpoch onto an
+	// unverified key — bypassing F7. room ID -> the epoch we rotated to.
+	rotatedEpoch   map[string]int64
+	seqCounters    map[string]int64           // "room:x" or "group:x" or "dm:x" -> next seq
+	hasPendingKeys bool                       // true when admin_notify arrived (cleared on list refresh)
+	pendingKeys    []protocol.PendingKeyEntry // populated by pending_keys_list
 	// roomMemberCache (V8) holds full room membership keyed by room ID.
 	// Written by room_list (snapshot), room_members_list (r-refresh
 	// snapshot), startup hydration, and room_event{join|leave} (in-memory
@@ -154,6 +169,8 @@ func New(cfg Config) *Client {
 		retired:         make(map[string]string),
 		epochKeys:       make(map[string]map[int64][]byte),
 		currentEpoch:    make(map[string]int64),
+		pendingEpochAtt: make(map[string]protocol.EpochKey),
+		rotatedEpoch:    make(map[string]int64),
 		seqCounters:     make(map[string]int64),
 		roomMemberCache: make(map[string][]string),
 		sendQueue:       NewQueue(),
@@ -363,6 +380,15 @@ func (c *Client) Connect() error {
 	// Exits when c.done closes.
 	go c.runSendQueueDriver()
 
+	// Shadow-device transparency (Tier 1): reconcile the authoritative device
+	// list against our remembered set so a device added while we were offline
+	// surfaces on this connect (the live device_added push covers the online
+	// case). Best-effort, gated on local storage for the remembered set; the
+	// device_list response is handled by reconcileDeviceList.
+	if c.store != nil {
+		_ = c.SendListDevices()
+	}
+
 	return nil
 }
 
@@ -519,13 +545,13 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 	case "epoch_key":
 		var ek protocol.EpochKey
 		if err := json.Unmarshal(raw, &ek); err == nil {
-			c.storeEpochKey(ek.Room, ek.Epoch, ek.WrappedKey)
-			// Phase 17c Step 5 Gap 4: Category B state-fix apply.
-			// A fresh epoch_key after an invalid_epoch rejection is
-			// the state-fix the server promised — re-send any
-			// queued entries that failed with invalid_epoch for
-			// this room.
-			c.TriggerEpochRetry(ek.Room)
+			// F7: verify the rotator's member attestation before adopting this
+			// (current-epoch) key — confirm it was wrapped for exactly the
+			// roster we can see (no shadow reader). On success this adopts the
+			// key (advancing currentEpoch) and re-sends any queued entries that
+			// stalled on invalid_epoch (Phase 17c Step 5 Gap 4 state-fix apply);
+			// on failure it fail-closes (key not adopted) + warns.
+			c.verifyAndAdoptEpochKey(ek)
 		}
 	case "epoch_trigger":
 		c.handleEpochTrigger(raw)
@@ -1264,6 +1290,10 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 							"room", rml.Room, "error", err)
 					}
 				}
+				// F7: the roster just refreshed — terminally re-verify any
+				// epoch key we stashed awaiting it (adopt on match, else
+				// fail-closed). No-op when nothing is stashed.
+				c.drainPendingEpochAttestation(rml.Room)
 			}
 		}
 	case "reaction":
@@ -1327,6 +1357,12 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		// this event via OnMessage and should call Close() to stop the
 		// reconnect loop (otherwise the client will keep trying to auth
 		// with the revoked device_id). See tui/app.go device_revoked handler.
+		//
+		// device_added (Tier 1 new-device push) and device_list reconcile are
+		// likewise surfaced by the UI layer via OnMessage, calling the
+		// client's NoteAddedDevice / ReconcileDevices helpers (devices.go) for
+		// the known-set diff. Kept out of handleInternal so detection and
+		// display stay in one place and don't race the known-set.
 	}
 }
 
@@ -1338,17 +1374,39 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 // DB write are skipped entirely — avoids redundant ECDH+HKDF work when
 // the server re-sends a key the client already has (common on reconnect).
 func (c *Client) storeEpochKey(room string, epoch int64, wrappedKey string) {
+	c.storeEpochKeyInner(room, epoch, wrappedKey, true)
+}
+
+// storeEpochKeyHistorical stores an epoch key for OLD-message decryption only,
+// WITHOUT advancing currentEpoch. F7 sync-path guard: keys delivered via
+// sync_batch / history_result are historical and skip-verified, so they must
+// never establish/advance the current epoch — only a verified epoch_key (the
+// live/connect path) does. Without this, a malicious server could deliver the
+// current epoch's key (wrapped for a shadow reader) via sync to dodge the F7
+// attestation check (see docs/planning/open/f7-room-member-attestation.md §6.5).
+func (c *Client) storeEpochKeyHistorical(room string, epoch int64, wrappedKey string) {
+	c.storeEpochKeyInner(room, epoch, wrappedKey, false)
+}
+
+// storeEpochKeyInner unwraps and stores an epoch key in memory AND persists it
+// to the local encrypted DB so it survives across app restarts. advanceCurrent
+// gates whether this key may move currentEpoch forward (true for verified
+// epoch_key adoption; false for historical sync/history keys — see the F7
+// sync-path guard above).
+func (c *Client) storeEpochKeyInner(room string, epoch int64, wrappedKey string, advanceCurrent bool) {
 	// Skip if already in memory (server re-sent a key we already have)
 	c.mu.RLock()
 	existing := c.epochKeys[room][epoch]
 	c.mu.RUnlock()
 	if existing != nil {
 		// Still update currentEpoch in case this is a newer epoch number
-		c.mu.Lock()
-		if epoch > c.currentEpoch[room] {
-			c.currentEpoch[room] = epoch
+		if advanceCurrent {
+			c.mu.Lock()
+			if epoch > c.currentEpoch[room] {
+				c.currentEpoch[room] = epoch
+			}
+			c.mu.Unlock()
 		}
-		c.mu.Unlock()
 		return
 	}
 
@@ -1363,7 +1421,7 @@ func (c *Client) storeEpochKey(room string, epoch int64, wrappedKey string) {
 		c.epochKeys[room] = make(map[int64][]byte)
 	}
 	c.epochKeys[room][epoch] = key
-	if epoch > c.currentEpoch[room] {
+	if advanceCurrent && epoch > c.currentEpoch[room] {
 		c.currentEpoch[room] = epoch
 	}
 	store := c.store
@@ -1846,6 +1904,12 @@ func (c *Client) cleanupAttachmentFiles(fileIDs []string) {
 		return
 	}
 	for _, fid := range fileIDs {
+		// F12: fid is a server-relayed attachment id; skip os.Remove for any
+		// unsafe value so a malicious server can't make cleanup delete an
+		// arbitrary file via path traversal.
+		if !validFileID(fid) {
+			continue
+		}
 		if err := os.Remove(config.AttachmentPath(c.cfg.DataDir, fid)); err != nil && !os.IsNotExist(err) {
 			if c.logger != nil {
 				c.logger.Warn("attachment cleanup", "fileID", fid, "error", err)

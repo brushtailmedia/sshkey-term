@@ -111,14 +111,16 @@ func TestDeviceMgr_RefreshEmitsMsg(t *testing.T) {
 	}
 }
 
-func TestDeviceMgr_EnterOnCurrentDevice(t *testing.T) {
+// Revoke is bound to `x`, not Enter (Enter is too easy to fat-finger in a list
+// and revoke is destructive). TestDeviceMgr_EnterDoesNotRevoke locks that in.
+func TestDeviceMgr_RevokeOnCurrentDeviceBlocked(t *testing.T) {
 	d := NewDeviceMgr()
 	d.Show()
 	d.SetDevices(sampleDevices())
 	// cursor is 0 = current device (dev_laptop)
-	d, cmd := d.Update(keyMsg("enter"))
+	d, cmd := d.Update(keyMsg("x"))
 	if cmd != nil {
-		t.Error("enter on current device should not emit")
+		t.Error("revoke (x) on current device should not emit")
 	}
 	if d.confirm {
 		t.Error("should not enter confirm mode for current device")
@@ -128,31 +130,46 @@ func TestDeviceMgr_EnterOnCurrentDevice(t *testing.T) {
 	}
 }
 
-func TestDeviceMgr_EnterOnRevokedDevice(t *testing.T) {
+func TestDeviceMgr_RevokeOnRevokedDeviceBlocked(t *testing.T) {
 	d := NewDeviceMgr()
 	d.Show()
 	d.SetDevices(sampleDevices())
 	d.cursor = 2 // dev_old (revoked)
-	d, cmd := d.Update(keyMsg("enter"))
+	d, cmd := d.Update(keyMsg("x"))
 	if cmd != nil {
-		t.Error("enter on revoked device should not emit")
+		t.Error("revoke (x) on revoked device should not emit")
 	}
 	if d.confirm {
 		t.Error("should not enter confirm mode for already-revoked device")
 	}
 }
 
-func TestDeviceMgr_EnterOnValidDeviceShowsConfirm(t *testing.T) {
+func TestDeviceMgr_RevokeOnValidDeviceShowsConfirm(t *testing.T) {
 	d := NewDeviceMgr()
 	d.Show()
 	d.SetDevices(sampleDevices())
 	d.cursor = 1 // dev_phone
-	d, cmd := d.Update(keyMsg("enter"))
+	d, cmd := d.Update(keyMsg("x"))
 	if cmd != nil {
-		t.Error("enter should not emit yet (confirm required)")
+		t.Error("revoke (x) should not emit yet (confirm required)")
 	}
 	if !d.confirm {
 		t.Error("should enter confirm mode")
+	}
+}
+
+// Enter must NOT initiate revoke (accidental-keypress safety).
+func TestDeviceMgr_EnterDoesNotRevoke(t *testing.T) {
+	d := NewDeviceMgr()
+	d.Show()
+	d.SetDevices(sampleDevices())
+	d.cursor = 1 // dev_phone (a revocable device)
+	d, cmd := d.Update(keyMsg("enter"))
+	if cmd != nil {
+		t.Error("enter must not emit a revoke")
+	}
+	if d.confirm {
+		t.Error("enter must not enter confirm mode — revoke is bound to `x`")
 	}
 }
 
@@ -161,7 +178,7 @@ func TestDeviceMgr_ConfirmYEmitsRevoke(t *testing.T) {
 	d.Show()
 	d.SetDevices(sampleDevices())
 	d.cursor = 1 // dev_phone
-	d, _ = d.Update(keyMsg("enter"))
+	d, _ = d.Update(keyMsg("x"))
 	if !d.confirm {
 		t.Fatal("precondition: should be confirming")
 	}
@@ -186,7 +203,7 @@ func TestDeviceMgr_ConfirmNCancels(t *testing.T) {
 	d.Show()
 	d.SetDevices(sampleDevices())
 	d.cursor = 1
-	d, _ = d.Update(keyMsg("enter"))
+	d, _ = d.Update(keyMsg("x"))
 	if !d.confirm {
 		t.Fatal("should be confirming")
 	}
@@ -256,7 +273,7 @@ func TestDeviceMgr_ConfirmationShowsTargetInView(t *testing.T) {
 	d.Show()
 	d.SetDevices(sampleDevices())
 	d.cursor = 1
-	d, _ = d.Update(keyMsg("enter"))
+	d, _ = d.Update(keyMsg("x"))
 
 	view := d.View(80)
 	if !strings.Contains(view, "Revoke dev_phone") {

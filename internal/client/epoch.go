@@ -46,12 +46,18 @@ func (c *Client) handleEpochTrigger(raw json.RawMessage) {
 		wrappedKeys[member.User] = wrapped
 	}
 
-	// Compute member hash
+	// Compute member hash + F7 attestation: sign (room, epoch, member_hash)
+	// with our identity key so verifying members can confirm — against our
+	// pinned key — that we wrapped the epoch key for exactly this member set,
+	// and the relaying server cannot rewrite the hash to match a victim's
+	// roster (an unsigned hash is forgeable). The sig travels base64-encoded.
 	var memberNames []string
 	for _, m := range trigger.Members {
 		memberNames = append(memberNames, m.User)
 	}
 	memberHash := crypto.MemberHash(memberNames)
+	memberSig := base64.StdEncoding.EncodeToString(
+		crypto.SignEpochRoster(c.privKey, trigger.Room, trigger.NewEpoch, memberHash))
 
 	// Send epoch_rotate
 	err = c.enc.Encode(protocol.EpochRotate{
@@ -60,6 +66,7 @@ func (c *Client) handleEpochTrigger(raw json.RawMessage) {
 		Epoch:       trigger.NewEpoch,
 		WrappedKeys: wrappedKeys,
 		MemberHash:  memberHash,
+		MemberSig:   memberSig,
 	})
 	if err != nil {
 		c.logger.Error("send epoch_rotate", "error", err)
@@ -73,6 +80,11 @@ func (c *Client) handleEpochTrigger(raw json.RawMessage) {
 		c.epochKeys[trigger.Room] = make(map[int64][]byte)
 	}
 	c.epochKeys[trigger.Room][trigger.NewEpoch] = epochKey
+	// F7: mark that WE generated this epoch, so handleEpochConfirmed may
+	// advance currentEpoch onto it (we trust our own set). Non-rotators never
+	// set this, so a stray/forged epoch_confirmed can't advance them onto an
+	// unverified key.
+	c.rotatedEpoch[trigger.Room] = trigger.NewEpoch
 	store := c.store
 	c.mu.Unlock()
 
@@ -100,9 +112,32 @@ func (c *Client) handleEpochConfirmed(raw json.RawMessage) {
 		return
 	}
 
+	// F7: epoch_confirmed may advance currentEpoch ONLY for the rotator — the
+	// client that generated this epoch (and so trusts its own member set).
+	// Every other member advances currentEpoch solely via a *verified*
+	// epoch_key (verifyAndAdoptEpochKey). Honoring epoch_confirmed
+	// unconditionally would let a malicious server deliver the current epoch's
+	// key via the skip-verified sync path and then advance a victim onto it
+	// with epoch_confirmed, bypassing the member-attestation check.
 	c.mu.Lock()
-	c.currentEpoch[confirmed.Room] = confirmed.Epoch
+	weRotated := c.rotatedEpoch[confirmed.Room] == confirmed.Epoch && confirmed.Epoch != 0
+	if weRotated {
+		delete(c.rotatedEpoch, confirmed.Room) // consume — one confirmation per rotation
+		if confirmed.Epoch > c.currentEpoch[confirmed.Room] {
+			c.currentEpoch[confirmed.Room] = confirmed.Epoch
+		}
+	}
 	c.mu.Unlock()
+
+	if !weRotated {
+		// Not our rotation — ignore. A non-rotator never needs epoch_confirmed
+		// (the server sends it only to the rotator); it advances via the
+		// verified epoch_key. Seeing one here is a server bug or a tampering
+		// attempt.
+		c.logger.Warn("ignoring epoch_confirmed we did not rotate (non-rotator advances only via verified epoch_key)",
+			"room", confirmed.Room, "epoch", confirmed.Epoch)
+		return
+	}
 
 	c.logger.Info("epoch confirmed",
 		"room", confirmed.Room,
@@ -142,7 +177,7 @@ func (c *Client) handleSyncBatchKeys(raw json.RawMessage) {
 	}
 
 	for _, ek := range batch.EpochKeys {
-		c.storeEpochKey(ek.Room, ek.Epoch, ek.WrappedKey)
+		c.storeEpochKeyHistorical(ek.Room, ek.Epoch, ek.WrappedKey)
 	}
 
 	// Persist each inner message. Persist FIRST so a reaction in the
@@ -186,7 +221,7 @@ func (c *Client) handleHistoryKeys(raw json.RawMessage) {
 	}
 
 	for _, ek := range result.EpochKeys {
-		c.storeEpochKey(ek.Room, ek.Epoch, ek.WrappedKey)
+		c.storeEpochKeyHistorical(ek.Room, ek.Epoch, ek.WrappedKey)
 	}
 
 	// Persist inner messages first so the orphan check in

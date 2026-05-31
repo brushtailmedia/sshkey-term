@@ -239,6 +239,26 @@ func AttachmentPath(dataDir, fileID string) string {
 	return filepath.Join(FilesDir(dataDir), fileID)
 }
 
+// ValidFileID reports whether fileID is safe to use as a single path
+// component under FilesDir — i.e. turning it into a local path cannot escape
+// the attachment cache via traversal. fileID is server/sender-supplied (it
+// arrives in the E2E attachment metadata), so EVERY site that turns it into a
+// local path must gate on this before touching the filesystem — not just the
+// write/delete paths but the read/stat/render paths too (audit F12): a
+// traversal-shaped id like "../../etc/passwd" must never be treated as a
+// cached local file, or the recipient's own files could be stat'd and decoded
+// as images in their own view. Rejects empty / "." / ".." / path separators
+// (/ and \) / NUL, and requires the id to equal its own filepath.Base.
+func ValidFileID(fileID string) bool {
+	if fileID == "" || fileID == "." || fileID == ".." {
+		return false
+	}
+	if strings.ContainsAny(fileID, "\x00/\\") {
+		return false
+	}
+	return filepath.Base(fileID) == fileID
+}
+
 // MessagesDBPath returns `<dataDir>/messages.db`, the per-server
 // SQLite database that holds local message history, attachments
 // metadata, epoch keys, and identity state. Single-site drift
