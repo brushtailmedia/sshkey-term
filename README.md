@@ -10,7 +10,8 @@ Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat)
 
 - End-to-end encrypted rooms, 1:1 DMs, and group DMs (AES-256-GCM, X25519 key wrapping)
 - SSH key is your permanent identity -- no accounts, no passwords, no key rotation
-- Rooms with epoch-based key rotation, DMs with per-message keys (Signal-level forward secrecy)
+- Rooms use epoch-based key rotation; DMs and group DMs use per-message wrapped keys
+- Security posture: The app provides E2EE against the server and encrypts local history at rest, but it does not provide cryptographic forward secrecy or post-compromise recovery. Protecting the private key and local device remains critical.
 - **In-group admin model for group DMs** (Phase 14) — creators become the first admin; admins can add, remove, promote, demote, and rename via `/add`, `/kick`, `/promote`, `/demote`, `/transfer` with confirmation dialogs, `/audit` for recent admin actions, and `/undo` for 30-second kick revert
 - `/leave` and `/delete` for rooms, 1:1 DMs, and group DMs with multi-device sync
 - Retired-room read-only state (admin-archived rooms show a distinct banner)

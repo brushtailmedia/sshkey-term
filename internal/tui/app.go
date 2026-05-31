@@ -1705,6 +1705,8 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Emoji picker intercepts keys when visible
 		if a.emojiPicker.IsVisible() {
 			var cmd tea.Cmd
+			layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+			a.emojiPicker.SetViewport(layout.MessagesWidth, layout.InputY0-layout.MessagesY0)
 			a.emojiPicker, cmd = a.emojiPicker.Update(msg)
 			if !a.emojiPicker.IsVisible() {
 				a.focus = FocusInput
@@ -2091,13 +2093,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case UnpinRequestMsg:
-		if a.client != nil && a.messages.room != "" {
-			a.client.Enc().Encode(protocol.Unpin{
-				Type: "unpin",
-				Room: a.messages.room,
-				ID:   msg.MessageID,
-			})
-		}
+		a.sendUnpin(msg.MessageID)
 		return a, nil
 
 	case PinnedJumpMsg:
@@ -2915,15 +2911,6 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
-	case KeyWarningAcceptMsg:
-		// Key was accepted — re-pin happened during StoreProfile.
-		// Phase 21 F3.c closure 2026-04-19 — nudge toward verification
-		// so users who want the trust work done have a clear next step.
-		displayName := a.resolveDisplayName(msg.User)
-		a.statusBar.SetError("New key accepted for " + displayName +
-			". Run /verify " + displayName + " to compare safety numbers out-of-band.")
-		return a, nil
-
 	case KeyWarningDisconnectMsg:
 		if a.client != nil {
 			a.abandonActiveHistoryRequest()
@@ -2964,6 +2951,10 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case EmojiSelectedMsg:
 		if a.client != nil {
+			if msg.Remove {
+				a.sendUnreactForMessage(msg.Target, msg.Emoji)
+				return a, nil
+			}
 			// Skip if the current user already has a reaction with this
 			// emoji on the target message (client-enforced de-dup; see
 			// PROTOCOL.md Reactions section — "Picking the same emoji
@@ -3142,12 +3133,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					for _, a := range m.Attachments {
 						key, _ := base64.StdEncoding.DecodeString(a.DecryptKey)
 						attachments = append(attachments, DisplayAttachment{
-							FileID:     a.FileID,
-							Name:       a.Name,
-							Size:       a.Size,
-							Mime:       a.Mime,
-							IsImage:    isImageMime(a.Mime),
-							DecryptKey: key,
+							FileID:      a.FileID,
+							Name:        a.Name,
+							Size:        a.Size,
+							Mime:        a.Mime,
+							IsImage:     isImageMime(a.Mime),
+							DecryptKey:  key,
+							ContentHash: a.ContentHash, // F11: verified on download
 						})
 					}
 					display = append(display, DisplayMessage{
@@ -3225,20 +3217,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "pin":
 			if a.client != nil && a.messages.room != "" {
-				// Toggle: if already pinned, unpin
-				isPinned := false
-				for _, pin := range a.pinnedBar.pins {
-					if pin.ID == msg.Msg.ID {
-						isPinned = true
-						break
-					}
-				}
-				if isPinned {
-					a.client.Enc().Encode(protocol.Unpin{
-						Type: "unpin",
-						Room: a.messages.room,
-						ID:   msg.Msg.ID,
-					})
+				if a.isMessagePinned(msg.Msg.ID) {
+					a.statusBar.SetError("Message is already pinned")
+					return a, nil
 				} else {
 					a.client.Enc().Encode(protocol.Pin{
 						Type: "pin",
@@ -3246,6 +3227,14 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 						ID:   msg.Msg.ID,
 					})
 				}
+			}
+		case "unpin":
+			if a.client != nil && a.messages.room != "" {
+				if !a.isMessagePinned(msg.Msg.ID) {
+					a.statusBar.SetError("Message is not pinned")
+					return a, nil
+				}
+				a.sendUnpin(msg.Msg.ID)
 			}
 		case "copy":
 			CopyToClipboard(msg.Msg.Body)
@@ -3283,7 +3272,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// full decision and cost-benefit rationale.
 				gen := a.connGen
 				go func() {
-					path, err := c.DownloadFile(fileID, decryptKey)
+					path, err := c.DownloadFile(fileID, decryptKey, att.ContentHash)
 					if err == nil {
 						// Pass attName as the extension hint — the
 						// cached file lives at .../files/<fileID>
@@ -3331,7 +3320,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					resultCh := a.sidebar.downloadResultCh
 					gen := a.connGen
 					go func() {
-						_, err := c.DownloadFile(fileID, decryptKey)
+						_, err := c.DownloadFile(fileID, decryptKey, att.ContentHash)
 						if resultCh != nil {
 							select {
 							case resultCh <- DownloadResultEvent{Action: "preview", Name: attName, Err: err, gen: gen}:
@@ -3388,7 +3377,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					decryptKey := att.DecryptKey
 					c := a.client
 					return a, func() tea.Msg {
-						path, err := c.DownloadFile(fileID, decryptKey)
+						path, err := c.DownloadFile(fileID, decryptKey, att.ContentHash)
 						if err != nil {
 							return saveAttachmentDownloadFailedMsg{Err: err}
 						}
@@ -3420,33 +3409,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			anchorY := layout.MessagesY1 - 8 // overlay() clamps if too low
 			a.contextMenu.Show(msg.Msg, anchorX, anchorY, isOwn, isAdmin, isRoom, a.pinnedBar.PinIDs(), myEmojis)
 		case "react":
-			a.emojiPicker.Show(msg.Msg)
+			userID := ""
+			if a.client != nil {
+				userID = a.client.UserID()
+			}
+			a.emojiPicker.Show(msg.Msg, userID)
 		case "unreact":
-			// Remove one of the current user's reactions on this message.
-			//   Data == emoji  → remove that specific emoji (context menu path)
-			//   Data == ""     → remove first reaction user has (keyboard 'u' path;
-			//                    repeatable presses peel off more)
-			if a.client == nil {
-				return a, nil
-			}
-			user := a.client.UserID()
-			emoji := msg.Data
-			if emoji == "" {
-				emojis := msg.Msg.UserEmojis(user)
-				if len(emojis) == 0 {
-					a.statusBar.SetError("No reactions to remove")
-					return a, nil
-				}
-				emoji = emojis[0]
-			}
-			ids := msg.Msg.UserReactionIDs(user, emoji)
-			if len(ids) == 0 {
-				a.statusBar.SetError("Reaction already removed")
-				return a, nil
-			}
-			if err := a.client.SendUnreact(ids[0]); err != nil {
-				a.statusBar.SetError("Unreact failed: " + err.Error())
-			}
+			a.sendUnreactForMessage(msg.Msg, msg.Data)
 		case "thread":
 			a.threadPanel.Show(msg.Data, a.messages.messages)
 		}
@@ -3759,7 +3728,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// interaction. F28's badge carries the state until the
 			// next profile receive (or next user action).
 		} else {
-			a.keyWarning.Show(msg.User, msg.OldFingerprint, msg.NewFingerprint)
+			a.keyWarning.Show(a.resolveDisplayName(msg.User), msg.OldFingerprint, msg.NewFingerprint)
 		}
 		// Continue listening for the next event.
 		if a.client != nil && a.sidebar.msgCh != nil {
@@ -4600,6 +4569,49 @@ func (a *App) sendReadReceipt() {
 	if target != "" {
 		a.sidebar.SetUnread(target, 0)
 	}
+}
+
+func (a *App) sendUnreactForMessage(msg DisplayMessage, emoji string) {
+	if a.client == nil {
+		return
+	}
+	user := a.client.UserID()
+	if emoji == "" {
+		emojis := msg.UserEmojis(user)
+		if len(emojis) == 0 {
+			a.statusBar.SetError("No reactions to remove")
+			return
+		}
+		emoji = emojis[0]
+	}
+	ids := msg.UserReactionIDs(user, emoji)
+	if len(ids) == 0 {
+		a.statusBar.SetError("Reaction already removed")
+		return
+	}
+	if err := a.client.SendUnreact(ids[0]); err != nil {
+		a.statusBar.SetError("Unreact failed: " + err.Error())
+	}
+}
+
+func (a *App) isMessagePinned(messageID string) bool {
+	for _, pin := range a.pinnedBar.pins {
+		if pin.ID == messageID {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) sendUnpin(messageID string) {
+	if a.client == nil || a.messages.room == "" {
+		return
+	}
+	a.client.Enc().Encode(protocol.Unpin{
+		Type: "unpin",
+		Room: a.messages.room,
+		ID:   messageID,
+	})
 }
 
 // switchToSidebarSelection switches the messages context to whatever the
@@ -7697,8 +7709,12 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	case "reaction_removed":
 		var m protocol.ReactionRemoved
 		if err := json.Unmarshal(msg.Raw, &m); err == nil {
-			a.messages.RemoveReaction(m.ReactionID)
-			a.messages.SyncReactionsForMessage(a.client, m.ID)
+			// F6: drop a forged/misattributed un-react before mutating the
+			// in-memory reaction set, matching the durable client.go gate.
+			if a.client == nil || a.client.VerifyUnreactAuthor(m) {
+				a.messages.RemoveReaction(m.ReactionID)
+				a.messages.SyncReactionsForMessage(a.client, m.ID)
+			}
 		}
 	case "sync_batch":
 		var batch protocol.SyncBatch
@@ -8315,7 +8331,13 @@ func (a App) viewBody() string {
 		return a.newConv.View(a.width)
 	}
 	if a.emojiPicker.IsVisible() {
-		return a.emojiPicker.View()
+		dialog := a.emojiPicker.View(layout.MessagesWidth, layout.InputY0-layout.MessagesY0)
+		col := layout.MessagesX0 + 2
+		row := layout.InputY0 - lipgloss.Height(dialog)
+		if row < 1 {
+			row = 1
+		}
+		return overlay(screen, dialog, col, row, a.width, a.height)
 	}
 	if a.pendingPanel.IsVisible() {
 		return a.pendingPanel.View(a.width, a.height)

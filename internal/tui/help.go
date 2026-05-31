@@ -159,8 +159,8 @@ func (h HelpModel) renderContent(width int) string {
 	)
 	msgRows := []helpRow{
 		{"r", "reply to selected"},
-		{"e", "react (emoji)"},
-		{"u", "remove my reaction"},
+		{"e", "react/remove emoji"},
+		{"u", "unpin selected (rooms)"},
 		{"p", "preview image / pin (rooms)"},
 		{"o", "open attachment"},
 		{"s", "save attachment"},

@@ -282,8 +282,9 @@ func TestContextMenu_NoRemoveItemsIfNoReactions(t *testing.T) {
 
 // -- Keyboard shortcuts in the messages panel --
 
-func TestMessages_UKeyEmitsUnreact(t *testing.T) {
+func TestMessages_UKeyEmitsUnpinInRooms(t *testing.T) {
 	m := setupMessagesWithOne()
+	m.room = "room_1"
 	m.cursor = 0
 	_, cmd := m.Update(keyMsg("u"))
 	if cmd == nil {
@@ -293,19 +294,26 @@ func TestMessages_UKeyEmitsUnreact(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected MessageAction, got %T", cmd())
 	}
-	if action.Action != "unreact" {
-		t.Errorf("action = %q, want unreact", action.Action)
-	}
-	if action.Data != "" {
-		t.Errorf("keyboard 'u' should emit empty Data (first-emoji fallback), got %q", action.Data)
+	if action.Action != "unpin" {
+		t.Errorf("action = %q, want unpin", action.Action)
 	}
 	if action.Msg.ID != "msg_1" {
 		t.Errorf("wrong message: %s", action.Msg.ID)
 	}
 }
 
+func TestMessages_UKeyNoopOutsideRooms(t *testing.T) {
+	m := setupMessagesWithOne()
+	m.cursor = 0
+	_, cmd := m.Update(keyMsg("u"))
+	if cmd != nil {
+		t.Error("'u' outside rooms should not emit")
+	}
+}
+
 func TestMessages_UKeyNoCursor(t *testing.T) {
 	m := setupMessagesWithOne()
+	m.room = "room_1"
 	m.cursor = -1 // no selection
 	_, cmd := m.Update(keyMsg("u"))
 	if cmd != nil {
@@ -363,5 +371,24 @@ func TestContextMenu_UnreactActionEmitsData(t *testing.T) {
 	}
 	if action.Data != "👍" {
 		t.Errorf("data = %q, want 👍", action.Data)
+	}
+}
+
+func TestContextMenu_PinnedRoomUsesUnpinAction(t *testing.T) {
+	c := NewContextMenu()
+	msg := DisplayMessage{ID: "msg_1"}
+	c.Show(msg, 0, 0, false, false, true, []string{"msg_1"}, nil)
+
+	found := false
+	for _, item := range c.items {
+		if item.Label == "Unpin" {
+			found = true
+			if item.Action != "unpin" {
+				t.Fatalf("Unpin action = %q, want unpin", item.Action)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected pinned room context menu to include Unpin")
 	}
 }

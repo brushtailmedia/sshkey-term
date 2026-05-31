@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
@@ -26,6 +28,73 @@ func TestApp_EmojiSelectedMsg_DMSendsReaction(t *testing.T) {
 	// should fail in wrapKeyForDM with this exact error shape.
 	if !strings.Contains(updated.statusBar.errorMsg, "no members for DM dm_react") {
 		t.Fatalf("status error = %q, want DM send-path error", updated.statusBar.errorMsg)
+	}
+}
+
+func TestApp_UnpinActionSendsOnlyForPinnedRoomMessage(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.messages.SetContext("room_pin", "", "")
+	a.pinnedBar.SetPins("room_pin", []string{"msg_pinned"}, []DisplayMessage{{ID: "msg_pinned"}})
+
+	var out bytes.Buffer
+	client.SetEncoderForTesting(a.client, protocol.NewEncoder(&out))
+
+	model, _ := a.Update(MessageAction{
+		Action: "unpin",
+		Msg:    DisplayMessage{ID: "msg_pinned", Room: "room_pin"},
+	})
+	updated := model.(App)
+	if updated.statusBar.errorMsg != "" {
+		t.Fatalf("unexpected status error: %q", updated.statusBar.errorMsg)
+	}
+
+	var unpin protocol.Unpin
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &unpin); err != nil {
+		t.Fatalf("decode unpin frame: %v\n%s", err, out.String())
+	}
+	if unpin.Type != "unpin" || unpin.Room != "room_pin" || unpin.ID != "msg_pinned" {
+		t.Fatalf("unpin frame = %+v, want room_pin/msg_pinned", unpin)
+	}
+}
+
+func TestApp_UnpinActionNoopsForUnpinnedRoomMessage(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.messages.SetContext("room_pin", "", "")
+
+	var out bytes.Buffer
+	client.SetEncoderForTesting(a.client, protocol.NewEncoder(&out))
+
+	model, _ := a.Update(MessageAction{
+		Action: "unpin",
+		Msg:    DisplayMessage{ID: "msg_unpinned", Room: "room_pin"},
+	})
+	updated := model.(App)
+	if out.Len() != 0 {
+		t.Fatalf("unpinned message should not send unpin frame, got %q", out.String())
+	}
+	if !strings.Contains(updated.statusBar.errorMsg, "not pinned") {
+		t.Fatalf("status error = %q, want not pinned", updated.statusBar.errorMsg)
+	}
+}
+
+func TestApp_PinActionNoopsForAlreadyPinnedRoomMessage(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.messages.SetContext("room_pin", "", "")
+	a.pinnedBar.SetPins("room_pin", []string{"msg_pinned"}, []DisplayMessage{{ID: "msg_pinned"}})
+
+	var out bytes.Buffer
+	client.SetEncoderForTesting(a.client, protocol.NewEncoder(&out))
+
+	model, _ := a.Update(MessageAction{
+		Action: "pin",
+		Msg:    DisplayMessage{ID: "msg_pinned", Room: "room_pin"},
+	})
+	updated := model.(App)
+	if out.Len() != 0 {
+		t.Fatalf("already-pinned message should not send pin/unpin frame, got %q", out.String())
+	}
+	if !strings.Contains(updated.statusBar.errorMsg, "already pinned") {
+		t.Fatalf("status error = %q, want already pinned", updated.statusBar.errorMsg)
 	}
 }
 

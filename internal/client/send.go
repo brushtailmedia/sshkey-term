@@ -132,16 +132,17 @@ func (c *Client) SendRoomMessageFile(room, body, filePath, replyTo string, menti
 	if err != nil {
 		return fmt.Errorf("stat: %w", err)
 	}
-	fileID, uploadEpoch, err := c.UploadFile(filePath, room, "")
+	fileID, uploadEpoch, contentHash, err := c.UploadFile(filePath, room, "")
 	if err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
 	attachment := protocol.Attachment{
-		FileID:    fileID,
-		Name:      filepath.Base(filePath),
-		Size:      info.Size(),
-		Mime:      sniffMimeType(filePath),
-		FileEpoch: uploadEpoch, // pin to the epoch used for encryption
+		FileID:      fileID,
+		Name:        filepath.Base(filePath),
+		Size:        info.Size(),
+		Mime:        sniffMimeType(filePath),
+		FileEpoch:   uploadEpoch, // pin to the epoch used for encryption
+		ContentHash: contentHash, // F11: E2E-commit the ciphertext hash
 	}
 	return c.SendRoomMessageFull(room, body, replyTo, mentions, []protocol.Attachment{attachment})
 }
@@ -268,16 +269,17 @@ func (c *Client) SendGroupMessageFile(group, body, filePath, replyTo string, men
 	if err != nil {
 		return err
 	}
-	fileID, err := c.UploadGroupFile(filePath, group, fileKey)
+	fileID, contentHash, err := c.UploadGroupFile(filePath, group, fileKey)
 	if err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
 	att := protocol.Attachment{
-		FileID:  fileID,
-		Name:    filepath.Base(filePath),
-		Size:    info.Size(),
-		Mime:    sniffMimeType(filePath),
-		FileKey: base64.StdEncoding.EncodeToString(fileKey),
+		FileID:      fileID,
+		Name:        filepath.Base(filePath),
+		Size:        info.Size(),
+		Mime:        sniffMimeType(filePath),
+		FileKey:     base64.StdEncoding.EncodeToString(fileKey),
+		ContentHash: contentHash, // F11: E2E-commit the ciphertext hash
 	}
 	return c.SendGroupMessageFull(group, body, replyTo, mentions, []protocol.Attachment{att})
 }
@@ -560,9 +562,13 @@ func (c *Client) SendGroupReaction(group, targetMsgID, emoji string) error {
 // reaction_id from its local (message_id, user, emoji) index and sends it.
 func (c *Client) SendUnreact(reactionID string) error {
 	corrID := protocol.GenerateCorrID()
+	// F6: sign the reaction_id so the receiver can authenticate this removal as
+	// genuinely ours and bound to exactly this reaction (verify-or-drop on receipt).
+	sig := crypto.SignUnreact(c.privKey, reactionID)
 	envelope := protocol.Unreact{
 		Type:       "unreact",
 		ReactionID: reactionID,
+		Signature:  base64.StdEncoding.EncodeToString(sig),
 		CorrID:     corrID,
 	}
 	c.sendQueue.EnqueueWithID(corrID, "unreact", envelope)
@@ -847,16 +853,17 @@ func (c *Client) SendDMMessageFile(dmID, body, filePath, replyTo string, mention
 	if err != nil {
 		return err
 	}
-	fileID, err := c.UploadDMFile(filePath, dmID, fileKey)
+	fileID, contentHash, err := c.UploadDMFile(filePath, dmID, fileKey)
 	if err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
 	att := protocol.Attachment{
-		FileID:  fileID,
-		Name:    filepath.Base(filePath),
-		Size:    info.Size(),
-		Mime:    sniffMimeType(filePath),
-		FileKey: base64.StdEncoding.EncodeToString(fileKey),
+		FileID:      fileID,
+		Name:        filepath.Base(filePath),
+		Size:        info.Size(),
+		Mime:        sniffMimeType(filePath),
+		FileKey:     base64.StdEncoding.EncodeToString(fileKey),
+		ContentHash: contentHash, // F11: E2E-commit the ciphertext hash
 	}
 	return c.SendDMMessageFull(dmID, body, replyTo, mentions, []protocol.Attachment{att})
 }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
+	"strings"
 	"testing"
 )
 
@@ -26,6 +28,37 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 
 	if !bytes.Equal(plaintext, decrypted) {
 		t.Errorf("decrypted = %q, want %q", decrypted, plaintext)
+	}
+}
+
+// F5: Encrypt/Decrypt must reject any key that isn't exactly 32 bytes, so a
+// short 16/24-byte key can't silently downgrade AES-256 to AES-128/192
+// (aes.NewCipher accepts all three lengths). The 16- and 24-byte cases are the
+// ones that would previously have "worked".
+func TestEncryptDecrypt_RejectsNon256BitKey(t *testing.T) {
+	plaintext := []byte("secret")
+	good, err := GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validCiphertext, err := Encrypt(good, plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, n := range []int{0, 15, 16, 24, 31, 33, 64} {
+		key := make([]byte, n)
+		if _, err := Encrypt(key, plaintext); err == nil {
+			t.Errorf("Encrypt with %d-byte key: err = nil, want rejection", n)
+		}
+		if _, err := Decrypt(key, validCiphertext); err == nil {
+			t.Errorf("Decrypt with %d-byte key: err = nil, want rejection", n)
+		}
+	}
+
+	// The exact 32-byte size is still accepted.
+	if _, err := Encrypt(make([]byte, keySize), plaintext); err != nil {
+		t.Errorf("Encrypt with %d-byte key: %v", keySize, err)
 	}
 }
 
@@ -316,6 +349,43 @@ func TestEditCanonicalForm_MsgIDLengthAmbiguity(t *testing.T) {
 	}
 }
 
+// F2: the send-path signing forms are domain-separated and length-prefixed.
+// Round-trip tests pass regardless of framing; this locks the framing itself.
+func TestSendCanonicalForm_DomainAndBoundary(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	payload := []byte("ciphertext")
+
+	// Domain separation: a SignRoom signature must not cross-verify as SignDM
+	// or as the edit forms, and vice versa.
+	roomSig := SignRoom(priv, payload, "room_x", 1)
+	if VerifyDM(pub, payload, "room_x", map[string]string{}, roomSig) {
+		t.Error("SignRoom signature must not cross-verify as SignDM (domain tag)")
+	}
+	if VerifyRoomEdit(pub, "", payload, "room_x", 1, roomSig) {
+		t.Error("SignRoom signature must not cross-verify as SignRoomEdit (domain tag)")
+	}
+	dmSig := SignDM(priv, payload, "dm_x", map[string]string{})
+	if VerifyRoom(pub, payload, "dm_x", 1, dmSig) {
+		t.Error("SignDM signature must not cross-verify as SignRoom (domain tag)")
+	}
+
+	// Boundary unambiguity: re-splitting payload/room must not interchange.
+	// Raw concatenation signed ("AB","CDE") and ("ABC","DE") over identical bytes.
+	sig := SignRoom(priv, []byte("AB"), "CDE", 1)
+	if VerifyRoom(pub, []byte("ABC"), "DE", 1, sig) {
+		t.Error("boundary confusion: (AB,CDE) signature must not verify as (ABC,DE) — length prefix is load-bearing")
+	}
+
+	// wrappedKeysCanonical binds the username, not just sort order: the same key
+	// value under a different username must change the signature. (Raw concat
+	// appended only the key bytes, so {alice:K} and {bob:K} signed identically.)
+	keyVal := base64.StdEncoding.EncodeToString([]byte("wrapped-key-bytes"))
+	sigAlice := SignDM(priv, payload, "dm_x", map[string]string{"usr_alice": keyVal})
+	if VerifyDM(pub, payload, "dm_x", map[string]string{"usr_bobby": keyVal}, sigAlice) {
+		t.Error("wrappedKeysCanonical must bind the username (same key under a different user must not verify)")
+	}
+}
+
 func TestSafetyNumber(t *testing.T) {
 	pubA, _, _ := ed25519.GenerateKey(rand.Reader)
 	pubB, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -335,6 +405,44 @@ func TestSafetyNumber(t *testing.T) {
 	t.Logf("safety number: %s", sn1)
 }
 
+// F3: lock the uniform full-hash encoding with deterministic keys. A regression
+// to the old biased per-byte %100 form (or any encoding change) flips the golden
+// value below; the format stays 6 groups of 4 digits, which verify.go depends on.
+func TestSafetyNumber_DeterministicGolden(t *testing.T) {
+	pubA := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x01}, ed25519.SeedSize)).Public().(ed25519.PublicKey)
+	pubB := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x02}, ed25519.SeedSize)).Public().(ed25519.PublicKey)
+
+	sn := SafetyNumber(pubA, pubB)
+
+	// Golden value — regenerate intentionally if the encoding is changed.
+	const want = "6818 7221 9633 6518 7333 5783"
+	if sn != want {
+		t.Errorf("SafetyNumber = %q, want %q", sn, want)
+	}
+
+	// Symmetric in the two keys.
+	if got := SafetyNumber(pubB, pubA); got != sn {
+		t.Errorf("not symmetric: %q vs %q", got, sn)
+	}
+
+	// Format: 6 space-separated groups of exactly 4 decimal digits (verify.go
+	// renders the 6 groups in two rows).
+	groups := strings.Fields(sn)
+	if len(groups) != 6 {
+		t.Fatalf("groups = %d, want 6 (%q)", len(groups), sn)
+	}
+	for _, g := range groups {
+		if len(g) != 4 {
+			t.Errorf("group %q is %d chars, want 4", g, len(g))
+		}
+		for _, r := range g {
+			if r < '0' || r > '9' {
+				t.Errorf("group %q has a non-digit %q", g, r)
+			}
+		}
+	}
+}
+
 func TestMemberHash(t *testing.T) {
 	h1 := MemberHash([]string{"alice", "bob", "carol"})
 	h2 := MemberHash([]string{"carol", "alice", "bob"})
@@ -346,5 +454,43 @@ func TestMemberHash(t *testing.T) {
 	h3 := MemberHash([]string{"alice", "bob"})
 	if h1 == h3 {
 		t.Error("different member sets should produce different hashes")
+	}
+
+	// F2: length-prefixing means member sets that concatenate identically must
+	// still hash differently. Raw concat hashed ["ab","c"] and ["a","bc"] alike.
+	if MemberHash([]string{"ab", "c"}) == MemberHash([]string{"a", "bc"}) {
+		t.Error("member sets that concatenate identically must hash differently (length prefix)")
+	}
+}
+
+// TestSignUnreact_RoundTripAndBinding locks the F6 un-react signature: it
+// round-trips, binds to the specific reaction_id (so a genuine un-react can't be
+// replayed onto a different reaction), binds to the signing key (so a malicious
+// relay can't forge one), and rejects garbage.
+func TestSignUnreact_RoundTripAndBinding(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const reactionID = "react_abc123"
+	sig := SignUnreact(priv, reactionID)
+
+	if !VerifyUnreact(pub, reactionID, sig) {
+		t.Fatal("valid un-react signature should verify")
+	}
+	if VerifyUnreact(pub, "react_other", sig) {
+		t.Error("signature must not verify against a different reaction_id (replay/retarget blocked)")
+	}
+	otherPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if VerifyUnreact(otherPub, reactionID, sig) {
+		t.Error("signature must not verify against a different key (forgery blocked)")
+	}
+	garbage := make([]byte, ed25519.SignatureSize)
+	_, _ = rand.Read(garbage)
+	if VerifyUnreact(pub, reactionID, garbage) {
+		t.Error("garbage signature must not verify")
 	}
 }

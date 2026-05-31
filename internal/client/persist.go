@@ -58,6 +58,66 @@ func (c *Client) pubKeyForUser(userID string) ed25519.PublicKey {
 	return nil
 }
 
+// VerifyReactionAuthor verifies the Ed25519 signature on an inbound reaction
+// against the claimed actor's pinned key (audit F6). The reaction *send* paths
+// already sign the encrypted payload (crypto.SignRoom/SignDM, see send.go), but
+// historically nothing verified it on receipt — so a malicious relay could
+// forge a reaction or attribute one to a user who never sent it. This closes
+// that gap exactly as F1 does for messages: the actor (`r.User`) is bound not by
+// living inside the signed bytes but by **verifying against pubKeyForUser(r.User)**
+// — a signature made by a different key fails. Returns false (caller must drop)
+// on an unknown/unpinned sender, an undecodable payload/signature, or a failed
+// signature. Called from both receive paths — durable storeReaction and the TUI
+// AddReactionDecrypted — since each applies the reaction independently.
+func (c *Client) VerifyReactionAuthor(r protocol.Reaction) bool {
+	pub := c.pubKeyForUser(r.User)
+	if pub == nil {
+		return false
+	}
+	payload, err := base64.StdEncoding.DecodeString(r.Payload)
+	if err != nil {
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(r.Signature)
+	if err != nil {
+		return false
+	}
+	// Mirror the send-side canonical inputs exactly: room reactions sign
+	// (payload, room, epoch) via SignRoom; group/DM reactions sign
+	// (payload, conversation, wrappedKeys) via SignDM where conversation is the
+	// group or DM id.
+	if r.Room != "" {
+		return crypto.VerifyRoom(pub, payload, r.Room, r.Epoch, sig)
+	}
+	conversation := r.Group
+	if conversation == "" {
+		conversation = r.DM
+	}
+	return crypto.VerifyDM(pub, payload, conversation, r.WrappedKeys, sig)
+}
+
+// VerifyUnreactAuthor verifies the Ed25519 signature on an inbound reaction
+// removal against the claimed actor's pinned key (audit F6). Mirrors
+// VerifyReactionAuthor: the actor (`rm.User`) is bound by verifying against
+// pubKeyForUser(rm.User), and the signature binds the `reaction_id` being
+// removed (crypto.SignUnreact) so a malicious relay can neither forge an
+// un-react attributed to another user nor replay a genuine one onto a different
+// reaction. Returns false (caller must drop) on an unknown/unpinned sender, an
+// undecodable signature, or a failed verification. Called from both receive
+// paths — durable (client.go) and the TUI (app.go) — since each removes the
+// reaction independently.
+func (c *Client) VerifyUnreactAuthor(rm protocol.ReactionRemoved) bool {
+	pub := c.pubKeyForUser(rm.User)
+	if pub == nil {
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(rm.Signature)
+	if err != nil {
+		return false
+	}
+	return crypto.VerifyUnreact(pub, rm.ReactionID, sig)
+}
+
 // storeRoomMessage decrypts and stores a room message in the local DB.
 // When warnReplay is false, replay high-water checks still run but do not
 // emit WARN logs (used for sync/history catchup where old frames are normal).
@@ -121,11 +181,12 @@ func (c *Client) storeRoomMessage(raw json.RawMessage, warnReplay bool) {
 			}
 			key := c.RoomEpochKey(msg.Room, fileEpoch)
 			attachments = append(attachments, store.StoredAttachment{
-				FileID:     a.FileID,
-				Name:       a.Name,
-				Size:       a.Size,
-				Mime:       a.Mime,
-				DecryptKey: base64.StdEncoding.EncodeToString(key),
+				FileID:      a.FileID,
+				Name:        a.Name,
+				Size:        a.Size,
+				Mime:        a.Mime,
+				DecryptKey:  base64.StdEncoding.EncodeToString(key),
+				ContentHash: a.ContentHash, // F11: verified against the blob on download
 			})
 		}
 	}
@@ -218,11 +279,12 @@ func (c *Client) storeGroupMessage(raw json.RawMessage, warnReplay bool) {
 	var attachments []store.StoredAttachment
 	for _, a := range payload.Attachments {
 		attachments = append(attachments, store.StoredAttachment{
-			FileID:     a.FileID,
-			Name:       a.Name,
-			Size:       a.Size,
-			Mime:       a.Mime,
-			DecryptKey: a.FileKey, // group DMs: already base64-encoded per-file K_file
+			FileID:      a.FileID,
+			Name:        a.Name,
+			Size:        a.Size,
+			Mime:        a.Mime,
+			DecryptKey:  a.FileKey,     // group DMs: already base64-encoded per-file K_file
+			ContentHash: a.ContentHash, // F11: verified against the blob on download
 		})
 	}
 
@@ -297,11 +359,12 @@ func (c *Client) storeDMMessage(raw json.RawMessage, warnReplay bool) {
 
 		for _, a := range payload.Attachments {
 			attachments = append(attachments, store.StoredAttachment{
-				FileID:     a.FileID,
-				Name:       a.Name,
-				Size:       a.Size,
-				Mime:       a.Mime,
-				DecryptKey: a.FileKey, // 1:1 DMs: already base64-encoded per-file K_file
+				FileID:      a.FileID,
+				Name:        a.Name,
+				Size:        a.Size,
+				Mime:        a.Mime,
+				DecryptKey:  a.FileKey,     // 1:1 DMs: already base64-encoded per-file K_file
+				ContentHash: a.ContentHash, // F11: verified against the blob on download
 			})
 		}
 	}
@@ -381,7 +444,8 @@ func (c *Client) maybeAutoPreviewAttachments(attachments []store.StoredAttachmen
 		if err != nil {
 			continue
 		}
-		fileID := a.FileID // capture for closure
+		fileID := a.FileID           // capture for closure
+		contentHash := a.ContentHash // F11: E2E hash to verify the download against
 		go func() {
 			// In-flight dedup: if another goroutine is already
 			// downloading this fileID, skip. LoadOrStore is atomic —
@@ -404,7 +468,7 @@ func (c *Client) maybeAutoPreviewAttachments(attachments []store.StoredAttachmen
 				return
 			}
 
-			if _, err := c.DownloadFile(fileID, key); err != nil {
+			if _, err := c.DownloadFile(fileID, key, contentHash); err != nil {
 				if c.logger != nil {
 					c.logger.Debug("auto-preview download failed",
 						"file_id", fileID, "error", err)
@@ -623,7 +687,7 @@ func (c *Client) storeReaction(raw json.RawMessage) {
 		return
 	}
 
-	// Drop orphan reactions before any expensive work (decrypt,
+	// Drop orphan reactions before any expensive work (verify, decrypt,
 	// profile lookup). If the parent message isn't in the local
 	// store or is already tombstoned, the reaction has nowhere to
 	// land — skip silently. The store.ErrNoRows case is the
@@ -634,21 +698,43 @@ func (c *Client) storeReaction(raw json.RawMessage) {
 		return
 	}
 
-	// Decrypt to get the emoji
+	// F6: authenticate the reaction's author before persisting it —
+	// verify-or-drop against the claimed actor's pinned key, mirroring the
+	// message receive path (storeRoomMessage). A forged or misattributed
+	// reaction from a malicious relay is dropped here and never stored. Placed
+	// after the cheap orphan check (no point verifying a reaction whose parent
+	// we don't even have); the security invariant is unchanged — nothing
+	// reaches InsertReaction without a valid author signature.
+	if !c.VerifyReactionAuthor(r) {
+		return
+	}
+
+	// Decrypt to get the emoji. Also bind the encrypted target to the envelope
+	// ID (dr.Target != r.ID) — the same anti-retarget check the TUI path runs —
+	// so the durable write can't be steered onto a different parent message.
 	var emoji string
 	if r.Room != "" {
 		dr, err := c.DecryptRoomReaction(r.Room, r.Epoch, r.Payload)
 		if err == nil {
+			if dr.Target != r.ID {
+				return
+			}
 			emoji = dr.Emoji
 		}
 	} else if r.Group != "" {
 		dr, err := c.DecryptGroupReaction(r.WrappedKeys, r.Payload)
 		if err == nil {
+			if dr.Target != r.ID {
+				return
+			}
 			emoji = dr.Emoji
 		}
 	} else if r.DM != "" {
 		dr, err := c.DecryptDMReaction(r.WrappedKeys, r.Payload)
 		if err == nil {
+			if dr.Target != r.ID {
+				return
+			}
 			emoji = dr.Emoji
 		}
 	}
@@ -741,7 +827,8 @@ func (c *Client) storeCatchupTombstone(raw json.RawMessage) {
 	c.cleanupAttachmentFiles(fileIDs)
 }
 
-// StoreProfile pins a user's key on first encounter, warns on change.
+// StoreProfile pins a user's key on first encounter, warns on change, and
+// returns whether the profile is safe to use for the live profile cache.
 //
 // Under the no-rotation protocol invariant (see PROTOCOL.md "Keys as
 // Identities"), the "change" branch here only fires on anomalous
@@ -752,14 +839,14 @@ func (c *Client) storeCatchupTombstone(raw json.RawMessage) {
 // audit_v0.2.0.md#F32): they exist to surface and mitigate an event
 // class the protocol does not produce in normal operation. Stripping
 // either as "redundant" code halves the detection coverage.
-func (c *Client) StoreProfile(p *protocol.Profile) {
+func (c *Client) StoreProfile(p *protocol.Profile) bool {
 	if c.store == nil {
-		return
+		return true
 	}
 
 	existing, _, err := c.store.GetPinnedKey(p.User)
 	if err == nil && existing != "" && existing != p.KeyFingerprint {
-		c.logger.Warn("KEY CHANGE DETECTED",
+		c.logger.Warn("ACCOUNT KEY CHANGED",
 			"user", p.User,
 			"old_fingerprint", existing,
 			"new_fingerprint", p.KeyFingerprint,
@@ -768,15 +855,17 @@ func (c *Client) StoreProfile(p *protocol.Profile) {
 
 		// Phase 21 F3.a closure 2026-04-19 — dispatch to the TUI so
 		// the user sees a blocking modal with old vs. new fingerprints
-		// and an explicit Accept / Disconnect choice. The callback
+		// and a clear immutable-account-key warning. The callback
 		// runs on the readLoop goroutine; TUI handlers push to a
 		// channel and return.
 		if c.cfg.OnKeyWarning != nil {
 			c.cfg.OnKeyWarning(p.User, existing, p.KeyFingerprint)
 		}
+		return false
 	}
 
 	c.store.PinKey(p.User, p.KeyFingerprint, p.PubKey)
+	return true
 }
 
 // LoadRoomMessages loads messages from local DB for a room.

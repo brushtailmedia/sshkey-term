@@ -49,14 +49,14 @@ var (
 // Returns the server-assigned file_id and the epoch used for encryption, so
 // the caller can stamp FileEpoch on the attachment metadata correctly (avoids
 // a race if the epoch rotates between upload and send).
-func (c *Client) UploadFile(localPath, room, group string) (fileID string, epoch int64, err error) {
+func (c *Client) UploadFile(localPath, room, group string) (fileID string, epoch int64, contentHash string, err error) {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
-		return "", 0, fmt.Errorf("read file: %w", err)
+		return "", 0, "", fmt.Errorf("read file: %w", err)
 	}
 
 	if room == "" {
-		return "", 0, fmt.Errorf("UploadFile requires a room; for group DM attachments use UploadGroupFile")
+		return "", 0, "", fmt.Errorf("UploadFile requires a room; for group DM attachments use UploadGroupFile")
 	}
 
 	c.mu.RLock()
@@ -64,23 +64,23 @@ func (c *Client) UploadFile(localPath, room, group string) (fileID string, epoch
 	encKey := c.epochKeys[room][epoch]
 	c.mu.RUnlock()
 	if encKey == nil {
-		return "", 0, fmt.Errorf("no epoch key for room %s", room)
+		return "", 0, "", fmt.Errorf("no epoch key for room %s", room)
 	}
 
-	fileID, err = c.uploadEncrypted(data, encKey, room, group, "")
-	return fileID, epoch, err
+	fileID, contentHash, err = c.uploadEncrypted(data, encKey, room, group, "")
+	return fileID, epoch, contentHash, err
 }
 
 // UploadDMFile encrypts a file with a per-file key and uploads it for a 1:1 DM.
 // Same Design A pattern as UploadGroupFile — each attachment carries its own
 // key in the encrypted payload.
-func (c *Client) UploadDMFile(localPath, dmID string, fileKey []byte) (string, error) {
+func (c *Client) UploadDMFile(localPath, dmID string, fileKey []byte) (string, string, error) {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
-		return "", fmt.Errorf("read file: %w", err)
+		return "", "", fmt.Errorf("read file: %w", err)
 	}
 	if len(fileKey) == 0 {
-		return "", fmt.Errorf("UploadDMFile: fileKey is required")
+		return "", "", fmt.Errorf("UploadDMFile: fileKey is required")
 	}
 	return c.uploadEncrypted(data, fileKey, "", "", dmID)
 }
@@ -93,13 +93,13 @@ func (c *Client) UploadDMFile(localPath, dmID string, fileKey []byte) (string, e
 // This is Design A: each attachment carries its own key in the encrypted
 // payload, decoupling upload from message send. See PROTOCOL.md "DM
 // attachments".
-func (c *Client) UploadGroupFile(localPath, group string, fileKey []byte) (string, error) {
+func (c *Client) UploadGroupFile(localPath, group string, fileKey []byte) (string, string, error) {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
-		return "", fmt.Errorf("read file: %w", err)
+		return "", "", fmt.Errorf("read file: %w", err)
 	}
 	if len(fileKey) == 0 {
-		return "", fmt.Errorf("UploadGroupFile: fileKey is required")
+		return "", "", fmt.Errorf("UploadGroupFile: fileKey is required")
 	}
 	return c.uploadEncrypted(data, fileKey, "", group, "")
 }
@@ -107,14 +107,17 @@ func (c *Client) UploadGroupFile(localPath, group string, fileKey []byte) (strin
 // uploadEncrypted is the shared transport: encrypts bytes with encKey, runs
 // the upload_start → binary frame → upload_complete round-trip, and returns
 // the server-assigned file_id.
-func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (string, error) {
+func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (string, string, error) {
 	encrypted, err := crypto.Encrypt(encKey, data)
 	if err != nil {
-		return "", fmt.Errorf("encrypt: %w", err)
+		return "", "", fmt.Errorf("encrypt: %w", err)
 	}
 	encBytes := []byte(encrypted)
 
-	// Compute content hash of encrypted bytes for integrity verification
+	// Compute content hash of the encrypted bytes. Returned to the caller so it
+	// can commit it inside the E2E Attachment metadata (F11): the recipient
+	// verifies the downloaded blob against this sender-authenticated copy,
+	// detecting a malicious server that substitutes another same-epoch room file.
 	contentHash := crypto.ContentHash(encBytes)
 
 	uploadID := generateNanoID("up_")
@@ -150,7 +153,7 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 	c.sendQueue.MarkSending(uploadCorrID)
 	err = c.enc.Encode(envelope)
 	if err != nil {
-		return "", fmt.Errorf("send upload_start: %w", err)
+		return "", "", fmt.Errorf("send upload_start: %w", err)
 	}
 
 	// Wait for upload_ready before writing binary data — avoids a race where
@@ -159,11 +162,11 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 	select {
 	case <-pending.ready:
 	case err := <-pending.err:
-		return "", err
+		return "", "", err
 	case <-c.done:
-		return "", fmt.Errorf("disconnected")
+		return "", "", fmt.Errorf("disconnected")
 	case <-time.After(30 * time.Second):
-		return "", fmt.Errorf("upload timed out waiting for server")
+		return "", "", fmt.Errorf("upload timed out waiting for server")
 	}
 
 	c.mu.RLock()
@@ -171,7 +174,7 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 	c.mu.RUnlock()
 
 	if ulChan == nil {
-		return "", fmt.Errorf("no upload channel (Channel 3 not open)")
+		return "", "", fmt.Errorf("no upload channel (Channel 3 not open)")
 	}
 
 	// Hold uploadChanMu across the whole frame write so concurrent uploads
@@ -180,7 +183,7 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 	err = writeBinaryFrame(ulChan, uploadID, encBytes)
 	c.uploadChanMu.Unlock()
 	if err != nil {
-		return "", fmt.Errorf("write binary: %w", err)
+		return "", "", fmt.Errorf("write binary: %w", err)
 	}
 
 	select {
@@ -242,13 +245,13 @@ func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (s
 				}
 			}
 		}
-		return fileID, nil
+		return fileID, contentHash, nil
 	case err := <-pending.err:
-		return "", err
+		return "", "", err
 	case <-c.done:
-		return "", fmt.Errorf("disconnected")
+		return "", "", fmt.Errorf("disconnected")
 	case <-time.After(30 * time.Second):
-		return "", fmt.Errorf("upload timed out waiting for completion")
+		return "", "", fmt.Errorf("upload timed out waiting for completion")
 	}
 }
 
@@ -345,7 +348,7 @@ func validFileID(fileID string) bool {
 }
 
 // DownloadFile downloads and decrypts a file. Returns the local path.
-func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) {
+func (c *Client) DownloadFile(fileID string, decryptKey []byte, expectedContentHash string) (string, error) {
 	// F12: fileID is server-relayed (from a message's file_ids) and is used
 	// below as the local cache filename. Reject anything that isn't a safe
 	// single path component before any work, so a malicious server cannot make
@@ -426,12 +429,19 @@ func (c *Client) DownloadFile(fileID string, decryptKey []byte) (string, error) 
 		return "", fmt.Errorf("read binary: %w", err)
 	}
 
-	// Verify content hash before writing anything to disk (catches
-	// truncation, bit rot, and transit corruption). The hash was
-	// computed on the encrypted bytes by the uploader.
-	downloadsMu.Lock()
-	expectedHash := pending.contentHash
-	downloadsMu.Unlock()
+	// Verify the content hash before writing anything to disk. Prefer the
+	// E2E-committed hash from the signed Attachment (expectedContentHash, F11):
+	// it is sender-authenticated, so a malicious server can't substitute another
+	// same-epoch room file (which would otherwise decrypt cleanly under the
+	// shared epoch key and carry a matching server-relayed hash). Fall back to
+	// the server-relayed download_start hash only when the E2E copy is absent —
+	// that one catches just truncation / bit rot / transit corruption.
+	expectedHash := expectedContentHash
+	if expectedHash == "" {
+		downloadsMu.Lock()
+		expectedHash = pending.contentHash
+		downloadsMu.Unlock()
+	}
 	if err := crypto.VerifyContentHash(data, expectedHash); err != nil {
 		return "", fmt.Errorf("download integrity check failed: %w", err)
 	}

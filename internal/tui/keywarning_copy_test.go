@@ -2,15 +2,12 @@ package tui
 
 // Phase 21 F3.c + F3.d + F28 drift-guard tests.
 //
-// F3.c: the KeyWarningAcceptMsg handler must include a /verify nudge
-//       in the post-accept status-bar message so users who want to
-//       verify have a clear next step.
-//
 // F3.d: KeyWarningModel.View() must NOT say "the user's key was
 //       rotated" — under the no-rotation protocol invariant that
 //       language is false (see PROTOCOL.md "Keys as Identities").
 //       It must say something pointing at the real attack classes
-//       (compromised server, server bug, DB tampering).
+//       (server/state corruption or compromise) and must not provide
+//       an accept-new-key path.
 //
 // F28:  The verified-badge rendering path uses lipgloss-styled ✓
 //       glyphs across sidebar, infopanel, and memberpanel. These
@@ -23,9 +20,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 	"github.com/brushtailmedia/sshkey-term/internal/store"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // -------- F3.d modal copy --------
@@ -38,7 +35,7 @@ func TestKeyWarningModal_NoRotationFraming(t *testing.T) {
 	m.Show("alice", "SHA256:old", "SHA256:new")
 	out := m.View(80)
 
-	for _, banned := range []string{"was rotated", "been rotated", "key rotation"} {
+	for _, banned := range []string{"was rotated", "been rotated", "key rotation", "Accept new key"} {
 		if strings.Contains(out, banned) {
 			t.Errorf("modal copy contains banned phrase %q (conflicts with no-rotation invariant):\n%s",
 				banned, out)
@@ -46,21 +43,34 @@ func TestKeyWarningModal_NoRotationFraming(t *testing.T) {
 	}
 
 	for _, required := range []string{
-		"Keys do not rotate", // explicit invariant statement
-		"compromised server", // attack class 1
-		"server bug",         // attack class 2
-		"tampering",          // attack class 3
-		"different user ID",  // points at the legitimate new-key flow
-		"Old:",               // fingerprint labels
-		"New:",               // fingerprint labels
-		"SHA256:old",         // old fingerprint rendered
-		"SHA256:new",         // new fingerprint rendered
-		"[a] Accept new key", // choice 1 still present
-		"[d] Disconnect",     // choice 2 still present
+		"Account key changed for alice",
+		"Account keys are immutable",
+		"server/state corruption or compromise",
+		"The changed key was not accepted",
+		"retire the old account",
+		"approve a new account",
+		"Old:",           // fingerprint labels
+		"New:",           // fingerprint labels
+		"SHA256:old",     // old fingerprint rendered
+		"SHA256:new",     // new fingerprint rendered
+		"[d] Disconnect", // only action
 	} {
 		if !strings.Contains(out, required) {
 			t.Errorf("modal copy missing required text %q:\n%s", required, out)
 		}
+	}
+}
+
+func TestKeyWarningModal_AcceptKeyIsNotMapped(t *testing.T) {
+	var m KeyWarningModel
+	m.Show("alice", "SHA256:old", "SHA256:new")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if cmd != nil {
+		t.Fatal("immutable account-key warning must not accept a changed key")
+	}
+	if !updated.IsVisible() {
+		t.Fatal("pressing a should leave the warning visible")
 	}
 }
 
@@ -71,48 +81,6 @@ func TestKeyWarningModal_HiddenRendersEmpty(t *testing.T) {
 	var m KeyWarningModel
 	if out := m.View(80); out != "" {
 		t.Errorf("hidden modal should render empty, got %q", out)
-	}
-}
-
-// -------- F3.c accept-confirmation nudge --------
-
-// TestKeyWarningAccept_StatusBarIncludesVerifyNudge verifies the
-// Phase 21 F3.c closure: the accept-confirmation status-bar message
-// points users at /verify so they have a clear next step.
-func TestKeyWarningAccept_StatusBarIncludesVerifyNudge(t *testing.T) {
-	dir := t.TempDir()
-	st, err := store.OpenUnencrypted(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { st.Close() })
-
-	c := client.New(client.Config{})
-	client.SetStoreForTesting(c, st)
-	client.SetProfileForTesting(c, &protocol.Profile{
-		User:        "usr_alice",
-		DisplayName: "Alice",
-	})
-
-	a := App{
-		client:    c,
-		statusBar: NewStatusBar(),
-	}
-	// App.Update is a value-receiver method — it mutates a copy and
-	// returns the updated model. Capture and re-bind to read the
-	// post-dispatch statusBar state.
-	updated, _ := a.Update(KeyWarningAcceptMsg{User: "usr_alice"})
-	a = updated.(App)
-
-	msg := a.statusBar.errorMsg
-	for _, required := range []string{
-		"Alice",         // resolves display name, not raw userID
-		"/verify",       // nudge points at the verify command
-		"safety number", // explains what /verify will do
-	} {
-		if !strings.Contains(msg, required) {
-			t.Errorf("status bar missing %q; got %q", required, msg)
-		}
 	}
 }
 

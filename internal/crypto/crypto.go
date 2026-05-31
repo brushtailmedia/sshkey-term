@@ -17,6 +17,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"math/big"
 	"sort"
 
 	"golang.org/x/crypto/blake2b"
@@ -27,9 +28,17 @@ import (
 	"filippo.io/edwards25519"
 )
 
+// keySize is the required AES-256 key length in bytes. Encrypt/Decrypt assert
+// the key is exactly this, so a short 16- or 24-byte key can't silently
+// downgrade to AES-128/192 — aes.NewCipher accepts all three lengths (audit F5).
+const keySize = 32
+
 // Encrypt encrypts plaintext with AES-256-GCM using the given key.
 // Returns base64-encoded nonce + ciphertext.
 func Encrypt(key, plaintext []byte) (string, error) {
+	if len(key) != keySize {
+		return "", fmt.Errorf("encrypt: key must be %d bytes (AES-256), got %d", keySize, len(key))
+	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
@@ -50,6 +59,9 @@ func Encrypt(key, plaintext []byte) (string, error) {
 
 // Decrypt decrypts a base64-encoded nonce + ciphertext with AES-256-GCM.
 func Decrypt(key []byte, encoded string) ([]byte, error) {
+	if len(key) != keySize {
+		return nil, fmt.Errorf("decrypt: key must be %d bytes (AES-256), got %d", keySize, len(key))
+	}
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return nil, err
@@ -75,7 +87,7 @@ func Decrypt(key []byte, encoded string) ([]byte, error) {
 
 // GenerateKey generates a random 256-bit AES key.
 func GenerateKey() ([]byte, error) {
-	key := make([]byte, 32)
+	key := make([]byte, keySize)
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
@@ -184,44 +196,67 @@ func UnwrapKey(wrappedBase64 string, privKey ed25519.PrivateKey) ([]byte, error)
 	return gcm.Open(nil, nonce, ciphertext, nil)
 }
 
-// SignRoom signs a room message: Sign(payload_bytes || room_name_utf8 || epoch_as_big_endian_uint64)
+// appendField appends field to out, prefixed by its big-endian uint32 length.
+// This is the length-prefixing primitive for the signed canonical forms: it
+// makes adjacent variable-length fields unambiguous, so two different field
+// tuples can never produce the same signed bytes — without relying on any field
+// (room/DM/group ID) being a fixed length (audit F2).
+func appendField(out, field []byte) []byte {
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], uint32(len(field)))
+	out = append(out, l[:]...)
+	return append(out, field...)
+}
+
+// SignRoom signs a room message. Canonical form (audit F2 — domain-tagged so a
+// SignRoom signature can't cross-verify as a DM/edit signature, and
+// length-prefixed so the payload/room boundary is unambiguous):
+//
+//	Sign("room:v1" || u32_be(len(payload)) || payload || u32_be(len(room)) || room || u64_be(epoch))
 func SignRoom(privKey ed25519.PrivateKey, payloadBytes []byte, room string, epoch int64) []byte {
-	msg := make([]byte, 0, len(payloadBytes)+len(room)+8)
-	msg = append(msg, payloadBytes...)
-	msg = append(msg, []byte(room)...)
-	var epochBytes [8]byte
-	binary.BigEndian.PutUint64(epochBytes[:], uint64(epoch))
-	msg = append(msg, epochBytes[:]...)
-	return ed25519.Sign(privKey, msg)
+	return ed25519.Sign(privKey, buildRoomCanonical(payloadBytes, room, epoch))
 }
 
-// VerifyRoom verifies a room message signature.
+// VerifyRoom verifies a room message signature against the SignRoom form.
 func VerifyRoom(pubKey ed25519.PublicKey, payloadBytes []byte, room string, epoch int64, sig []byte) bool {
-	msg := make([]byte, 0, len(payloadBytes)+len(room)+8)
-	msg = append(msg, payloadBytes...)
-	msg = append(msg, []byte(room)...)
+	return ed25519.Verify(pubKey, buildRoomCanonical(payloadBytes, room, epoch), sig)
+}
+
+// buildRoomCanonical builds the SignRoom/VerifyRoom input. Shared so Sign and
+// Verify cannot drift.
+func buildRoomCanonical(payloadBytes []byte, room string, epoch int64) []byte {
+	const tag = "room:v1"
+	out := make([]byte, 0, len(tag)+4+len(payloadBytes)+4+len(room)+8)
+	out = append(out, tag...)
+	out = appendField(out, payloadBytes)
+	out = appendField(out, []byte(room))
 	var epochBytes [8]byte
 	binary.BigEndian.PutUint64(epochBytes[:], uint64(epoch))
-	msg = append(msg, epochBytes[:]...)
-	return ed25519.Verify(pubKey, msg, sig)
+	return append(out, epochBytes[:]...)
 }
 
-// SignDM signs a DM message: Sign(payload_bytes || conversation_id_utf8 || wrapped_keys_canonical)
+// SignDM signs a DM / group-DM message. Canonical form (audit F2):
+//
+//	Sign("dm:v1" || u32_be(len(payload)) || payload || u32_be(len(conversation)) || conversation || wrapped_keys_canonical)
 func SignDM(privKey ed25519.PrivateKey, payloadBytes []byte, conversation string, wrappedKeys map[string]string) []byte {
-	msg := make([]byte, 0, len(payloadBytes)+len(conversation)+len(wrappedKeys)*100)
-	msg = append(msg, payloadBytes...)
-	msg = append(msg, []byte(conversation)...)
-	msg = append(msg, wrappedKeysCanonical(wrappedKeys)...)
-	return ed25519.Sign(privKey, msg)
+	return ed25519.Sign(privKey, buildDMCanonical(payloadBytes, conversation, wrappedKeys))
 }
 
-// VerifyDM verifies a DM message signature.
+// VerifyDM verifies a DM / group-DM message signature against the SignDM form.
 func VerifyDM(pubKey ed25519.PublicKey, payloadBytes []byte, conversation string, wrappedKeys map[string]string, sig []byte) bool {
-	msg := make([]byte, 0, len(payloadBytes)+len(conversation)+len(wrappedKeys)*100)
-	msg = append(msg, payloadBytes...)
-	msg = append(msg, []byte(conversation)...)
-	msg = append(msg, wrappedKeysCanonical(wrappedKeys)...)
-	return ed25519.Verify(pubKey, msg, sig)
+	return ed25519.Verify(pubKey, buildDMCanonical(payloadBytes, conversation, wrappedKeys), sig)
+}
+
+// buildDMCanonical builds the SignDM/VerifyDM input. Shared so Sign and Verify
+// cannot drift. wrappedKeysCanonical is itself self-framing and runs to the end
+// of the message, so it needs no outer length prefix.
+func buildDMCanonical(payloadBytes []byte, conversation string, wrappedKeys map[string]string) []byte {
+	const tag = "dm:v1"
+	out := make([]byte, 0, len(tag)+4+len(payloadBytes)+4+len(conversation)+len(wrappedKeys)*120)
+	out = append(out, tag...)
+	out = appendField(out, payloadBytes)
+	out = appendField(out, []byte(conversation))
+	return append(out, wrappedKeysCanonical(wrappedKeys)...)
 }
 
 // SignRoomEdit signs a room message edit envelope. Distinct from
@@ -235,7 +270,7 @@ func VerifyDM(pubKey ed25519.PublicKey, payloadBytes []byte, conversation string
 //
 // Canonical form:
 //
-//	Sign("edit_room:" || uint32_be(len(msgID)) || msgID || payload_bytes || room_utf8 || epoch_big_endian_uint64)
+//	Sign("edit_room:" || u32_be(len(msgID)) || msgID || u32_be(len(payload)) || payload || u32_be(len(room)) || room || u64_be(epoch))
 //
 // Phase 21 item 3 — defense-in-depth against the substitution attack
 // made newly exploitable by Phase 15's `edited` broadcasts overwriting
@@ -262,7 +297,7 @@ func VerifyRoomEdit(pubKey ed25519.PublicKey, msgID string, payloadBytes []byte,
 //
 // Canonical form:
 //
-//	Sign("edit_dm:" || uint32_be(len(msgID)) || msgID || payload_bytes || conversation_id_utf8 || wrapped_keys_canonical)
+//	Sign("edit_dm:" || u32_be(len(msgID)) || msgID || u32_be(len(payload)) || payload || u32_be(len(conversation)) || conversation || wrapped_keys_canonical)
 //
 // Phase 21 item 3.
 func SignDMEdit(privKey ed25519.PrivateKey, msgID string, payloadBytes []byte, conversation string, wrappedKeys map[string]string) []byte {
@@ -280,37 +315,64 @@ func VerifyDMEdit(pubKey ed25519.PublicKey, msgID string, payloadBytes []byte, c
 // input bytes. Shared helper so Sign and Verify cannot drift.
 func buildRoomEditCanonical(msgID string, payloadBytes []byte, room string, epoch int64) []byte {
 	const tag = "edit_room:"
-	out := make([]byte, 0, len(tag)+4+len(msgID)+len(payloadBytes)+len(room)+8)
+	out := make([]byte, 0, len(tag)+4+len(msgID)+4+len(payloadBytes)+4+len(room)+8)
 	out = append(out, tag...)
-	var idLen [4]byte
-	binary.BigEndian.PutUint32(idLen[:], uint32(len(msgID)))
-	out = append(out, idLen[:]...)
-	out = append(out, []byte(msgID)...)
-	out = append(out, payloadBytes...)
-	out = append(out, []byte(room)...)
+	out = appendField(out, []byte(msgID))
+	out = appendField(out, payloadBytes)
+	out = appendField(out, []byte(room))
 	var epochBytes [8]byte
 	binary.BigEndian.PutUint64(epochBytes[:], uint64(epoch))
-	out = append(out, epochBytes[:]...)
-	return out
+	return append(out, epochBytes[:]...)
 }
 
 // buildDMEditCanonical constructs the SignDMEdit / VerifyDMEdit input
 // bytes. Shared so Sign and Verify cannot drift.
 func buildDMEditCanonical(msgID string, payloadBytes []byte, conversation string, wrappedKeys map[string]string) []byte {
 	const tag = "edit_dm:"
-	out := make([]byte, 0, len(tag)+4+len(msgID)+len(payloadBytes)+len(conversation)+len(wrappedKeys)*100)
+	out := make([]byte, 0, len(tag)+4+len(msgID)+4+len(payloadBytes)+4+len(conversation)+len(wrappedKeys)*120)
 	out = append(out, tag...)
-	var idLen [4]byte
-	binary.BigEndian.PutUint32(idLen[:], uint32(len(msgID)))
-	out = append(out, idLen[:]...)
-	out = append(out, []byte(msgID)...)
-	out = append(out, payloadBytes...)
-	out = append(out, []byte(conversation)...)
-	out = append(out, wrappedKeysCanonical(wrappedKeys)...)
-	return out
+	out = appendField(out, []byte(msgID))
+	out = appendField(out, payloadBytes)
+	out = appendField(out, []byte(conversation))
+	return append(out, wrappedKeysCanonical(wrappedKeys)...)
 }
 
-// wrappedKeysCanonical returns wrapped key values concatenated in sorted username order.
+// SignUnreact signs a reaction-removal (un-react) request. Unlike messages and
+// reactions there is no encrypted payload — the only thing worth binding is the
+// server-assigned reaction_id, which is globally unique and is exactly what the
+// receiver keys its delete on. Binding it (under a distinct domain tag) means a
+// compromised server can neither forge an un-react attributed to a user who
+// never sent one, nor replay a genuine un-react against a different reaction
+// (audit F6). The actor is bound by verifying against the claimed user's pinned
+// key, as elsewhere — not by living in the signed bytes.
+//
+// Canonical form:
+//
+//	Sign("unreact:v1" || u32_be(len(reactionID)) || reactionID)
+func SignUnreact(privKey ed25519.PrivateKey, reactionID string) []byte {
+	return ed25519.Sign(privKey, buildUnreactCanonical(reactionID))
+}
+
+// VerifyUnreact verifies an un-react signature against the SignUnreact form.
+func VerifyUnreact(pubKey ed25519.PublicKey, reactionID string, sig []byte) bool {
+	return ed25519.Verify(pubKey, buildUnreactCanonical(reactionID), sig)
+}
+
+// buildUnreactCanonical builds the SignUnreact/VerifyUnreact input. Shared so
+// Sign and Verify cannot drift.
+func buildUnreactCanonical(reactionID string) []byte {
+	const tag = "unreact:v1"
+	out := make([]byte, 0, len(tag)+4+len(reactionID))
+	out = append(out, tag...)
+	return appendField(out, []byte(reactionID))
+}
+
+// wrappedKeysCanonical serializes the wrapped-key map into a canonical,
+// unambiguous byte string: entries in sorted-username order, each as a
+// length-prefixed username followed by its length-prefixed decoded key bytes
+// (audit F2). Binding the username — not just sorting by it — and
+// length-prefixing both fields means two different maps cannot collide onto the
+// same bytes. Shared by SignDM and SignDMEdit.
 func wrappedKeysCanonical(wrappedKeys map[string]string) []byte {
 	usernames := make([]string, 0, len(wrappedKeys))
 	for u := range wrappedKeys {
@@ -324,18 +386,26 @@ func wrappedKeysCanonical(wrappedKeys map[string]string) []byte {
 		if err != nil {
 			continue
 		}
-		result = append(result, decoded...)
+		result = appendField(result, []byte(u))
+		result = appendField(result, decoded)
 	}
 	return result
 }
 
-// SafetyNumber computes the safety number for two users.
-// SHA256(sort(pubkey_a_bytes, pubkey_b_bytes)) -> 24 digits in six groups of four.
+// SafetyNumber computes the out-of-band key-verification number for two users:
+// SHA256 over their sorted public-key bytes, rendered as 24 decimal digits in
+// six groups of four. Symmetric in the two keys.
+//
+// The 24 digits are a *uniform* reduction of the full 256-bit hash —
+// bigint(hash) mod 10^24 — using all 32 bytes. The previous form reduced each
+// byte with `%100` and summed pairs, which was biased and used only 24 of the
+// 32 hash bytes (audit F3). The mod-10^24 reduction bias here is ~2^-176, i.e.
+// negligible.
 func SafetyNumber(pubKeyA, pubKeyB ed25519.PublicKey) string {
 	a := []byte(pubKeyA)
 	b := []byte(pubKeyB)
 
-	// Sort lexicographically
+	// Sort lexicographically so the number is symmetric in the two keys.
 	if string(a) > string(b) {
 		a, b = b, a
 	}
@@ -343,27 +413,33 @@ func SafetyNumber(pubKeyA, pubKeyB ed25519.PublicKey) string {
 	combined := append(a, b...)
 	hash := sha256.Sum256(combined)
 
-	// Convert to 24 digits (6 groups of 4)
-	digits := ""
-	for i := 0; i < 12; i++ {
-		val := int(hash[i])%100 + int(hash[i+12])%100
-		digits += fmt.Sprintf("%02d", val%100)
-	}
+	// Uniform 24-digit encoding of all 32 hash bytes.
+	n := new(big.Int).SetBytes(hash[:])
+	mod := new(big.Int).Exp(big.NewInt(10), big.NewInt(24), nil) // 10^24
+	digits := fmt.Sprintf("%024d", n.Mod(n, mod))                // exactly 24 digits, zero-padded
 
-	// Format as six groups of four
+	// Format as six groups of four.
 	return fmt.Sprintf("%s %s %s %s %s %s",
 		digits[0:4], digits[4:8], digits[8:12],
 		digits[12:16], digits[16:20], digits[20:24])
 }
 
-// MemberHash computes SHA256(sort(member_usernames)) for epoch rotation verification.
+// MemberHash computes SHA256 over the sorted member usernames for epoch-rotation
+// verification (F7). Each username is length-prefixed (u32_be) before hashing,
+// so the result is unambiguous regardless of username length — two different
+// member sets can never hash alike via boundary re-splitting (audit F2; the old
+// raw concatenation relied on usernames being a fixed-length nanoid). Output:
+// "SHA256:" + hex.
 func MemberHash(members []string) string {
 	sorted := make([]string, len(members))
 	copy(sorted, members)
 	sort.Strings(sorted)
 
 	h := sha256.New()
+	var l [4]byte
 	for _, m := range sorted {
+		binary.BigEndian.PutUint32(l[:], uint32(len(m)))
+		h.Write(l[:])
 		h.Write([]byte(m))
 	}
 	return fmt.Sprintf("SHA256:%x", h.Sum(nil))

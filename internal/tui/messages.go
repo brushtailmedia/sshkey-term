@@ -147,12 +147,13 @@ func (d *DisplayMessage) UserEmojis(user string) []string {
 }
 
 type DisplayAttachment struct {
-	FileID     string
-	Name       string
-	Size       int64
-	Mime       string
-	IsImage    bool
-	DecryptKey []byte // key to decrypt the downloaded file (epoch key for rooms, per-file K_file for DMs)
+	FileID      string
+	Name        string
+	Size        int64
+	Mime        string
+	IsImage     bool
+	DecryptKey  []byte // key to decrypt the downloaded file (epoch key for rooms, per-file K_file for DMs)
+	ContentHash string // F11: E2E-committed hash of the encrypted bytes; verified on download
 }
 
 // MessagesModel manages the message stream.
@@ -597,12 +598,13 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 		for _, a := range s.Attachments {
 			key, _ := base64.StdEncoding.DecodeString(a.DecryptKey)
 			attachments = append(attachments, DisplayAttachment{
-				FileID:     a.FileID,
-				Name:       a.Name,
-				Size:       a.Size,
-				Mime:       a.Mime,
-				IsImage:    isImageMime(a.Mime),
-				DecryptKey: key,
+				FileID:      a.FileID,
+				Name:        a.Name,
+				Size:        a.Size,
+				Mime:        a.Mime,
+				IsImage:     isImageMime(a.Mime),
+				DecryptKey:  key,
+				ContentHash: a.ContentHash, // F11: verified on download
 			})
 		}
 
@@ -900,12 +902,13 @@ func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
 					fileEpoch = msg.Epoch
 				}
 				attachments = append(attachments, DisplayAttachment{
-					FileID:     a.FileID,
-					Name:       a.Name,
-					Size:       a.Size,
-					Mime:       a.Mime,
-					IsImage:    isImageMime(a.Mime),
-					DecryptKey: c.RoomEpochKey(msg.Room, fileEpoch),
+					FileID:      a.FileID,
+					Name:        a.Name,
+					Size:        a.Size,
+					Mime:        a.Mime,
+					IsImage:     isImageMime(a.Mime),
+					DecryptKey:  c.RoomEpochKey(msg.Room, fileEpoch),
+					ContentHash: a.ContentHash, // F11: verified on download
 				})
 			}
 		}
@@ -959,12 +962,13 @@ func (m *MessagesModel) AddGroupMessage(msg protocol.GroupMessage, c *client.Cli
 				// Design A: each attachment carries its own base64 K_file.
 				decKey, _ := base64.StdEncoding.DecodeString(a.FileKey)
 				attachments = append(attachments, DisplayAttachment{
-					FileID:     a.FileID,
-					Name:       a.Name,
-					Size:       a.Size,
-					Mime:       a.Mime,
-					IsImage:    isImageMime(a.Mime),
-					DecryptKey: decKey,
+					FileID:      a.FileID,
+					Name:        a.Name,
+					Size:        a.Size,
+					Mime:        a.Mime,
+					IsImage:     isImageMime(a.Mime),
+					DecryptKey:  decKey,
+					ContentHash: a.ContentHash, // F11: verified on download
 				})
 			}
 		}
@@ -1029,12 +1033,13 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 				// base64-encoded K_file.
 				decKey, _ := base64.StdEncoding.DecodeString(a.FileKey)
 				attachments = append(attachments, DisplayAttachment{
-					FileID:     a.FileID,
-					Name:       a.Name,
-					Size:       a.Size,
-					Mime:       a.Mime,
-					IsImage:    isImageMime(a.Mime),
-					DecryptKey: decKey,
+					FileID:      a.FileID,
+					Name:        a.Name,
+					Size:        a.Size,
+					Mime:        a.Mime,
+					IsImage:     isImageMime(a.Mime),
+					DecryptKey:  decKey,
+					ContentHash: a.ContentHash, // F11: verified on download
 				})
 			}
 		}
@@ -1080,12 +1085,13 @@ func (m *MessagesModel) buildDisplayMsg(msg protocol.Message, c *client.Client) 
 					fileEpoch = msg.Epoch
 				}
 				attachments = append(attachments, DisplayAttachment{
-					FileID:     a.FileID,
-					Name:       a.Name,
-					Size:       a.Size,
-					Mime:       a.Mime,
-					IsImage:    isImageMime(a.Mime),
-					DecryptKey: c.RoomEpochKey(msg.Room, fileEpoch),
+					FileID:      a.FileID,
+					Name:        a.Name,
+					Size:        a.Size,
+					Mime:        a.Mime,
+					IsImage:     isImageMime(a.Mime),
+					DecryptKey:  c.RoomEpochKey(msg.Room, fileEpoch),
+					ContentHash: a.ContentHash, // F11: verified on download
 				})
 			}
 		}
@@ -1125,12 +1131,13 @@ func (m *MessagesModel) buildDisplayGroup(msg protocol.GroupMessage, c *client.C
 			for _, a := range payload.Attachments {
 				decKey, _ := base64.StdEncoding.DecodeString(a.FileKey)
 				attachments = append(attachments, DisplayAttachment{
-					FileID:     a.FileID,
-					Name:       a.Name,
-					Size:       a.Size,
-					Mime:       a.Mime,
-					IsImage:    isImageMime(a.Mime),
-					DecryptKey: decKey,
+					FileID:      a.FileID,
+					Name:        a.Name,
+					Size:        a.Size,
+					Mime:        a.Mime,
+					IsImage:     isImageMime(a.Mime),
+					DecryptKey:  decKey,
+					ContentHash: a.ContentHash, // F11: verified on download
 				})
 			}
 		}
@@ -1175,12 +1182,13 @@ func (m *MessagesModel) buildDisplayDM(msg protocol.DM, c *client.Client) Displa
 			for _, a := range payload.Attachments {
 				decKey, _ := base64.StdEncoding.DecodeString(a.FileKey)
 				attachments = append(attachments, DisplayAttachment{
-					FileID:     a.FileID,
-					Name:       a.Name,
-					Size:       a.Size,
-					Mime:       a.Mime,
-					IsImage:    isImageMime(a.Mime),
-					DecryptKey: decKey,
+					FileID:      a.FileID,
+					Name:        a.Name,
+					Size:        a.Size,
+					Mime:        a.Mime,
+					IsImage:     isImageMime(a.Mime),
+					DecryptKey:  decKey,
+					ContentHash: a.ContentHash, // F11: verified on download
 				})
 			}
 		}
@@ -1416,6 +1424,14 @@ func (m *MessagesModel) AddReactionDecrypted(r protocol.Reaction, c *client.Clie
 		return
 	}
 
+	// F6: verify the reaction author's signature before applying it in-memory,
+	// matching the durable storeReaction gate. The two receive paths apply the
+	// reaction independently, so without this the UI would briefly show a
+	// forged/misattributed reaction even though the DB write was dropped.
+	if !c.VerifyReactionAuthor(r) {
+		return
+	}
+
 	var emoji string
 
 	if r.Room != "" {
@@ -1588,7 +1604,7 @@ func (m *MessagesModel) SelectedMessage() *DisplayMessage {
 
 // MessageAction is returned when the user performs an action on a selected message.
 type MessageAction struct {
-	Action string // "reply", "delete", "pin", "copy", "react", "unreact", ...
+	Action string // "reply", "delete", "pin", "unpin", "copy", "react", "unreact", ...
 	Msg    DisplayMessage
 	Data   string // optional payload (e.g., emoji for unreact)
 }
@@ -1743,12 +1759,10 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 				return MessageAction{Action: "react", Msg: *sel}
 			}
 		}
-	case "u": // unreact — remove one of current user's reactions
-		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
+	case "u": // unpin selected room message if it is currently pinned
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted && m.room != "" {
 			return m, func() tea.Msg {
-				// Empty Data means "pick first emoji user has reacted with";
-				// app handler resolves to the specific reaction_id.
-				return MessageAction{Action: "unreact", Msg: *sel}
+				return MessageAction{Action: "unpin", Msg: *sel}
 			}
 		}
 	case "g": // go to parent (jump to message this is replying to)

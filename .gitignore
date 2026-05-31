@@ -46,3 +46,4 @@ Thumbs.db
 
 # Local planning / scratch docs (not for public repo)
 /docs/planning/*
+/docs/planning/*/*

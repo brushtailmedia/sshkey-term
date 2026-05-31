@@ -749,7 +749,8 @@ type Reaction struct {
 type Unreact struct {
 	Type       string `json:"type"`
 	ReactionID string `json:"reaction_id"`
-	CorrID     string `json:"corr_id,omitempty"` // Phase 17c
+	Signature  string `json:"signature,omitempty"` // F6: SignUnreact over reaction_id
+	CorrID     string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type ReactionRemoved struct {
@@ -760,7 +761,8 @@ type ReactionRemoved struct {
 	Group      string `json:"group,omitempty"`
 	DM         string `json:"dm,omitempty"`
 	User       string `json:"user"`
-	CorrID     string `json:"corr_id,omitempty"` // Phase 17c
+	Signature  string `json:"signature,omitempty"` // F6: relayed un-react author signature
+	CorrID     string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 // Pins
@@ -1239,6 +1241,14 @@ type Attachment struct {
 	ThumbnailID string `json:"thumbnail_id,omitempty"`
 	FileEpoch   int64  `json:"file_epoch,omitempty"` // rooms: which epoch key decrypts this file
 	FileKey     string `json:"file_key,omitempty"`   // DMs: base64 per-file symmetric key K_file
+	// ContentHash is the BLAKE2b hash of the *encrypted* file bytes, committed
+	// inside this E2E-encrypted + signed metadata (F11). The recipient verifies
+	// the downloaded blob against it, so a malicious server can't substitute
+	// another same-room/same-epoch file's ciphertext (which would otherwise
+	// decrypt cleanly under the shared epoch key). The same hash is sent to the
+	// server in upload_start too, but that copy is relayed (swappable); this one
+	// is sender-authenticated by the message signature.
+	ContentHash string `json:"content_hash,omitempty"`
 }
 
 type Preview struct {

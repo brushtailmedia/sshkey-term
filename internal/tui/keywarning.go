@@ -6,17 +6,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// KeyWarningModel shows when a user's key has changed (potential MITM).
+// KeyWarningModel shows when an account's immutable key has changed.
 type KeyWarningModel struct {
 	visible        bool
 	user           string
 	oldFingerprint string
 	newFingerprint string
-}
-
-// KeyWarningAcceptMsg is sent when the user accepts the new key.
-type KeyWarningAcceptMsg struct {
-	User string
 }
 
 // KeyWarningDisconnectMsg is sent when the user chooses to disconnect.
@@ -39,12 +34,6 @@ func (k *KeyWarningModel) IsVisible() bool {
 
 func (k KeyWarningModel) Update(msg tea.KeyMsg) (KeyWarningModel, tea.Cmd) {
 	switch msg.String() {
-	case "a", "enter":
-		user := k.user
-		k.Hide()
-		return k, func() tea.Msg {
-			return KeyWarningAcceptMsg{User: user}
-		}
 	case "d", "esc":
 		k.Hide()
 		return k, func() tea.Msg {
@@ -68,20 +57,17 @@ func (k KeyWarningModel) View(width int) string {
 	// does not trigger this modal). So a fingerprint change for an
 	// existing user ID is always an anomaly. See PROTOCOL.md "Keys
 	// as Identities" for the invariant.
-	b.WriteString(errorStyle.Render(" ⚠ Key Changed"))
+	b.WriteString(errorStyle.Render(" ⚠ Account Key Changed"))
 	b.WriteString("\n\n")
-	b.WriteString("  " + k.user + "'s identity key changed.\n\n")
-	b.WriteString("  Keys do not rotate in this app. A change\n")
-	b.WriteString("  here indicates a compromised server, a\n")
-	b.WriteString("  server bug, or local DB tampering.\n\n")
-	b.WriteString("  If " + k.user + " is getting a new account (e.g.\n")
-	b.WriteString("  after device loss), the admin retires the\n")
-	b.WriteString("  old account and approves a new one with a\n")
-	b.WriteString("  different user ID — that flow does NOT\n")
-	b.WriteString("  trigger this warning.\n\n")
+	b.WriteString("  Account key changed for " + k.user + ".\n")
+	b.WriteString("  Account keys are immutable; this may indicate\n")
+	b.WriteString("  server/state corruption or compromise.\n\n")
+	b.WriteString("  The changed key was not accepted. If this user\n")
+	b.WriteString("  needs a new key, retire the old account and\n")
+	b.WriteString("  approve a new account.\n\n")
 	b.WriteString("  Old: " + helpDescStyle.Render(k.oldFingerprint) + "\n")
 	b.WriteString("  New: " + helpDescStyle.Render(k.newFingerprint) + "\n\n")
-	b.WriteString("  [a] Accept new key  [d] Disconnect\n")
+	b.WriteString("  [d] Disconnect  [Esc] Disconnect\n")
 
 	return dialogStyle.Width(width - 4).Render(b.String())
 }

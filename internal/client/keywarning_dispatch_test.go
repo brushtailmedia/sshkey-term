@@ -10,7 +10,8 @@ package client
 //   - On subsequent encounters with the SAME fingerprint, StoreProfile
 //     MUST NOT fire OnKeyWarning. No change → no event.
 //   - On a detected fingerprint mismatch for an existing user ID,
-//     StoreProfile MUST fire OnKeyWarning with (user, old, new).
+//     StoreProfile MUST fire OnKeyWarning with (user, old, new), keep
+//     the old pin, and reject the changed key.
 //     Under the no-rotation protocol invariant this is always an
 //     anomaly (see PROTOCOL.md "Keys as Identities"); the callback
 //     drives the TUI's blocking KeyWarningModel.
@@ -20,6 +21,7 @@ package client
 // needing a full tea.Program harness.
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -128,12 +130,15 @@ func TestStoreProfile_FingerprintMismatchFiresWarning(t *testing.T) {
 	})
 
 	// Second profile with a DIFFERENT fingerprint for the same user
-	// ID. Under no-rotation this is anomalous; the callback MUST fire.
-	c.StoreProfile(&protocol.Profile{
+	// ID. Under no-rotation this is anomalous; the callback MUST fire
+	// and the changed key MUST be rejected.
+	if accepted := c.StoreProfile(&protocol.Profile{
 		User:           "usr_alice",
 		KeyFingerprint: "SHA256:def",
 		PubKey:         "ssh-ed25519 B",
-	})
+	}); accepted {
+		t.Fatal("StoreProfile accepted a changed immutable account key")
+	}
 
 	if fireCount != 1 {
 		t.Fatalf("OnKeyWarning fireCount = %d, want 1", fireCount)
@@ -148,14 +153,13 @@ func TestStoreProfile_FingerprintMismatchFiresWarning(t *testing.T) {
 		t.Errorf("new fingerprint = %q, want SHA256:def", gotNew)
 	}
 
-	// Post-fix state: schema auto-clears verified; the new fingerprint
-	// is pinned. Both the ClearVerified call in StoreProfile AND the
-	// schema ON-CONFLICT-CASE are attack-path code (see
-	// audit_v0.2.0.md#F32); test the observable result to guard
-	// against stripping either.
+	// Post-fix state: the old fingerprint remains pinned, and the
+	// verified badge is cleared so the trust disturbance is visible.
+	// Account keys are immutable; a changed key is never accepted in
+	// place.
 	fp, verified, _ := c.store.GetPinnedKey("usr_alice")
-	if fp != "SHA256:def" {
-		t.Errorf("post-warning pin = %q, want SHA256:def", fp)
+	if fp != "SHA256:abc" {
+		t.Errorf("post-warning pin = %q, want original SHA256:abc", fp)
 	}
 	if verified {
 		t.Error("post-warning verified flag should be cleared")
@@ -177,6 +181,59 @@ func TestStoreProfile_NilCallbackDoesNotPanic(t *testing.T) {
 		KeyFingerprint: "SHA256:def",
 	})
 	// If we got here without panicking, the nil-callback path works.
+}
+
+func TestHandleInternal_ProfileMismatchDoesNotOverwriteLiveCache(t *testing.T) {
+	c := newKeyWarningTestClient(t)
+
+	// Seed the normal first profile path. This stores the pin and warms
+	// the live cache with the trusted account key.
+	c.handleInternal("profile", json.RawMessage(`{
+		"type":"profile",
+		"user":"usr_alice",
+		"display_name":"Alice",
+		"key_fingerprint":"SHA256:abc",
+		"pubkey":"ssh-ed25519 A"
+	}`))
+
+	before := c.Profile("usr_alice")
+	if before == nil {
+		t.Fatal("initial profile was not cached")
+	}
+	if before.KeyFingerprint != "SHA256:abc" || before.DisplayName != "Alice" {
+		t.Fatalf("initial profile = %+v, want Alice/SHA256:abc", before)
+	}
+
+	var warned bool
+	c.cfg.OnKeyWarning = func(user, oldFP, newFP string) {
+		warned = true
+	}
+
+	// A changed key for the same immutable account must be flagged and
+	// rejected before it can become the verification key used by
+	// pubKeyForUser.
+	c.handleInternal("profile", json.RawMessage(`{
+		"type":"profile",
+		"user":"usr_alice",
+		"display_name":"Mallory",
+		"key_fingerprint":"SHA256:def",
+		"pubkey":"ssh-ed25519 B"
+	}`))
+
+	if !warned {
+		t.Fatal("profile key mismatch did not fire OnKeyWarning")
+	}
+	after := c.Profile("usr_alice")
+	if after == nil {
+		t.Fatal("trusted profile disappeared")
+	}
+	if after.KeyFingerprint != "SHA256:abc" || after.DisplayName != "Alice" || after.PubKey != "ssh-ed25519 A" {
+		t.Fatalf("changed-key profile overwrote live cache: %+v", after)
+	}
+	fp, _, pub := c.store.GetPinnedKeyFull("usr_alice")
+	if fp != "SHA256:abc" || pub != "ssh-ed25519 A" {
+		t.Fatalf("changed-key profile overwrote pin: fp=%q pub=%q", fp, pub)
+	}
 }
 
 func TestStoreProfile_VerifiedFlagSurvivesSameFingerprint(t *testing.T) {

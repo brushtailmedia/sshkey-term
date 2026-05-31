@@ -532,6 +532,9 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 	case "profile":
 		var p protocol.Profile
 		if err := json.Unmarshal(raw, &p); err == nil {
+			if !c.StoreProfile(&p) {
+				return
+			}
 			c.mu.Lock()
 			c.profiles[p.User] = &p
 			if p.Retired {
@@ -540,7 +543,6 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 				delete(c.retired, p.User)
 			}
 			c.mu.Unlock()
-			c.StoreProfile(&p)
 		}
 	case "epoch_key":
 		var ek protocol.EpochKey
@@ -1299,8 +1301,10 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 	case "reaction":
 		c.storeReaction(raw)
 	case "reaction_removed":
+		// F6: verify-or-drop — only an un-react genuinely signed by the claimed
+		// actor (bound to this reaction_id) may delete the stored reaction.
 		var rm protocol.ReactionRemoved
-		if err := json.Unmarshal(raw, &rm); err == nil && c.store != nil {
+		if err := json.Unmarshal(raw, &rm); err == nil && c.store != nil && c.VerifyUnreactAuthor(rm) {
 			c.store.DeleteReaction(rm.ReactionID)
 		}
 	case "deleted":

@@ -11,11 +11,12 @@ import (
 // Includes the decrypt key so files can be downloaded and decrypted from
 // DB-loaded messages without re-deriving keys.
 type StoredAttachment struct {
-	FileID     string `json:"file_id"`
-	Name       string `json:"name"`
-	Size       int64  `json:"size"`
-	Mime       string `json:"mime"`
-	DecryptKey string `json:"decrypt_key"` // base64-encoded symmetric key
+	FileID      string `json:"file_id"`
+	Name        string `json:"name"`
+	Size        int64  `json:"size"`
+	Mime        string `json:"mime"`
+	DecryptKey  string `json:"decrypt_key"`            // base64-encoded symmetric key
+	ContentHash string `json:"content_hash,omitempty"` // F11: E2E-committed hash of the encrypted bytes; verified on download
 }
 
 // StoredMessage represents a message in the local DB.

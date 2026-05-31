@@ -208,3 +208,47 @@ func TestEpochConfirmed_RotatorAdvances(t *testing.T) {
 		t.Errorf("rotator should advance currentEpoch on its own epoch_confirmed; got %d", h.alice.CurrentEpoch(evRoom))
 	}
 }
+
+// Sync/history epoch keys are intentionally skip-verified because they are only
+// for old-message decryption. They must not occupy the normal current-epoch key
+// cache or DB slot ahead of a verified epoch_key, otherwise a malicious server
+// can deliver the current epoch through sync/history and decrypt current room
+// traffic without the F7 member-attestation path ever accepting it.
+func TestSyncHistoryEpochKey_DoesNotOccupyCurrentEpochSlot(t *testing.T) {
+	h := newEditVerifyHarness(t)
+
+	epochKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("gen epoch key: %v", err)
+	}
+	alicePub := h.alice.privKey.Public().(ed25519.PublicKey)
+	wrapped, err := crypto.WrapKey(epochKey, alicePub)
+	if err != nil {
+		t.Fatalf("wrap: %v", err)
+	}
+
+	// Simulate SyncEpochKey / history_result delivery for the *current* epoch.
+	// This path skips attestation by design, so it must stay decryption-only and
+	// unavailable to the normal current-epoch message path until a verified
+	// epoch_key arrives.
+	h.alice.storeEpochKeyHistorical(evRoom, evEpoch, wrapped)
+
+	if got := h.alice.CurrentEpoch(evRoom); got != 0 {
+		t.Errorf("sync/history key advanced currentEpoch = %d, want 0", got)
+	}
+	if got := h.alice.EpochKeyBase64(evRoom, evEpoch); got != "" {
+		t.Errorf("sync/history key occupied normal in-memory epoch slot; got %q", got)
+	}
+	if dbKey, err := h.alice.store.GetEpochKey(evRoom, evEpoch); err != nil {
+		t.Fatalf("GetEpochKey: %v", err)
+	} else if dbKey != nil {
+		t.Errorf("sync/history key occupied normal persisted epoch slot; got %d bytes", len(dbKey))
+	}
+
+	msg := h.buildSignedRoomMessage(t, "msg_sync_history_current_epoch", evRoom, evEpoch, epochKey, "shadow-readable")
+	raw, _ := json.Marshal(msg)
+	h.alice.storeRoomMessage(raw, false)
+	if m := h.storedMessage(t, msg.ID); m != nil {
+		t.Errorf("current-epoch room message decrypted with a sync/history-only key; body=%q", m.Body)
+	}
+}

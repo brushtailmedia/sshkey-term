@@ -61,7 +61,7 @@ func (c *ContextMenuModel) Show(msg DisplayMessage, x, y int, isOwnMessage, isAd
 			}
 		}
 		if isPinned {
-			c.items = append(c.items, ContextMenuItem{Label: "Unpin", Action: "pin"})
+			c.items = append(c.items, ContextMenuItem{Label: "Unpin", Action: "unpin"})
 		} else {
 			c.items = append(c.items, ContextMenuItem{Label: "Pin to room", Action: "pin"})
 		}
