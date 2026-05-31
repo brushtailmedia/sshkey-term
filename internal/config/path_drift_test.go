@@ -72,7 +72,7 @@ func TestPathDrift_NoUnmanagedJoins(t *testing.T) {
 		// keyselector's ~/.ssh/ scanner input — external read source.
 		"internal/tui/keyselector.go": {64: "external ~/.ssh/ scanner input"},
 		// Reverse-tilde display normalization (single-site UI helper).
-		"internal/tui/addserver.go": {878: "reverse-tilde display normalization"},
+		"internal/tui/addserver.go": {908: "reverse-tilde display normalization"},
 	}
 
 	root := repoRootForTest(t)

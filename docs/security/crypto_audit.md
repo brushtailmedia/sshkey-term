@@ -197,16 +197,27 @@ and/or use more digits.
 
 ## F4 — TOFU pin overwritten to the changed key before the user decides (LOW)
 
-On a detected key change, `StoreProfile` (persist.go:665) warns
-(`OnKeyWarning`, which is **async** — pushes to a channel and returns) and
-`ClearVerified`, then **unconditionally** `PinKey(new)` (persist.go:689). The
-trust anchor therefore moves to the new (possibly attacker) key *immediately*,
-ahead of the Accept/Disconnect decision — and because edit-verify resolves the
-key via the pin (`pubKeyForUser`), the attacker's *edits* would then verify. A
-stricter TOFU keeps the **old** pin until explicit acceptance. Mitigated by the
-loud blocking modal + `ClearVerified` + the "no legitimate rotation" invariant
-(any change is anomalous), but the pin-before-decision weakens the warning's
-value. **Recommendation:** do not overwrite the pin on a detected change until
+On a detected key change, `StoreProfile` (persist.go:755) warns
+(`OnKeyWarning` at :775, which is **async** — pushes to a channel and returns)
+and `ClearVerified` (:767), then **unconditionally** `PinKey(new)`
+(persist.go:779). The trust anchor therefore moves to the new (possibly attacker)
+key *immediately*, ahead of the Accept/Disconnect decision — and because the
+receive-side verify paths resolve the key via `pubKeyForUser`, the attacker's
+*messages and edits* would then verify. A stricter TOFU keeps the **old** pin
+until explicit acceptance.
+
+The exposure actually opens **earlier than the pin**: the `profile` handler
+overwrites the in-memory profile cache (`c.profiles[user] = &p`, `client.go:536`)
+*before* it even calls `StoreProfile` (`:543`), and `pubKeyForUser` consults that
+live cache **ahead of** the pinned-key fallback — so a forged-key `profile` frame
+makes forged messages verify the instant it is processed, independent of (and
+prior to) the durable pin overwrite. The pin overwrite is the offline/persistent
+half of the same exposure.
+
+Mitigated by the loud blocking modal + `ClearVerified` + the "no legitimate
+rotation" invariant (any change is anomalous), but the pin-before-decision (and
+cache-before-decision) weakens the warning's value. **Recommendation:** do not
+overwrite the pin — or the cached verification key — on a detected change until
 the user accepts.
 
 ## F5 — `Encrypt`/`Decrypt` don't assert a 256-bit key (INFO)
@@ -309,10 +320,13 @@ uploads all encrypt under the **same long-lived epoch key** (`send.go:90,487`,
 `edit.go:83`, `filetransfer.go:111` via `UploadFile`), so all room activity in an
 epoch accumulates random nonces under one key. A collision (≈50% near 2³²) would
 leak a plaintext-XOR and the GCM auth key. Practically unreachable — epochs
-rotate on every membership change and rooms never approach billions of messages
-per epoch — but a counter-based nonce (or a documented per-epoch cap) would
-remove the bound. **DMs/group-DMs are immune** (fresh per-message key → one nonce
-per key).
+rotate on every membership change **and on a server-enforced cadence (every 100
+messages or 1 hour — `sshkey-chat/internal/server/epoch.go:36-37`,
+`maxMessages`/`maxDuration`; the client only reacts to the server's
+`epoch_trigger`, so the threshold lives server-side, not here)**, keeping per-key
+nonce counts many orders of magnitude below 2³² — but a counter-based nonce (or a
+documented per-epoch cap) would remove the bound. **DMs/group-DMs are immune**
+(fresh per-message key → one nonce per key).
 
 ## F10 — Unencrypted key-generation branch (INFO — ✅ resolved 2026-05-31)
 
