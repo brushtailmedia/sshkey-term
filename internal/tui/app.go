@@ -2262,6 +2262,8 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.client != nil {
 				a.verify.Show(msg.User, a.client)
 			}
+		case "unverify":
+			a.unverifyConfirm.Show(msg.User, a.resolveDisplayName(msg.User))
 		case "profile":
 			// Open the per-user profile panel — full detail (display
 			// name, ID, fingerprint, public key, presence, verified

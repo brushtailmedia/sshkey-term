@@ -111,6 +111,81 @@ func TestInfoPanel_UserProfileScrollKeys(t *testing.T) {
 	}
 }
 
+func TestInfoPanel_UserProfileVerifyFooterMatchesTrustState(t *testing.T) {
+	verified := InfoPanelModel{
+		visible:      true,
+		isUser:       true,
+		userID:       "usr_alice",
+		userDisplay:  "Alice",
+		userVerified: true,
+	}
+	view := verified.View(80)
+	if !strings.Contains(view, "u=unverify") {
+		t.Fatalf("verified user footer should offer unverify, got:\n%s", view)
+	}
+	if strings.Contains(view, "v=verify") {
+		t.Fatalf("verified user footer should not offer verify, got:\n%s", view)
+	}
+
+	unverified := InfoPanelModel{
+		visible:     true,
+		isUser:      true,
+		userID:      "usr_bob",
+		userDisplay: "Bob",
+	}
+	view = unverified.View(80)
+	if !strings.Contains(view, "v=verify") {
+		t.Fatalf("unverified user footer should offer verify, got:\n%s", view)
+	}
+	if strings.Contains(view, "u=unverify") {
+		t.Fatalf("unverified user footer should not offer unverify, got:\n%s", view)
+	}
+}
+
+func TestInfoPanel_UserProfileVerifyKeysMatchTrustState(t *testing.T) {
+	verified := InfoPanelModel{
+		visible:      true,
+		isUser:       true,
+		userID:       "usr_alice",
+		userDisplay:  "Alice",
+		userVerified: true,
+	}
+
+	_, cmd := verified.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if cmd != nil {
+		t.Fatal("v on an already-verified profile should no-op")
+	}
+
+	_, cmd = verified.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if cmd == nil {
+		t.Fatal("u on a verified profile should emit unverify action")
+	}
+	msg, ok := cmd().(MemberActionMsg)
+	if !ok || msg.Action != "unverify" || msg.User != "usr_alice" {
+		t.Fatalf("u emitted %#v, want MemberActionMsg{unverify, usr_alice}", msg)
+	}
+
+	unverified := InfoPanelModel{
+		visible:     true,
+		isUser:      true,
+		userID:      "usr_bob",
+		userDisplay: "Bob",
+	}
+	_, cmd = unverified.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if cmd == nil {
+		t.Fatal("v on an unverified profile should emit verify action")
+	}
+	msg, ok = cmd().(MemberActionMsg)
+	if !ok || msg.Action != "verify" || msg.User != "usr_bob" {
+		t.Fatalf("v emitted %#v, want MemberActionMsg{verify, usr_bob}", msg)
+	}
+
+	_, cmd = unverified.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	if cmd != nil {
+		t.Fatal("u on an unverified profile should no-op")
+	}
+}
+
 func TestInfoPanel_ContextSelectionAutoScroll(t *testing.T) {
 	members := make([]memberInfo, 0, 40)
 	for n := 0; n < 40; n++ {

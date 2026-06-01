@@ -92,7 +92,7 @@ type MuteToggleMsg struct {
 
 // MemberActionMsg is sent when the user selects a member from the info panel.
 type MemberActionMsg struct {
-	Action string // "message", "create_group", "verify", "profile"
+	Action string // "message", "create_group", "verify", "unverify", "profile"
 	User   string
 }
 
@@ -661,13 +661,22 @@ func (i InfoPanelModel) Update(msg tea.KeyMsg) (InfoPanelModel, tea.Cmd) {
 				return MemberActionMsg{Action: "message", User: user}
 			}
 		case "v":
-			if i.userIsSelf || i.userRetired {
+			if i.userIsSelf || i.userRetired || i.userVerified {
 				return i, nil
 			}
 			user := i.userID
 			i.Hide()
 			return i, func() tea.Msg {
 				return MemberActionMsg{Action: "verify", User: user}
+			}
+		case "u":
+			if i.userIsSelf || i.userRetired || !i.userVerified {
+				return i, nil
+			}
+			user := i.userID
+			i.Hide()
+			return i, func() tea.Msg {
+				return MemberActionMsg{Action: "unverify", User: user}
 			}
 		case "c":
 			// Copy the public key to the clipboard (explicit; auto-copy on
@@ -1160,7 +1169,11 @@ func (i InfoPanelModel) renderUserContent(width int) []string {
 		actions = append(actions, "m=message")
 	}
 	if canVerify {
-		actions = append(actions, "v=verify")
+		if i.userVerified {
+			actions = append(actions, "u=unverify")
+		} else {
+			actions = append(actions, "v=verify")
+		}
 	}
 	if i.userPubKey != "" {
 		actions = append(actions, "c=copy key")
