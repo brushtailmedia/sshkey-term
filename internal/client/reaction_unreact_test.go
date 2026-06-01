@@ -36,9 +36,9 @@ func (h *editVerifyHarness) seedReaction(t *testing.T, reactionID, msgID string)
 }
 
 // buildSignedReactionRemoved mints a `reaction_removed` broadcast with a genuine
-// Bob-authored SignUnreact signature over the reaction_id.
+// Bob-authored SignUnreact signature binding (room, room-id, reaction_id) (v2).
 func (h *editVerifyHarness) buildSignedReactionRemoved(reactionID, msgID, room string) protocol.ReactionRemoved {
-	sig := crypto.SignUnreact(h.bobPriv, reactionID)
+	sig := crypto.SignUnreact(h.bobPriv, "room", room, reactionID)
 	return protocol.ReactionRemoved{
 		Type:       "reaction_removed",
 		ReactionID: reactionID,

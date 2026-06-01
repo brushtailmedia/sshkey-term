@@ -3213,7 +3213,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.focus = FocusInput
 		case "delete":
 			if a.client != nil && (msg.Msg.FromID == a.client.UserID() || a.client.IsAdmin()) {
-				a.client.SendDelete(msg.Msg.ID)
+				a.client.SendDelete(msg.Msg.ID, msg.Msg.Room, msg.Msg.Group, msg.Msg.DM)
 			}
 		case "pin":
 			if a.client != nil && a.messages.room != "" {
@@ -4589,7 +4589,7 @@ func (a *App) sendUnreactForMessage(msg DisplayMessage, emoji string) {
 		a.statusBar.SetError("Reaction already removed")
 		return
 	}
-	if err := a.client.SendUnreact(ids[0]); err != nil {
+	if err := a.client.SendUnreact(ids[0], msg.Room, msg.Group, msg.DM); err != nil {
 		a.statusBar.SetError("Unreact failed: " + err.Error())
 	}
 }
@@ -7013,7 +7013,11 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 	case "deleted":
 		var m protocol.Deleted
 		json.Unmarshal(msg.Raw, &m)
-		a.messages.MarkDeleted(m.ID, m.DeletedBy)
+		// F6 Gate #3 — verify-or-drop the live TUI tombstone (apply-when-no-
+		// client keeps the test/degraded path working).
+		if a.client == nil || a.client.VerifyDeleteAuthor(m) {
+			a.messages.MarkDeleted(m.ID, m.DeletedBy)
+		}
 	case "edited":
 		// Phase 15: room message edit broadcast. The client layer has
 		// already decrypted and persisted the new body + edited_at to
@@ -7812,7 +7816,8 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 				// reactions. Durability of these rows is handled in the client
 				// layer (storeCatchupTombstone), so a reload shows them too.
 				var d protocol.Deleted
-				if json.Unmarshal(raw, &d) == nil {
+				// F6 Gate #4 — verify-or-drop the history_result TUI tombstone.
+				if json.Unmarshal(raw, &d) == nil && (a.client == nil || a.client.VerifyDeleteAuthor(d)) {
 					histMsgs = append(histMsgs, DisplayMessage{
 						ID:        d.ID,
 						TS:        d.TS,

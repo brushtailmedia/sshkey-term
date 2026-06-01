@@ -107,15 +107,64 @@ func (c *Client) VerifyReactionAuthor(r protocol.Reaction) bool {
 // paths — durable (client.go) and the TUI (app.go) — since each removes the
 // reaction independently.
 func (c *Client) VerifyUnreactAuthor(rm protocol.ReactionRemoved) bool {
+	kind, contextID, ok := exactlyOneContext(rm.Room, rm.Group, rm.DM)
+	if !ok {
+		return false
+	}
 	pub := c.pubKeyForUser(rm.User)
 	if pub == nil {
 		return false
 	}
 	sig, err := base64.StdEncoding.DecodeString(rm.Signature)
-	if err != nil {
+	if err != nil || len(sig) != ed25519.SignatureSize {
 		return false
 	}
-	return crypto.VerifyUnreact(pub, rm.ReactionID, sig)
+	return crypto.VerifyUnreact(pub, kind, contextID, rm.ReactionID, sig)
+}
+
+// exactlyOneContext validates that exactly one of room/group/dm is set and
+// returns its (kind, contextID). ok=false otherwise. Shared validate-and-derive
+// for the F6 delete:v1 context binding (SendDelete + VerifyDeleteAuthor).
+func exactlyOneContext(room, group, dm string) (kind, contextID string, ok bool) {
+	n := 0
+	if room != "" {
+		n++
+		kind, contextID = "room", room
+	}
+	if group != "" {
+		n++
+		kind, contextID = "group", group
+	}
+	if dm != "" {
+		n++
+		kind, contextID = "dm", dm
+	}
+	return kind, contextID, n == 1
+}
+
+// VerifyDeleteAuthor verifies the Ed25519 signature on an inbound delete
+// tombstone against the claimed deleter's pinned key (audit F6). The actor
+// (d.DeletedBy) is bound by verifying against pubKeyForUser(d.DeletedBy); the
+// signature binds (kind, contextID, msgID), so a malicious relay can neither
+// forge a delete attributed to another user nor replay a genuine one onto a
+// different message or context. Returns false (caller must drop) unless exactly
+// one context is set, the sender key resolves, the signature decodes to the
+// right length, and it verifies. Called on all four receive paths (live +
+// catch-up, durable + TUI), mirroring VerifyUnreactAuthor.
+func (c *Client) VerifyDeleteAuthor(d protocol.Deleted) bool {
+	kind, contextID, ok := exactlyOneContext(d.Room, d.Group, d.DM)
+	if !ok {
+		return false
+	}
+	pub := c.pubKeyForUser(d.DeletedBy)
+	if pub == nil {
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(d.Signature)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	return crypto.VerifyDelete(pub, kind, contextID, d.ID, sig)
 }
 
 // storeRoomMessage decrypts and stores a LIVE room message in the local DB.
@@ -884,6 +933,11 @@ func (c *Client) storeCatchupTombstone(raw json.RawMessage) {
 	var d protocol.Deleted
 	if err := json.Unmarshal(raw, &d); err != nil {
 		c.logger.Error("catchup tombstone unmarshal", "error", err)
+		return
+	}
+	// F6 Gate #2 — verify-or-drop the catch-up tombstone (forged author or
+	// wrong-context tombstones never reach the durable store).
+	if !c.VerifyDeleteAuthor(d) {
 		return
 	}
 	fileIDs, err := c.store.UpsertDeletedMessage(d.ID, d.DeletedBy, d.TS, d.ServerOrder, d.Room, d.Group, d.DM)

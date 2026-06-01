@@ -3,13 +3,14 @@
 Code-level review of the term client's end-to-end cryptography and, crucially,
 its **enforcement**. Date: 2026-05-30.
 
-> **Status: complete; implementation status refreshed 2026-05-31.** 12 findings
+> **Status: complete; implementation status refreshed 2026-06-01.** 12 findings
 > (F1–F12): **four HIGH** (F1, F6, F7, F12), one MEDIUM (F11), the rest
-> LOW/INFO. Every finding is fixed/resolved/documented; **F6 is partially
-> resolved** — its **reaction** and **un-react** legs are now authenticated
-> (verify-or-drop), message **delete** is specced and pending
-> (`docs/planning/open/f6-delete-authentication.md`), and **pin/unpin** are
-> accepted-by-design (low-stakes, ephemeral, never admin-gated — see §F6). The
+> LOW/INFO. **Every finding is now fixed/resolved/documented** — the 2026-06-01
+> close of F6's last open leg (message **delete**) leaves no authenticity gap:
+> **reaction**, **un-react** (now context-bound `unreact:v2`), and **delete**
+> (signed `delete:v1`, verify-or-drop on all four receive paths) are authenticated,
+> and **pin/unpin** are accepted-by-design (low-stakes, ephemeral, never
+> admin-gated — see §F6). The
 > cryptographic primitives are sound; the original gaps were missing receive-side
 > verification, one path-traversal in the file-cache write, and several
 > defense-in-depth/UX inconsistencies. See the Bottom line and Recommended
@@ -36,7 +37,7 @@ its **enforcement**. Date: 2026-05-30.
 | ID | Severity | Title |
 |----|----------|-------|
 | F1 | **HIGH** | Normal messages signed on send but never verified on receive (impersonation in rooms/group-DMs) — *✅ fixed 2026-05-30 (verify-or-drop on room/group/DM receipt)* |
-| F6 | **HIGH** | Deletes / reactions / un-reacts / pins are not authenticated on receipt (server can forge + misattribute) — *◑ partially resolved 2026-05-31: **reactions** + **un-react** authenticated (verify-or-drop, cross-repo); **delete** specced + pending (`f6-delete-authentication.md`); **pin/unpin** accepted-by-design (low-stakes, ephemeral, never admin-gated)* |
+| F6 | **HIGH** | Deletes / reactions / un-reacts / pins are not authenticated on receipt (server can forge + misattribute) — *✅ resolved 2026-06-01: **delete** authenticated (signed `delete:v1`, verify-or-drop on all four receive paths, cross-repo); **reactions** + **un-react** (now context-bound `unreact:v2`) authenticated; **pin/unpin** accepted-by-design (low-stakes, ephemeral, never admin-gated)* |
 | F7 | **HIGH** (design-dependent) | Room epoch-key recipients are the server's trigger list; `MemberHash` never verified → a malicious server can add an eavesdropper to a room — *✅ fixed 2026-05-31 (signed member attestation + verify-or-fail-closed, cross-repo)* |
 | F12 | **HIGH** | Path traversal via unsanitized `fileID` in the download cache write → arbitrary-path file write — *✅ fixed 2026-05-30 (write/delete sites); read/render cache paths closed 2026-05-31 → `config.ValidFileID` now gates every fileID→path site* |
 | F11 | MEDIUM | File-download integrity uses a server-provided hash; room files are substitutable — *✅ resolved 2026-05-31 (option (i): E2E-committed `ContentHash` in the signed Attachment, verified on download)* |
@@ -54,15 +55,15 @@ The cryptographic **primitives are implemented correctly** — sound AEAD / ECIE
 / Ed25519 / HKDF construction, `crypto/rand` everywhere (zero `math/rand` in the
 tree), correct Ed25519↔X25519 conversions, passphrase-encrypted keys at `0600`,
 whole-DB SQLCipher at rest, no hardcoded secrets. **The main gap was enforcement
-on the receive side**, and it is now **mostly closed**: message **edits**,
+on the receive side**, and it is now **closed**: message **edits**,
 **normal messages** (room/group/DM — F1, fixed), room member attestations (F7,
 fixed), and file **content-hashes** (F11, fixed) are verified-or-dropped. F6 is
-now **partially closed**: **reactions** and **un-reacts** are verified-or-dropped
-too (2026-05-31). Still on the server's word: message **deletes** (specced +
-pending — `docs/planning/open/f6-delete-authentication.md`); **pins/unpins** are
-accepted unauthenticated **by design** (low-stakes, ephemeral, never
-admin-gated — §F6). Against the project's own "untrusted server" threat model,
-that currently means:
+now **closed too**: **reactions**, **un-reacts** (context-bound `unreact:v2`), and
+message **deletes** (signed `delete:v1`, verify-or-drop on all four receive
+paths — 2026-06-01) are all verified-or-dropped. The only F6 actions still accepted
+on the server's word are **pins/unpins**, unauthenticated **by design**
+(low-stakes, ephemeral, never admin-gated — §F6). Against the project's own
+"untrusted server" threat model, that currently means:
 
 - **DM / group-DM content confidentiality vs the server: holds** — per-message
   keys are wrapped only for the chosen peers; the server never sees them.
@@ -71,9 +72,9 @@ that currently means:
   so a server-added shadow reader is detected/fail-closed (F7, fixed).
 - **Message authenticity vs the server: now holds** for normal room/group/DM
   messages (F1, fixed) and *edits*. **Action authenticity now holds for
-  reactions and un-reacts** (F6, 2026-05-31); it **does NOT yet hold for
-  deletes** (F6, specced + pending); pins/unpins are accepted unauthenticated by
-  design.
+  reactions, un-reacts, and deletes** (F6 — un-react context-bound `unreact:v2`;
+  delete signed `delete:v1` + verify-or-drop on all four receive paths,
+  2026-06-01); pins/unpins are accepted unauthenticated by design.
 - **Security posture / F8:** The app provides E2EE against the server and encrypts local history at rest, but it does not provide cryptographic forward secrecy or post-compromise recovery. Protecting the private key and local device remains critical.
 - **File handling vs the server: now holds** — room-file content substitution
   (F11, fixed) and the unsanitized-`fileID` path traversal (F12, fixed) are both
@@ -84,10 +85,11 @@ The encouraging part: **every gap was a missing verification call, not a broken
 primitive** — and the **edit path already demonstrated the correct verify-or-drop
 pattern.** That pattern has now been extended to the **normal-message handlers
 (F1, fixed)**, room epoch-key receipt (F7, fixed), and attachment content hashes
-(F11, fixed). It now also covers the **reaction** and **un-react** handlers (F6,
-2026-05-31); extending it to the **delete** handlers (F6 — specced) is the last
-authenticity gap before the strongest "server cannot forge actions" E2E claim
-holds (pins/unpins excepted by design).
+(F11, fixed). It now also covers **all of F6's authenticity legs — the
+reaction, un-react, and delete handlers** (the delete leg closed 2026-06-01). With
+that, the strongest **"server cannot forge actions"** E2E claim now holds —
+pins/unpins excepted **by design**, and noting (as throughout) that signing closes
+*forgery*, not the relay's inherent power to *suppress*.
 
 ---
 
@@ -160,8 +162,9 @@ finding that most changes the security story.
 > `message_verify_test.go` (15 cases: valid → stored; garbage / unsigned /
 > unknown-sender / context-rebound → dropped, across room/group/DM). **Scope:**
 > uses the existing canonical forms — see **F2**, which was subsequently resolved.
-> Does **not** cover deletes/reactions/un-reacts/pins (**F6**) — reactions +
-> un-react have since been closed (verify-or-drop); delete is pending, pin/unpin accepted.
+> Does **not** cover deletes/reactions/un-reacts/pins (**F6**) — reactions,
+> un-react, and delete have since been closed (verify-or-drop; delete 2026-06-01),
+> pin/unpin accepted-by-design.
 > The room `MemberHash` gap (**F7**) was subsequently closed with signed member
 > attestation.
 
@@ -319,11 +322,16 @@ explicit `len(key) == 32` guard would prevent a future downgrade-by-bug.
 
 ## F6 — Deletes / reactions / un-reacts / pins are not authenticated on receipt (HIGH)
 
-> **Status (2026-05-31): ◑ partially resolved.** **Reactions** (part 1) and
-> **un-react** (part 2) are now authenticated — verify-or-drop against the
-> claimed actor's pinned key on every receive path (see the CHANGELOG and the
-> per-row table notes below). **Delete** is specced and pending — full plan in
-> `docs/planning/open/f6-delete-authentication.md`. **Pin/unpin** are
+> **Status (2026-06-01): ✅ resolved (pin/unpin accepted-by-design).**
+> **Reactions** (part 1), **un-react** (part 2, upgraded to context-bound
+> `unreact:v2`), and now **delete** (part 3, closed 2026-06-01) are all
+> authenticated — verify-or-drop against the claimed actor's pinned key on every
+> receive path (see the CHANGELOG and the per-row table notes below). Delete is
+> signed end-to-end (`crypto.SignDelete`, domain `delete:v1`, binding
+> `(kind, contextID, msgID)`) and `VerifyDeleteAuthor` gates **all four** receive
+> paths (live-durable, catch-up-durable, live-TUI, history_result-TUI); cross-repo,
+> the server persists the signature (`delete_signature` column) and re-emits it on
+> every replay so catch-up stays verifiable. **Pin/unpin** are
 > **accepted-by-design** and stay unauthenticated: pins are never admin-gated, a
 > forged pin/unpin only highlights/un-highlights a real already-authenticated
 > message in ephemeral TUI-only state with no authority signal, and `unpinned`
@@ -335,9 +343,9 @@ receipt, and the **actor is read from a server-authored envelope field**:
 
 | Action | Signed on send? | Verified on receive? | Actor source |
 |--------|-----------------|----------------------|--------------|
-| Delete / tombstone | **No** — `protocol.Delete` has no sig field | **No** — *specced + pending (`f6-delete-authentication.md`)* | `Deleted.DeletedBy` (server) |
+| Delete / tombstone | ✅ **Yes (2026-06-01)** — new `SignDelete` over `(kind, contextID, msgID)`; `protocol.Delete` carries `signature` + context | ✅ **Yes (2026-06-01)** — `VerifyDeleteAuthor` on all four paths (durable live + catch-up, TUI live + history; cross-repo) | `Deleted.DeletedBy` (server) |
 | Reaction **add** | Yes — `SignRoom`/`SignDM` over the emoji ciphertext, the **same canonical form F1 verifies** | ✅ **Yes (2026-05-31)** — `VerifyReactionAuthor` on both `storeReaction` + `AddReactionDecrypted` | `Reaction.User` (server) |
-| Reaction **remove** | ✅ **Yes (2026-05-31)** — new `SignUnreact` over `reaction_id` | ✅ **Yes (2026-05-31)** — `VerifyUnreactAuthor` (durable + TUI; cross-repo) | `ReactionRemoved.User` (server) |
+| Reaction **remove** | ✅ **Yes (2026-05-31; `unreact:v2` 2026-06-01)** — `SignUnreact` over `(kind, contextID, reaction_id)` (context-bound) | ✅ **Yes** — `VerifyUnreactAuthor` (derives exactly-one-context; durable + TUI; cross-repo) | `ReactionRemoved.User` (server) |
 | **Pin / Unpin** | **No** — *accepted by design* | **No** — *accepted by design (low-stakes, ephemeral, never admin-gated)* | `Pinned.PinnedBy` (server); `Unpinned` has none |
 
 A malicious relaying server can therefore **forge a delete, reaction, or pin and
@@ -354,21 +362,30 @@ move authenticates `Reaction.User`. The post-decrypt `dr.Target != r.ID` check
 TUI merge path**; the durable `storeReaction` (`persist.go:620`) has no target
 check, so even that partial guard is inconsistent.
 
-**Recommendation — by action (status annotated 2026-05-31):**
+**Recommendation — by action (status annotated 2026-06-01):**
 
 1. **Reactions — ✅ done, client-only, no wire change.** Verify the *existing*
    signature against `pubKeyForUser(r.User)` on both receive paths
    (`VerifyReactionAuthor`, reusing `VerifyRoom`/`VerifyDM`); the `dr.Target != r.ID`
    target check was extended to the durable `storeReaction`; the orphan check was
    reordered ahead of the verify (security unchanged). No protocol/server change.
-2. **Un-react — ✅ done, cross-repo.** New domain-separated `crypto.SignUnreact`
-   binds the `reaction_id`; `SendUnreact` signs; `VerifyUnreactAuthor`
-   verify-or-drops on the durable + TUI arms; the server relays the signature
-   opaquely (live-only — removals aren't replayed, so no schema).
-3. **Delete — ⏳ specced, pending.** Same shape (bind the msgID), but deletes are
-   **replayed on catch-up**, so the server must *persist* the signature (a new
-   column) and re-emit it on replay, and the client gates four receive paths. Full
-   plan: `docs/planning/open/f6-delete-authentication.md`.
+2. **Un-react — ✅ done, cross-repo (upgraded to `unreact:v2` 2026-06-01).**
+   Domain-separated `crypto.SignUnreact` now binds the full `(kind, contextID,
+   reaction_id)` context (v1 bound only `reaction_id`); `SendUnreact` signs;
+   `VerifyUnreactAuthor` derives exactly-one-context and verify-or-drops on the
+   durable + TUI arms; the server now *also* verifies (data-integrity gate) and
+   relays (live-only — removals aren't replayed, so no schema).
+3. **Delete — ✅ done, cross-repo (2026-06-01).** New domain-separated
+   `crypto.SignDelete` binds `(kind, contextID, msgID)` (`delete:v1`); `SendDelete`
+   carries the context; `VerifyDeleteAuthor` verify-or-drops on **all four** receive
+   paths (durable live + catch-up, TUI live + history). Because deletes are
+   **replayed on catch-up**, the server persists the signature (new
+   `delete_signature` column) and re-emits it on every replay, and bundles the
+   deleter's `profile` frame ahead of each catch-up batch so a departed deleter's
+   tombstone stays verifiable. The server also verifies the same signature as a
+   **data-integrity** gate (not a trust boundary — the client remains the
+   authenticity boundary), proven byte-identical across repos by a committed
+   conformance vector. Full plan: `docs/planning/open/f6-delete-authentication.md`.
 4. **Pin / unpin — 📝 accepted, unauthenticated by design.** Lowest value
    (only highlights/un-highlights a real, already-authenticated message; ephemeral
    TUI-only state; never admin-gated; `unpinned` has no actor) and highest cost
@@ -402,9 +419,22 @@ the pinned key binds it, as F1 already demonstrates.
 > refs in this section have drifted since the F11 edits; re-locate by symbol at
 > implementation time — the findings are unaffected.)
 
+> **Delete leg closed (2026-06-01).** The third F6 row is now resolved:
+> `protocol.Delete`/`Deleted` carry a `signature` (+ an explicit room/group/dm
+> context the signature binds), the client gates **four** receive paths with
+> `VerifyDeleteAuthor` (verify-or-drop), and — cross-repo — the server verifies the
+> same signature as a data-integrity gate, persists it (`delete_signature`), and
+> re-emits it on every catch-up replay (bundling the deleter's `profile` first so a
+> departed deleter stays verifiable). Un-react was simultaneously upgraded
+> v1→`unreact:v2` (now binds `(kind, contextID, reaction_id)`, not just the
+> `reaction_id`). The only F6 rows still applied unverified are **pin/unpin**
+> (accepted-by-design, above). The "all five actions are applied with no
+> receive-side verification" sentence above is the **original** finding state,
+> retained for the record.
+
 ## F7 — Room epoch-key recipients are server-supplied; `MemberHash` never verified (HIGH, design-dependent)
 
-> **Fixed (2026-05-31) — signed member attestation + verify-or-fail-closed (cross-repo).** The key finding refined the fix: the missing primitive was a **generator signature**, not pubkey-binding — an *unsigned* `member_hash` is forgeable by the relay (it could rewrite it per-victim). Now the rotating client signs `(room, epoch, member_hash)` with its identity key (`crypto.SignEpochRoster`, domain `epoch_roster:v1`); the server stores it per `(room,epoch)` atomically with the key batch and forwards `generator/member_hash/member_sig` on every current-epoch `epoch_key`; each member verifies the signature against the generator's **pinned** key (`VerifyEpochRoster`), recomputes `MemberHash(local_roster)`, and **fail-closes** (does not adopt the key; warns) on any mismatch — with one `room_members` refresh first to absorb a lagging roster. A **sync-path guard** keeps sync/history keys decryption-only so they can't establish the current epoch and bypass the check. Username-set hash for v1 (key-substitution stays reactively self-detecting; device-pubkey binding deferred to the per-device-keys work via the `v1` version tag). Tests: server `epoch_attestation_test.go`; client `crypto/epoch_roster_test.go` + `client/epoch_verify_test.go` (valid→adopt; forged/missing/unknown-generator→fail-closed; mismatch→refresh-then-fail-closed; absent-roster→adopt-on-refresh). The server-side note below (honest server builds the recipient list authoritatively) still holds — F7 adds the cross-client check that makes a *malicious* server's covert injection detectable. Full design: `docs/planning/open/f7-room-member-attestation.md`.
+> **Fixed (2026-05-31) — signed member attestation + verify-or-fail-closed (cross-repo).** The key finding refined the fix: the missing primitive was a **generator signature**, not pubkey-binding — an *unsigned* `member_hash` is forgeable by the relay (it could rewrite it per-victim). Now the rotating client signs `(room, epoch, member_hash)` with its identity key (`crypto.SignEpochRoster`, domain `epoch_roster:v1`); the server stores it per `(room,epoch)` atomically with the key batch and forwards `generator/member_hash/member_sig` on every current-epoch `epoch_key`; each member verifies the signature against the generator's **pinned** key (`VerifyEpochRoster`), recomputes `MemberHash(local_roster)`, and **fail-closes** (does not adopt the key; warns) on any mismatch — with one `room_members` refresh first to absorb a lagging roster. A **sync-path guard** keeps sync/history keys decryption-only so they can't establish the current epoch and bypass the check (hardened 2026-06-01 into the full **scoped key model**, "Phase D": sync/history epoch keys live in a *separate* history-only store, the `RoomEpochKeyForHistory` resolver admits a history key for decryption only when its epoch is strictly below the room's *adopted* current epoch, and undecryptable catch-up messages are dropped rather than shadow-read — `docs/planning/open/f7-phase-d-scoped-key-model.md`). Username-set hash for v1 (key-substitution stays reactively self-detecting; device-pubkey binding deferred to the per-device-keys work via the `v1` version tag). Tests: server `epoch_attestation_test.go`; client `crypto/epoch_roster_test.go` + `client/epoch_verify_test.go` (valid→adopt; forged/missing/unknown-generator→fail-closed; mismatch→refresh-then-fail-closed; absent-roster→adopt-on-refresh). The server-side note below (honest server builds the recipient list authoritatively) still holds — F7 adds the cross-client check that makes a *malicious* server's covert injection detectable. Full design: `docs/planning/open/f7-room-member-attestation.md`.
 
 Before the fix, `handleEpochTrigger` (`epoch.go:23`) wrapped the new room epoch
 key for **`trigger.Members`** — the recipient list (usernames + pubkeys) supplied
@@ -750,8 +780,9 @@ not. **Recommendation:** validate `fileID` against the nanoid format (or
       epoch key with random nonces; every DM/group site uses a fresh per-message
       key — safe).
 - [x] **Authenticity of deletes / reactions / un-reacts / pins** → F6 (none
-      *was* verified on receipt; reactions + un-react now are, 2026-05-31; delete
-      pending; pin/unpin accepted-by-design).
+      *was* verified on receipt; reactions, un-react (`unreact:v2`), and delete
+      (`delete:v1`, four receive paths, cross-repo) now are — delete closed
+      2026-06-01; pin/unpin accepted-by-design).
 - [x] **Private key at-rest + keygen** → clean (above) + F10 (user-chosen
       empty-pass branch, INFO — resolved 2026-05-31, strength now advisory-only).
 - [x] **Attachment / file crypto (upload + download)** → group/DM files use
@@ -763,25 +794,30 @@ not. **Recommendation:** validate `fileID` against the nanoid format (or
 - [x] **Randomness sweep** → clean (`crypto/rand` everywhere; no `math/rand`).
 - [x] **Downgrade / skip-verify** → the *de facto* skip-verify was F1/F6 (the
       normal receive paths performed no verification). **F1 is now fixed** (normal
-      messages verify-or-drop); F6 reactions + un-react now verify-or-drop too
-      (2026-05-31), delete pending, pin/unpin accepted. No separate
-      negotiated-downgrade path was found.
+      messages verify-or-drop); **F6 reactions, un-react, and delete now
+      verify-or-drop too** (delete closed 2026-06-01), pin/unpin accepted. No
+      separate negotiated-downgrade path was found.
 
 ## Recommended priority
 
-**Remaining — F6 (HIGH, partially resolved); delete is the last open leg:**
+**F6 (HIGH) — ✅ fully resolved 2026-06-01 (pin/unpin accepted-by-design):**
 
 - **Reactions — ✅ done (2026-05-31).** Client-only verify-or-drop reusing the
   existing `SignRoom`/`SignDM` signature (`VerifyReactionAuthor`).
-- **Un-react — ✅ done (2026-05-31).** Cross-repo: new `SignUnreact` over the
-  `reaction_id`; `VerifyUnreactAuthor` on both receive arms; server relays opaquely.
-- **Delete — ⏳ the remaining work.** Bind the msgID, but deletes are replayed on
-  catch-up, so the server must **persist + re-emit** the signature and the client
-  gates **four** receive paths. Full plan:
-  `docs/planning/open/f6-delete-authentication.md`.
+- **Un-react — ✅ done (2026-05-31; `unreact:v2` 2026-06-01).** Cross-repo:
+  `SignUnreact` now binds `(kind, contextID, reaction_id)`; `VerifyUnreactAuthor`
+  on both receive arms; server verifies + relays.
+- **Delete — ✅ done (2026-06-01).** Cross-repo: `SignDelete` binds
+  `(kind, contextID, msgID)` (`delete:v1`); `VerifyDeleteAuthor` verify-or-drops on
+  **four** receive paths; the server **persists + re-emits** the signature (so
+  catch-up stays verifiable) and bundles the deleter's profile ahead of each batch.
+  Full plan: `docs/planning/open/f6-delete-authentication.md`.
 - **Pin / unpin — 📝 accepted-by-design** (low-stakes, ephemeral, never
-  admin-gated). Scope the F6 claim to *forgery* (a malicious relay can still
+  admin-gated). The F6 claim is scoped to *forgery* (a malicious relay can still
   suppress); group promote/demote + server-authored audit events stay out by design.
+
+**No findings remain open.** All twelve (F1–F12) are fixed, resolved, or
+documented-and-accepted.
 
 **Completed:**
 
@@ -799,10 +835,10 @@ not. **Recommendation:** validate `fileID` against the nanoid format (or
    message (`SignRoom`/`SignDM` against the sender's pinned key, mirroring the edit
    path) — `persist.go` `storeRoomMessage` / `storeGroupMessage` / `storeDMMessage`.
    Test: `message_verify_test.go`. **F6** applies the same verify-or-drop +
-   actor-binding to the action handlers: **reactions** + **un-react** done
-   (2026-05-31); **delete** is the remaining leg (cross-repo, with a
-   persisted+replayed signature — see `f6-delete-authentication.md`); pin/unpin
-   accepted-by-design.
+   actor-binding to the action handlers: **reactions** + **un-react** (`unreact:v2`)
+   + **delete** (`delete:v1`, four receive paths, cross-repo with a
+   persisted+replayed signature — see `f6-delete-authentication.md`) all done
+   (delete closed 2026-06-01); pin/unpin accepted-by-design.
 3. **F7** — ✅ **Done (2026-05-31):** signed room member attestation + verify-or-fail-closed
    (cross-repo; rotator signs `(room,epoch,member_hash)`, members verify against the
    generator's pinned key and compare to their own roster, with a sync-path guard). See

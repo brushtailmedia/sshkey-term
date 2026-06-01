@@ -337,33 +337,37 @@ func buildDMEditCanonical(msgID string, payloadBytes []byte, conversation string
 	return append(out, wrappedKeysCanonical(wrappedKeys)...)
 }
 
-// SignUnreact signs a reaction-removal (un-react) request. Unlike messages and
-// reactions there is no encrypted payload — the only thing worth binding is the
-// server-assigned reaction_id, which is globally unique and is exactly what the
-// receiver keys its delete on. Binding it (under a distinct domain tag) means a
-// compromised server can neither forge an un-react attributed to a user who
-// never sent one, nor replay a genuine un-react against a different reaction
-// (audit F6). The actor is bound by verifying against the claimed user's pinned
-// key, as elsewhere — not by living in the signed bytes.
+// SignUnreact signs a reaction-removal (un-react) request. Like delete there is
+// no encrypted payload — the signature binds the conversation context and the
+// server-assigned reaction_id, so a compromised relay can neither forge an
+// un-react attributed to a user who never sent one, nor replay a genuine one
+// against a different reaction or context (audit F6). The actor is bound by
+// verifying against the claimed user's pinned key, as elsewhere — not by living
+// in the signed bytes. v2 binds context (rather than resting on reaction-id
+// uniqueness) for the same reason delete does, keeping all signed F6 actions
+// uniformly context-bound.
 //
-// Canonical form:
+// Canonical form (kind is one of "room"/"group"/"dm"; contextID is the
+// room/group/DM id):
 //
-//	Sign("unreact:v1" || u32_be(len(reactionID)) || reactionID)
-func SignUnreact(privKey ed25519.PrivateKey, reactionID string) []byte {
-	return ed25519.Sign(privKey, buildUnreactCanonical(reactionID))
+//	Sign("unreact:v2" || u32_be(len(kind)) || kind || u32_be(len(contextID)) || contextID || u32_be(len(reactionID)) || reactionID)
+func SignUnreact(privKey ed25519.PrivateKey, kind, contextID, reactionID string) []byte {
+	return ed25519.Sign(privKey, buildUnreactCanonical(kind, contextID, reactionID))
 }
 
 // VerifyUnreact verifies an un-react signature against the SignUnreact form.
-func VerifyUnreact(pubKey ed25519.PublicKey, reactionID string, sig []byte) bool {
-	return ed25519.Verify(pubKey, buildUnreactCanonical(reactionID), sig)
+func VerifyUnreact(pubKey ed25519.PublicKey, kind, contextID, reactionID string, sig []byte) bool {
+	return ed25519.Verify(pubKey, buildUnreactCanonical(kind, contextID, reactionID), sig)
 }
 
 // buildUnreactCanonical builds the SignUnreact/VerifyUnreact input. Shared so
 // Sign and Verify cannot drift.
-func buildUnreactCanonical(reactionID string) []byte {
-	const tag = "unreact:v1"
-	out := make([]byte, 0, len(tag)+4+len(reactionID))
+func buildUnreactCanonical(kind, contextID, reactionID string) []byte {
+	const tag = "unreact:v2"
+	out := make([]byte, 0, len(tag)+4+len(kind)+4+len(contextID)+4+len(reactionID))
 	out = append(out, tag...)
+	out = appendField(out, []byte(kind))
+	out = appendField(out, []byte(contextID))
 	return appendField(out, []byte(reactionID))
 }
 

@@ -626,17 +626,24 @@ func (c *Client) SendGroupReaction(group, targetMsgID, emoji string) error {
 	return c.enc.Encode(envelope)
 }
 
-// SendUnreact removes a reaction by its server-assigned reaction_id. Used
-// by the explicit "Remove my reaction" UX — the client looks up the
-// reaction_id from its local (message_id, user, emoji) index and sends it.
-func (c *Client) SendUnreact(reactionID string) error {
+// SendUnreact removes a reaction by its server-assigned reaction_id. The caller
+// supplies the target message's context (exactly one of room/group/dm); the
+// signature binds (kind, contextID, reaction_id) so the receiver can
+// verify-or-drop the removal as genuinely ours and bound to this reaction in
+// this context (F6 unreact:v2).
+func (c *Client) SendUnreact(reactionID, room, group, dm string) error {
+	kind, contextID, ok := exactlyOneContext(room, group, dm)
+	if !ok {
+		return fmt.Errorf("SendUnreact: exactly one of room/group/dm must be set")
+	}
 	corrID := protocol.GenerateCorrID()
-	// F6: sign the reaction_id so the receiver can authenticate this removal as
-	// genuinely ours and bound to exactly this reaction (verify-or-drop on receipt).
-	sig := crypto.SignUnreact(c.privKey, reactionID)
+	sig := crypto.SignUnreact(c.privKey, kind, contextID, reactionID)
 	envelope := protocol.Unreact{
 		Type:       "unreact",
 		ReactionID: reactionID,
+		Room:       room,
+		Group:      group,
+		DM:         dm,
 		Signature:  base64.StdEncoding.EncodeToString(sig),
 		CorrID:     corrID,
 	}
@@ -761,13 +768,25 @@ func (c *Client) SendRoomUpdate(room, topic string) error {
 	return c.enc.Encode(envelope)
 }
 
-// SendDelete sends a message deletion request.
-func (c *Client) SendDelete(id string) error {
+// SendDelete sends a signed message-deletion request. The caller supplies the
+// target's context (exactly one of room/group/dm); the signature binds
+// (kind, contextID, id) so the server can route + verify and recipients
+// verify-or-drop (F6 delete:v1).
+func (c *Client) SendDelete(id, room, group, dm string) error {
+	kind, contextID, ok := exactlyOneContext(room, group, dm)
+	if !ok {
+		return fmt.Errorf("SendDelete: exactly one of room/group/dm must be set")
+	}
 	corrID := protocol.GenerateCorrID()
+	sig := crypto.SignDelete(c.privKey, kind, contextID, id)
 	envelope := protocol.Delete{
-		Type:   "delete",
-		ID:     id,
-		CorrID: corrID,
+		Type:      "delete",
+		ID:        id,
+		Room:      room,
+		Group:     group,
+		DM:        dm,
+		Signature: base64.StdEncoding.EncodeToString(sig),
+		CorrID:    corrID,
 	}
 	c.sendQueue.EnqueueWithID(corrID, "delete", envelope)
 	c.sendQueue.MarkSending(corrID)

@@ -472,26 +472,36 @@ func TestSignUnreact_RoundTripAndBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const reactionID = "react_abc123"
-	sig := SignUnreact(priv, reactionID)
+	const kind, contextID, reactionID = "room", "rm_general", "react_abc123"
+	sig := SignUnreact(priv, kind, contextID, reactionID)
 
-	if !VerifyUnreact(pub, reactionID, sig) {
+	if !VerifyUnreact(pub, kind, contextID, reactionID, sig) {
 		t.Fatal("valid un-react signature should verify")
 	}
-	if VerifyUnreact(pub, "react_other", sig) {
-		t.Error("signature must not verify against a different reaction_id (replay/retarget blocked)")
+	if VerifyUnreact(pub, "group", contextID, reactionID, sig) {
+		t.Error("must not verify against a different kind")
+	}
+	if VerifyUnreact(pub, kind, "rm_other", reactionID, sig) {
+		t.Error("must not verify against a different context (cross-context blocked)")
+	}
+	if VerifyUnreact(pub, kind, contextID, "react_other", sig) {
+		t.Error("must not verify against a different reaction_id (replay/retarget blocked)")
 	}
 	otherPub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if VerifyUnreact(otherPub, reactionID, sig) {
-		t.Error("signature must not verify against a different key (forgery blocked)")
+	if VerifyUnreact(otherPub, kind, contextID, reactionID, sig) {
+		t.Error("must not verify against a different key (forgery blocked)")
 	}
 	garbage := make([]byte, ed25519.SignatureSize)
 	_, _ = rand.Read(garbage)
-	if VerifyUnreact(pub, reactionID, garbage) {
+	if VerifyUnreact(pub, kind, contextID, reactionID, garbage) {
 		t.Error("garbage signature must not verify")
+	}
+	// Domain separation: unreact:v2 must not cross-verify as delete:v1.
+	if VerifyDelete(pub, kind, contextID, reactionID, sig) {
+		t.Error("unreact:v2 signature must not cross-verify as delete:v1")
 	}
 }
 

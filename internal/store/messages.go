@@ -234,8 +234,36 @@ func (s *Store) GetMessagesBefore(room, groupID, dmID, beforeID string, limit in
 	return msgs, nil
 }
 
-// DeleteMessage soft-deletes a message and hard-deletes its reactions.
-// Returns file IDs from stored attachments for cache cleanup.
+// contextColumn returns the (column, value) for the single set context, with ok
+// = false unless exactly one of room/group/dm is set. The returned column is one
+// of the fixed unified-messages-table context columns, so it is safe to
+// interpolate into a SQL predicate.
+func contextColumn(room, group, dm string) (col, val string, ok bool) {
+	n := 0
+	if room != "" {
+		n++
+		col, val = "room", room
+	}
+	if group != "" {
+		n++
+		col, val = "group_id", group
+	}
+	if dm != "" {
+		n++
+		col, val = "dm_id", dm
+	}
+	return col, val, n == 1
+}
+
+// DeleteMessage soft-deletes a message by id ONLY and hard-deletes its
+// reactions. Returns file IDs from stored attachments for cache cleanup.
+//
+// id-only: fine for local/test callers (the id is the messages-table PRIMARY
+// KEY, so at most one row matches). Remote, signature-verified `deleted`
+// tombstones MUST instead use DeleteMessageInContext so the local mutation is
+// scoped to the same (kind, contextID, msgID) the deleter signed
+// (VerifyDeleteAuthor) — a wrong-context tombstone then no-ops rather than
+// blanking a same-id row stored under a different context (F6).
 func (s *Store) DeleteMessage(id, deletedBy string) ([]string, error) {
 	// Read attachment file IDs before soft-deleting
 	var attachJSON string
@@ -261,6 +289,71 @@ func (s *Store) DeleteMessage(id, deletedBy string) ([]string, error) {
 	return fileIDs, err
 }
 
+// softDeleteInContext soft-deletes a message scoped to (id, context): it blanks
+// the body and sets deleted/deleted_by via a context-gated UPDATE
+// (WHERE id = ? AND <ctx_col> = ?), so a tombstone signed for one context can
+// never mutate a same-id row stored under a different context. Only when the
+// UPDATE actually matches a row does it purge that message's reactions and
+// return its attachment file IDs for cache cleanup. `affected` reports whether a
+// row matched, letting callers decide what a no-match means: DeleteMessageInContext
+// no-ops, UpsertDeletedMessage inserts an absent-row tombstone. Shared by both so
+// the two context-scoped delete paths cannot drift. Errors only on a bad context
+// (not exactly one) or a SQL failure.
+func (s *Store) softDeleteInContext(id, deletedBy, room, group, dm string) (fileIDs []string, affected int64, err error) {
+	col, val, ok := contextColumn(room, group, dm)
+	if !ok {
+		return nil, 0, fmt.Errorf("softDeleteInContext: exactly one of room/group/dm must be set for id %q", id)
+	}
+
+	// Capture attachment file IDs (same context-scoped predicate as the UPDATE)
+	// before the soft-delete clears the row.
+	var attachJSON string
+	s.db.QueryRow(`SELECT attachments FROM messages WHERE id = ? AND `+col+` = ?`, id, val).Scan(&attachJSON)
+
+	res, err := s.db.Exec(`UPDATE messages SET deleted = 1, deleted_by = ?, body = '' WHERE id = ? AND `+col+` = ?`,
+		deletedBy, id, val)
+	if err != nil {
+		return nil, 0, err
+	}
+	affected, err = res.RowsAffected()
+	if err != nil {
+		return nil, 0, err
+	}
+	if affected == 0 {
+		return nil, 0, nil
+	}
+
+	// Matched row: mirror DeleteMessage — purge reactions, return file IDs.
+	if err := s.DeleteReactionsForMessage(id); err != nil {
+		return nil, affected, err
+	}
+	if attachJSON != "" {
+		var atts []StoredAttachment
+		if json.Unmarshal([]byte(attachJSON), &atts) == nil {
+			for _, a := range atts {
+				if a.FileID != "" {
+					fileIDs = append(fileIDs, a.FileID)
+				}
+			}
+		}
+	}
+	return fileIDs, affected, nil
+}
+
+// DeleteMessageInContext soft-deletes a message scoped to its conversation
+// context (room/group/dm) — the durable apply for a verified remote `deleted`
+// tombstone on the LIVE path (F6). Unlike the id-only DeleteMessage it mutates
+// only a row whose stored context matches the tombstone's signed context
+// (VerifyDeleteAuthor binds (kind, contextID, msgID)); a wrong-context or
+// not-currently-cached tombstone is a no-op returning (nil, nil) — errors are
+// reserved for bad input / SQL failure. Returns attachment file IDs for cache
+// cleanup when a row matched. The absent-row tombstone insert is the catch-up
+// path's job (UpsertDeletedMessage), not the live path's.
+func (s *Store) DeleteMessageInContext(id, deletedBy, room, group, dm string) ([]string, error) {
+	fileIDs, _, err := s.softDeleteInContext(id, deletedBy, room, group, dm)
+	return fileIDs, err
+}
+
 // UpsertDeletedMessage makes a remote `deleted` tombstone durable. Unlike
 // DeleteMessage (which only soft-deletes an already-cached row), this also
 // inserts a minimal tombstone when the original message was never cached — the
@@ -282,56 +375,24 @@ func (s *Store) DeleteMessage(id, deletedBy string) ([]string, error) {
 // keeps using DeleteMessage so its product semantics (authoritative soft-delete
 // of a visible cached row) are unchanged.
 func (s *Store) UpsertDeletedMessage(id, deletedBy string, ts, serverOrder int64, room, group, dm string) ([]string, error) {
-	// Capture attachment file IDs before the soft-delete clears the row, so a
-	// known-row tombstone cleans up its files exactly like DeleteMessage.
-	var attachJSON string
-	s.db.QueryRow(`SELECT attachments FROM messages WHERE id = ?`, id).Scan(&attachJSON)
-
-	res, err := s.db.Exec(`UPDATE messages SET deleted = 1, deleted_by = ?, body = '' WHERE id = ?`,
-		deletedBy, id)
+	// F6: soft-delete scoped to (id, context) so a wrong-context tombstone can't
+	// mutate a same-id row in a different context; a foreign-context (or absent)
+	// row matches nothing and falls through to the ON CONFLICT(id) DO NOTHING
+	// insert below (no phantom tombstone). Shared with the live path via
+	// softDeleteInContext, so the two context-scoped deletes can't drift.
+	fileIDs, affected, err := s.softDeleteInContext(id, deletedBy, room, group, dm)
 	if err != nil {
 		return nil, err
 	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-
 	if affected > 0 {
-		// Known row: mirror DeleteMessage — purge reactions, return file IDs.
-		if err := s.DeleteReactionsForMessage(id); err != nil {
-			return nil, err
-		}
-		var fileIDs []string
-		if attachJSON != "" {
-			var atts []StoredAttachment
-			if json.Unmarshal([]byte(attachJSON), &atts) == nil {
-				for _, a := range atts {
-					if a.FileID != "" {
-						fileIDs = append(fileIDs, a.FileID)
-					}
-				}
-			}
-		}
+		// Known row: soft-deleted in place (reactions purged, file IDs returned).
 		return fileIDs, nil
 	}
 
-	// Absent row: insert a minimal tombstone. The insert path must satisfy the
-	// same server-origin invariants InsertMessage enforces (exactly one context,
-	// server_order > 0) — validate in Go for clear errors before the SQL CHECKs.
-	ctxCount := 0
-	if room != "" {
-		ctxCount++
-	}
-	if group != "" {
-		ctxCount++
-	}
-	if dm != "" {
-		ctxCount++
-	}
-	if ctxCount != 1 {
-		return nil, fmt.Errorf("UpsertDeletedMessage: exactly one of room/group/dm must be set (got %d) for id %q", ctxCount, id)
-	}
+	// Absent (or foreign-context) row: insert a minimal tombstone. Context is
+	// already validated exactly-one by softDeleteInContext; the insert must also
+	// satisfy InsertMessage's server_order > 0 invariant (validate in Go for a
+	// clear error before the SQL CHECK).
 	if serverOrder <= 0 {
 		return nil, fmt.Errorf("UpsertDeletedMessage: server_order must be > 0 (got %d) for id %q", serverOrder, id)
 	}

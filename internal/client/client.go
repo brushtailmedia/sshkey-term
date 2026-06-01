@@ -1317,8 +1317,11 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 		}
 	case "deleted":
 		var d protocol.Deleted
-		if err := json.Unmarshal(raw, &d); err == nil && c.store != nil {
-			fileIDs, _ := c.store.DeleteMessage(d.ID, d.DeletedBy)
+		// F6 Gate #1 — verify-or-drop the live durable tombstone, then apply it
+		// context-scoped (DeleteMessageInContext) so the local mutation matches the
+		// signed (kind, contextID, msgID) tuple, not the id alone.
+		if err := json.Unmarshal(raw, &d); err == nil && c.store != nil && c.VerifyDeleteAuthor(d) {
+			fileIDs, _ := c.store.DeleteMessageInContext(d.ID, d.DeletedBy, d.Room, d.Group, d.DM)
 			c.cleanupAttachmentFiles(fileIDs)
 		}
 	case "sync_batch":
