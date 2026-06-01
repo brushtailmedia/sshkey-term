@@ -6725,7 +6725,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		if m.CorrID != "" && a.client != nil {
 			a.client.SendQueue().Ack(m.CorrID)
 		}
-		a.messages.AddRoomMessage(m, a.client)
+		a.messages.AddRoomMessage(m, a.client, a.replayingSyncBatch)
 		if m.Room == a.messages.room {
 			if !a.replayingSyncBatch {
 				a.sendReadReceipt()
@@ -7781,7 +7781,12 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			case "message":
 				var pm protocol.Message
 				if json.Unmarshal(raw, &pm) == nil {
-					histMsgs = append(histMsgs, a.messages.buildDisplayMsg(pm, a.client))
+					// F7 Phase D: skip undecryptable history rows (buildDisplayMsg
+					// returns ok=false) so they don't prepend as "(encrypted)"
+					// ghosts — they were dropped from the store too.
+					if dm, ok := a.messages.buildDisplayMsg(pm, a.client); ok {
+						histMsgs = append(histMsgs, dm)
+					}
 				}
 			case "group_message":
 				var gm protocol.GroupMessage
@@ -7855,7 +7860,11 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 					}
 					body := "(encrypted)"
 					if a.client != nil {
-						payload, err := a.client.DecryptRoomMessage(pm.Room, pm.Epoch, pm.Payload)
+						// F7 Phase D: pins survive epoch rotations, so a pinned
+						// preview can reference an old epoch — resolve via the
+						// history-aware decryptor (display-only; the strict
+						// epoch < currentEpoch gate prevents any current-epoch bypass).
+						payload, err := a.client.DecryptRoomMessageForHistory(pm.Room, pm.Epoch, pm.Payload)
 						if err == nil {
 							body = payload.Body
 						}

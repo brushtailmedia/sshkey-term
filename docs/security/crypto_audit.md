@@ -43,7 +43,7 @@ its **enforcement**. Date: 2026-05-30.
 | F2 | LOW–MED | Send-path signatures lack length-prefixing / domain separation — *✅ resolved 2026-05-31 (domain-tagged + length-prefixed canonical forms; framed `wrappedKeysCanonical` + `MemberHash`)* |
 | F8 | INFO (design) | No forward secrecy / post-compromise recovery — *✅ documented 2026-05-31 (protect the private key and local device)* |
 | F9 | LOW | Room content reuses the epoch key with random 96-bit nonces (~2³² birthday bound per epoch) — *✅ documented 2026-05-31 (random nonces correct for the shared key; rotation holds the bound ~7 orders clear; counter nonces rejected as worse)* |
-| F3 | LOW | `SafetyNumber` is entropy-lossy and short (24 digits) — *✅ resolved 2026-05-31 (uniform full-hash encoding — `bigint(hash) mod 10²⁴` — removes the `%100` bias + uses all 32 bytes; 24-digit format kept)* |
+| F3 | LOW | `SafetyNumber` is entropy-lossy and short (24 digits) — *✅ resolved 2026-05-31; expanded 2026-06-01 (uniform full-hash encoding — `bigint(hash) mod 10³²` — removes the `%100` bias + uses all 32 bytes; display is now 32 digits in 8×4 groups)* |
 | F4 | LOW | TOFU pin overwritten to the changed key before the user decides — *✅ resolved 2026-05-31 (immutable account-key mismatch now warns + rejects; old pin/cache stay active)* |
 | F10 | INFO | Unencrypted key-generation branch exists — *✅ resolved 2026-05-31 (intentional user choice; strength now advisory-only + explicit blank warning, replacing the incoherent allow-blank-but-block-weak gate)* |
 | F5 | INFO | `Encrypt`/`Decrypt` don't assert a 256-bit key — *✅ resolved 2026-05-31 (`len(key) == 32` guard on both; rejects 16/24-byte downgrade)* |
@@ -249,21 +249,17 @@ uses 60 digits). **Recommendation:** encode the full 32-byte hash uniformly
 (e.g. modular-reduce a big-integer view, or bytes→digits without `%100` bias)
 and/or use more digits.
 
-> **Resolved (2026-05-31) — minimal (unbias, keep 24 digits).** `SafetyNumber`
-> (`crypto.go`) now derives the 24 digits as `bigint(hash) mod 10²⁴` over **all 32**
-> SHA-256 bytes — a uniform reduction (reduction bias ~2⁻¹⁷⁶, i.e. nil) replacing
-> the biased per-byte `%100` form that used only 24 of the 32 bytes. The displayed
-> format is unchanged (24 digits in six groups of four), so the verification UI
-> (`tui/verify.go`, which renders the six groups) and the out-of-band ergonomics
-> are untouched — this is the "entropy-lossy" half of the finding. The "short"
-> half was a deliberate non-goal: ~80 uniform bits is already infeasible to grind
-> (~2⁸⁰ keypair generations), and going to Signal's ~200-bit / 60-digit length was
-> set aside to avoid the out-of-band comparison friction (longer numbers get
-> compared less, which is the only thing that makes them useful). Client-only;
-> computed on the fly for display, so no persistence or migration. Tests:
-> `crypto_test.go` — `TestSafetyNumber` (symmetry + length) and
-> `TestSafetyNumber_DeterministicGolden` (fixed-seed golden value + 6×4-digit
-> format, which would flip if the encoding regressed).
+> **Resolved (2026-05-31; display expanded 2026-06-01).** `SafetyNumber`
+> (`crypto.go`) now derives **32 digits** as `bigint(hash) mod 10³²` over **all 32**
+> SHA-256 bytes — a uniform reduction (reduction bias ~2⁻¹⁵⁰, i.e. negligible)
+> replacing the biased per-byte `%100` form that used only 24 of the 32 bytes. The
+> verification UI renders the value as **8 groups of 4 digits** in **2 rows × 4
+> columns**, keeping the compare surface compact while raising the displayed
+> strength from ~80 bits to ~106 bits. Client-only; computed on the fly for
+> display, so no persistence or migration. Tests: `crypto_test.go` —
+> `TestSafetyNumber` (symmetry + length) and `TestSafetyNumber_DeterministicGolden`
+> (fixed-seed golden value + 8×4-digit format, which would flip if the encoding
+> regressed).
 
 ## F4 — TOFU pin overwritten to the changed key before the user decides (LOW — ✅ resolved 2026-05-31)
 
@@ -821,9 +817,8 @@ not. **Recommendation:** validate `fileID` against the nanoid format (or
    security audit and README: E2EE against the server + encrypted local history,
    but no cryptographic forward secrecy or post-compromise recovery.
 6. **F3** — ✅ **Done (2026-05-31):** uniform full-hash safety number
-   (`bigint(hash) mod 10²⁴`) — removes the `%100` bias + 8 discarded bytes; 24-digit
-   format kept (minimal fix; the "more digits" half was a deliberate non-goal since
-   ~80 uniform bits is already infeasible to grind). *(Also resolved/documented
+   (`bigint(hash) mod 10³²`) — removes the `%100` bias + 8 discarded bytes; display
+   expanded to 32 digits in 8×4 groups (2 rows × 4 columns), about 106 uniform bits. *(Also resolved/documented
    2026-05-31: F4 immutable account-key warn+reject; F5 256-bit key guard; F9
    random-nonce design accepted; F10 advisory-only passphrase. See each section.)*
 

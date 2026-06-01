@@ -167,6 +167,35 @@ func TestPurgeRoomMessages_DropsEpochKeys(t *testing.T) {
 	}
 }
 
+// TestPurgeRoomMessages_DropsHistoricalEpochKeys verifies that F7 Phase D
+// history-only epoch keys for the room are removed by the client-local hard
+// purge, alongside the adopted epoch_keys. (Left/retired rooms do not purge;
+// this path is only the room_deleted / deleted_rooms hard delete.)
+func TestPurgeRoomMessages_DropsHistoricalEpochKeys(t *testing.T) {
+	s := openTestStore(t)
+
+	key := []byte("32-byte-symmetric-key-for-test00")
+	if err := s.StoreHistoricalEpochKey("room_target", 1, key); err != nil {
+		t.Fatalf("StoreHistoricalEpochKey: %v", err)
+	}
+
+	// Confirm stored
+	got, _ := s.GetHistoricalEpochKey("room_target", 1)
+	if got == nil {
+		t.Fatal("historical epoch key should exist before purge")
+	}
+
+	if _, err := s.PurgeRoomMessages("room_target"); err != nil {
+		t.Fatalf("PurgeRoomMessages: %v", err)
+	}
+
+	// Should be gone
+	got, _ = s.GetHistoricalEpochKey("room_target", 1)
+	if got != nil {
+		t.Error("historical epoch key should be deleted by purge")
+	}
+}
+
 // TestPurgeRoomMessages_Idempotent verifies that calling purge on an
 // already-empty room is a no-op.
 func TestPurgeRoomMessages_Idempotent(t *testing.T) {

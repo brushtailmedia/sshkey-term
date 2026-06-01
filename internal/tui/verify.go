@@ -139,9 +139,9 @@ func (v VerifyModel) View(width int) string {
 
 	if v.safetyNumber != "" {
 		parts := strings.Fields(v.safetyNumber)
-		if len(parts) == 6 {
-			b.WriteString("     " + searchHeaderStyle.Render(parts[0]+"  "+parts[1]+"  "+parts[2]) + "\n")
-			b.WriteString("     " + searchHeaderStyle.Render(parts[3]+"  "+parts[4]+"  "+parts[5]) + "\n")
+		if len(parts) == 8 {
+			b.WriteString("     " + searchHeaderStyle.Render(parts[0]+"  "+parts[1]+"  "+parts[2]+"  "+parts[3]) + "\n")
+			b.WriteString("     " + searchHeaderStyle.Render(parts[4]+"  "+parts[5]+"  "+parts[6]+"  "+parts[7]) + "\n")
 		}
 	} else {
 		b.WriteString("     (unable to compute)\n")

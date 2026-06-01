@@ -201,7 +201,7 @@ func (c *Client) handleSyncBatchKeys(raw json.RawMessage) {
 	// batch.Reactions itself for display, so we don't need to forward
 	// them via OnMessage — only the storage side is missing.
 	for _, reactRaw := range batch.Reactions {
-		c.handleInternal("reaction", reactRaw)
+		c.storeReactionFromCatchup(reactRaw)
 	}
 }
 
@@ -235,7 +235,7 @@ func (c *Client) handleHistoryKeys(raw json.RawMessage) {
 	}
 
 	for _, reactRaw := range result.Reactions {
-		c.handleInternal("reaction", reactRaw)
+		c.storeReactionFromCatchup(reactRaw)
 	}
 }
 

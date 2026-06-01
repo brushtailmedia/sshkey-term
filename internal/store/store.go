@@ -184,6 +184,18 @@ func (s *Store) init() error {
 			PRIMARY KEY (room, epoch)
 		);
 
+		-- Historical (sync/history-only) epoch keys — F7 Phase D scoped-key
+		-- model. Keys delivered via skip-verified sync_batch/history_result
+		-- frames land here, NEVER in epoch_keys. Read only by the history
+		-- resolver and only for genuinely-historical epochs (epoch <
+		-- currentEpoch); never used for live/current decryption.
+		CREATE TABLE IF NOT EXISTS historical_epoch_keys (
+			room  TEXT NOT NULL,
+			epoch INTEGER NOT NULL,
+			key   BLOB NOT NULL,
+			PRIMARY KEY (room, epoch)
+		);
+
 		-- Pinned public keys (key pinning / TOFU)
 		CREATE TABLE IF NOT EXISTS pinned_keys (
 			user        TEXT PRIMARY KEY,

@@ -48,9 +48,10 @@ type SyncEpochKey struct {
 	Room       string `json:"room"`
 	Epoch      int64  `json:"epoch"`
 	WrappedKey string `json:"wrapped_key"`
-	// F7 attestation fields (forward-compat). Sync/history keys are
-	// historical-decryption-only and skip-verified, so these are carried but
-	// not relied upon; the server does not currently populate them.
+	// Reserved for future provenance/debugging. The first-party server currently
+	// omits these fields on sync/history keys. Clients must treat SyncEpochKey as
+	// historical-decryption-only: do not require or verify these fields, and never
+	// use this frame to adopt/advance the current room epoch.
 	Generator  string `json:"generator,omitempty"`
 	MemberHash string `json:"member_hash,omitempty"`
 	MemberSig  string `json:"member_sig,omitempty"`
@@ -668,9 +669,13 @@ type DMInfo struct {
 // Deletion
 
 type Delete struct {
-	Type   string `json:"type"`
-	ID     string `json:"id"`
-	CorrID string `json:"corr_id,omitempty"` // Phase 17c
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	Room      string `json:"room,omitempty"`      // F6: exactly one of room/group/dm — the context the signature binds
+	Group     string `json:"group,omitempty"`     // F6
+	DM        string `json:"dm,omitempty"`        // F6
+	Signature string `json:"signature,omitempty"` // F6: SignDelete over (kind, contextID, id)
+	CorrID    string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 type Deleted struct {
@@ -682,7 +687,8 @@ type Deleted struct {
 	Room        string `json:"room,omitempty"`
 	Group       string `json:"group,omitempty"`
 	DM          string `json:"dm,omitempty"`
-	CorrID      string `json:"corr_id,omitempty"` // Phase 17c
+	Signature   string `json:"signature,omitempty"` // F6: relayed delete author signature (verified client-side)
+	CorrID      string `json:"corr_id,omitempty"`   // Phase 17c
 }
 
 // Typing
@@ -749,7 +755,10 @@ type Reaction struct {
 type Unreact struct {
 	Type       string `json:"type"`
 	ReactionID string `json:"reaction_id"`
-	Signature  string `json:"signature,omitempty"` // F6: SignUnreact over reaction_id
+	Room       string `json:"room,omitempty"`      // F6 unreact:v2 retrofit: exactly one of room/group/dm
+	Group      string `json:"group,omitempty"`     // F6 unreact:v2
+	DM         string `json:"dm,omitempty"`        // F6 unreact:v2
+	Signature  string `json:"signature,omitempty"` // F6: SignUnreact (v1: reaction_id; v2: kind, contextID, reaction_id)
 	CorrID     string `json:"corr_id,omitempty"`   // Phase 17c
 }
 

@@ -354,6 +354,52 @@ func (c *Client) RoomEpochKey(room string, epoch int64) []byte {
 	return key
 }
 
+// RoomEpochKeyForHistory resolves a room epoch key for HISTORY / scrollback /
+// catchup decryption only (F7 Phase D scoped-key model). Resolution order:
+//
+//  1. Adopted key (epochKeys / epoch_keys) — adopted always wins for the same
+//     (room, epoch); it is the verified key whenever the client holds it.
+//  2. Else, ONLY if epoch < currentEpoch[room] (the epoch is genuinely
+//     historical), a history-only key (historyEpochKeys / historical_epoch_keys).
+//  3. Else nil.
+//
+// The strict epoch < currentEpoch gate is the security boundary: it prevents a
+// skip-verified sync/history key from ever decrypting current/live traffic (a
+// room with no known currentEpoch reads as 0, so nothing is "historical" yet).
+// MUST be used only by sync/history/catchup paths — never by live/send/upload/
+// unread/current-decrypt paths, which stay on RoomEpochKey.
+func (c *Client) RoomEpochKeyForHistory(room string, epoch int64) []byte {
+	// 1. Adopted wins (reuses the adopted in-memory + epoch_keys lazy-load).
+	if key := c.RoomEpochKey(room, epoch); key != nil {
+		return key
+	}
+
+	// 2. History-only — usable ONLY for genuinely-historical epochs.
+	c.mu.RLock()
+	cur := c.currentEpoch[room]
+	key := c.historyEpochKeys[room][epoch]
+	c.mu.RUnlock()
+	if epoch >= cur {
+		return nil // not yet proven historical — never usable for current/live
+	}
+	if key != nil {
+		return key
+	}
+	// Lazy-load from the history-only table.
+	if c.store != nil {
+		if dbKey, err := c.store.GetHistoricalEpochKey(room, epoch); err == nil && dbKey != nil {
+			c.mu.Lock()
+			if c.historyEpochKeys[room] == nil {
+				c.historyEpochKeys[room] = make(map[int64][]byte)
+			}
+			c.historyEpochKeys[room][epoch] = dbKey
+			c.mu.Unlock()
+			return dbKey
+		}
+	}
+	return nil
+}
+
 // LoadEpochKeysFromDB loads specific epoch keys from the local DB into the
 // in-memory cache. Called when displaying messages that reference epochs not
 // yet in memory (e.g., messages loaded from local DB on room switch).
@@ -395,6 +441,29 @@ func (c *Client) DecryptRoomMessage(room string, epoch int64, payloadBase64 stri
 		}
 	}
 
+	if key == nil {
+		return nil, fmt.Errorf("no epoch key for room %s epoch %d", room, epoch)
+	}
+
+	plaintext, err := crypto.Decrypt(key, payloadBase64)
+	if err != nil {
+		return nil, err
+	}
+
+	var payload protocol.DecryptedPayload
+	if err := json.Unmarshal(plaintext, &payload); err != nil {
+		return nil, err
+	}
+	return &payload, nil
+}
+
+// DecryptRoomMessageForHistory decrypts a room message payload for HISTORY /
+// scrollback / catchup display only (F7 Phase D). Identical to
+// DecryptRoomMessage except it resolves the key via RoomEpochKeyForHistory
+// (adopted-first, else a history-only key gated to epoch < currentEpoch). Use
+// ONLY on sync/history/catchup paths; never live.
+func (c *Client) DecryptRoomMessageForHistory(room string, epoch int64, payloadBase64 string) (*protocol.DecryptedPayload, error) {
+	key := c.RoomEpochKeyForHistory(room, epoch)
 	if key == nil {
 		return nil, fmt.Errorf("no epoch key for room %s epoch %d", room, epoch)
 	}
@@ -582,6 +651,28 @@ func (c *Client) DecryptRoomReaction(room string, epoch int64, payloadBase64 str
 	key := c.epochKeys[room][epoch]
 	c.mu.RUnlock()
 
+	if key == nil {
+		return nil, fmt.Errorf("no epoch key for room %s epoch %d", room, epoch)
+	}
+
+	plaintext, err := crypto.Decrypt(key, payloadBase64)
+	if err != nil {
+		return nil, err
+	}
+
+	var reaction protocol.DecryptedReaction
+	if err := json.Unmarshal(plaintext, &reaction); err != nil {
+		return nil, err
+	}
+	return &reaction, nil
+}
+
+// DecryptRoomReactionForHistory decrypts a room reaction payload for HISTORY /
+// catchup persistence only (F7 Phase D). Identical to DecryptRoomReaction
+// except it resolves the key via RoomEpochKeyForHistory. Use ONLY on the
+// catchup reaction-storage path; never live.
+func (c *Client) DecryptRoomReactionForHistory(room string, epoch int64, payloadBase64 string) (*protocol.DecryptedReaction, error) {
+	key := c.RoomEpochKeyForHistory(room, epoch)
 	if key == nil {
 		return nil, fmt.Errorf("no epoch key for room %s epoch %d", room, epoch)
 	}

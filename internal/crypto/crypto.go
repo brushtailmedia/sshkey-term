@@ -367,6 +367,40 @@ func buildUnreactCanonical(reactionID string) []byte {
 	return appendField(out, []byte(reactionID))
 }
 
+// SignDelete signs a message-deletion request. Like un-react there is no
+// encrypted payload — the signature binds the conversation context and the
+// target message id, so a compromised relay can neither forge a delete
+// attributed to a user who never requested one, nor replay a genuine delete
+// against a different message or context (audit F6). The actor is bound by
+// verifying against the claimed deleter's pinned key, as elsewhere; it is not in
+// the signed bytes. Binding the context (rather than relying on the global
+// uniqueness of msgIDs) keeps the signature sound regardless of the ID scheme
+// and matches every other signed form.
+//
+// Canonical form (kind is one of "room"/"group"/"dm"; contextID is the
+// room/group/DM id):
+//
+//	Sign("delete:v1" || u32_be(len(kind)) || kind || u32_be(len(contextID)) || contextID || u32_be(len(msgID)) || msgID)
+func SignDelete(privKey ed25519.PrivateKey, kind, contextID, msgID string) []byte {
+	return ed25519.Sign(privKey, buildDeleteCanonical(kind, contextID, msgID))
+}
+
+// VerifyDelete verifies a delete signature against the SignDelete form.
+func VerifyDelete(pubKey ed25519.PublicKey, kind, contextID, msgID string, sig []byte) bool {
+	return ed25519.Verify(pubKey, buildDeleteCanonical(kind, contextID, msgID), sig)
+}
+
+// buildDeleteCanonical builds the SignDelete/VerifyDelete input. Shared so Sign
+// and Verify cannot drift.
+func buildDeleteCanonical(kind, contextID, msgID string) []byte {
+	const tag = "delete:v1"
+	out := make([]byte, 0, len(tag)+4+len(kind)+4+len(contextID)+4+len(msgID))
+	out = append(out, tag...)
+	out = appendField(out, []byte(kind))
+	out = appendField(out, []byte(contextID))
+	return appendField(out, []byte(msgID))
+}
+
 // wrappedKeysCanonical serializes the wrapped-key map into a canonical,
 // unambiguous byte string: entries in sorted-username order, each as a
 // length-prefixed username followed by its length-prefixed decoded key bytes
@@ -393,13 +427,13 @@ func wrappedKeysCanonical(wrappedKeys map[string]string) []byte {
 }
 
 // SafetyNumber computes the out-of-band key-verification number for two users:
-// SHA256 over their sorted public-key bytes, rendered as 24 decimal digits in
-// six groups of four. Symmetric in the two keys.
+// SHA256 over their sorted public-key bytes, rendered as 32 decimal digits in
+// eight groups of four. Symmetric in the two keys.
 //
-// The 24 digits are a *uniform* reduction of the full 256-bit hash —
-// bigint(hash) mod 10^24 — using all 32 bytes. The previous form reduced each
+// The 32 digits are a *uniform* reduction of the full 256-bit hash —
+// bigint(hash) mod 10^32 — using all 32 bytes. The previous form reduced each
 // byte with `%100` and summed pairs, which was biased and used only 24 of the
-// 32 hash bytes (audit F3). The mod-10^24 reduction bias here is ~2^-176, i.e.
+// 32 hash bytes (audit F3). The mod-10^32 reduction bias here is ~2^-150, i.e.
 // negligible.
 func SafetyNumber(pubKeyA, pubKeyB ed25519.PublicKey) string {
 	a := []byte(pubKeyA)
@@ -413,15 +447,15 @@ func SafetyNumber(pubKeyA, pubKeyB ed25519.PublicKey) string {
 	combined := append(a, b...)
 	hash := sha256.Sum256(combined)
 
-	// Uniform 24-digit encoding of all 32 hash bytes.
+	// Uniform 32-digit encoding of all 32 hash bytes.
 	n := new(big.Int).SetBytes(hash[:])
-	mod := new(big.Int).Exp(big.NewInt(10), big.NewInt(24), nil) // 10^24
-	digits := fmt.Sprintf("%024d", n.Mod(n, mod))                // exactly 24 digits, zero-padded
+	mod := new(big.Int).Exp(big.NewInt(10), big.NewInt(32), nil) // 10^32
+	digits := fmt.Sprintf("%032d", n.Mod(n, mod))                // exactly 32 digits, zero-padded
 
-	// Format as six groups of four.
-	return fmt.Sprintf("%s %s %s %s %s %s",
-		digits[0:4], digits[4:8], digits[8:12],
-		digits[12:16], digits[16:20], digits[20:24])
+	// Format as eight groups of four.
+	return fmt.Sprintf("%s %s %s %s %s %s %s %s",
+		digits[0:4], digits[4:8], digits[8:12], digits[12:16],
+		digits[16:20], digits[20:24], digits[24:28], digits[28:32])
 }
 
 // MemberHash computes SHA256 over the sorted member usernames for epoch-rotation

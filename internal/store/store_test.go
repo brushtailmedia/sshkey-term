@@ -412,6 +412,78 @@ func TestEpochKeys_Replace(t *testing.T) {
 	}
 }
 
+// -- Historical (sync/history-only) epoch keys — F7 Phase D scoped-key model --
+
+func TestHistoricalEpochKeys_StoreAndRetrieve(t *testing.T) {
+	s := openTestStore(t)
+	key := []byte("32-byte-symmetric-key-for-test00")
+
+	if err := s.StoreHistoricalEpochKey("general", 3, key); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	got, err := s.GetHistoricalEpochKey("general", 3)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if string(got) != string(key) {
+		t.Errorf("key mismatch")
+	}
+}
+
+func TestHistoricalEpochKeys_Missing(t *testing.T) {
+	s := openTestStore(t)
+	got, err := s.GetHistoricalEpochKey("nonexistent", 99)
+	if err != nil {
+		t.Errorf("missing key should not error, got: %v", err)
+	}
+	if got != nil {
+		t.Errorf("missing key should return nil, got %v", got)
+	}
+}
+
+func TestHistoricalEpochKeys_Replace(t *testing.T) {
+	s := openTestStore(t)
+	s.StoreHistoricalEpochKey("general", 3, []byte("key-v1-32-bytes-padding-padding-"))
+	s.StoreHistoricalEpochKey("general", 3, []byte("key-v2-32-bytes-padding-padding-"))
+	got, _ := s.GetHistoricalEpochKey("general", 3)
+	if !strings.HasPrefix(string(got), "key-v2") {
+		t.Errorf("key should be replaced: %q", got)
+	}
+}
+
+// TestHistoricalEpochKeys_SeparateFromAdopted locks the F7 Phase D scope
+// split: the history-only store and the adopted epoch_keys store are
+// independent tables. A key in one is never visible through the other's
+// getter — so a skip-verified sync key can never satisfy an adopted/live
+// lookup, and vice versa.
+func TestHistoricalEpochKeys_SeparateFromAdopted(t *testing.T) {
+	s := openTestStore(t)
+	adopted := []byte("adopted-epoch-key")
+	historical := []byte("historical-epoch-key")
+
+	// Same (room, epoch) in both stores — each getter sees only its own table.
+	if err := s.StoreEpochKey("general", 7, adopted); err != nil {
+		t.Fatalf("StoreEpochKey: %v", err)
+	}
+	if err := s.StoreHistoricalEpochKey("general", 7, historical); err != nil {
+		t.Fatalf("StoreHistoricalEpochKey: %v", err)
+	}
+	if got, _ := s.GetEpochKey("general", 7); string(got) != string(adopted) {
+		t.Errorf("adopted getter: got %q, want adopted key", got)
+	}
+	if got, _ := s.GetHistoricalEpochKey("general", 7); string(got) != string(historical) {
+		t.Errorf("historical getter: got %q, want historical key", got)
+	}
+
+	// A history-only key must NOT leak into the adopted store.
+	if err := s.StoreHistoricalEpochKey("secret", 1, historical); err != nil {
+		t.Fatalf("StoreHistoricalEpochKey: %v", err)
+	}
+	if got, _ := s.GetEpochKey("secret", 1); got != nil {
+		t.Errorf("history-only key leaked into adopted store: %q", got)
+	}
+}
+
 // -- Pinned keys --
 
 func TestPinnedKeys_FirstSeen(t *testing.T) {

@@ -397,9 +397,9 @@ func TestSafetyNumber(t *testing.T) {
 		t.Errorf("safety numbers should be symmetric: %q vs %q", sn1, sn2)
 	}
 
-	// Should be 6 groups of 4 digits
-	if len(sn1) != 29 { // "1234 5678 9012 3456 7890 1234"
-		t.Errorf("safety number length = %d, want 29", len(sn1))
+	// Should be 8 groups of 4 digits
+	if len(sn1) != 39 { // "1234 5678 9012 3456 7890 1234 5678 9012"
+		t.Errorf("safety number length = %d, want 39", len(sn1))
 	}
 
 	t.Logf("safety number: %s", sn1)
@@ -407,7 +407,7 @@ func TestSafetyNumber(t *testing.T) {
 
 // F3: lock the uniform full-hash encoding with deterministic keys. A regression
 // to the old biased per-byte %100 form (or any encoding change) flips the golden
-// value below; the format stays 6 groups of 4 digits, which verify.go depends on.
+// value below; the format stays 8 groups of 4 digits, which verify.go depends on.
 func TestSafetyNumber_DeterministicGolden(t *testing.T) {
 	pubA := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x01}, ed25519.SeedSize)).Public().(ed25519.PublicKey)
 	pubB := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x02}, ed25519.SeedSize)).Public().(ed25519.PublicKey)
@@ -415,7 +415,7 @@ func TestSafetyNumber_DeterministicGolden(t *testing.T) {
 	sn := SafetyNumber(pubA, pubB)
 
 	// Golden value — regenerate intentionally if the encoding is changed.
-	const want = "6818 7221 9633 6518 7333 5783"
+	const want = "1128 5735 6818 7221 9633 6518 7333 5783"
 	if sn != want {
 		t.Errorf("SafetyNumber = %q, want %q", sn, want)
 	}
@@ -425,11 +425,11 @@ func TestSafetyNumber_DeterministicGolden(t *testing.T) {
 		t.Errorf("not symmetric: %q vs %q", got, sn)
 	}
 
-	// Format: 6 space-separated groups of exactly 4 decimal digits (verify.go
-	// renders the 6 groups in two rows).
+	// Format: 8 space-separated groups of exactly 4 decimal digits (verify.go
+	// renders the 8 groups in two rows of four).
 	groups := strings.Fields(sn)
-	if len(groups) != 6 {
-		t.Fatalf("groups = %d, want 6 (%q)", len(groups), sn)
+	if len(groups) != 8 {
+		t.Fatalf("groups = %d, want 8 (%q)", len(groups), sn)
 	}
 	for _, g := range groups {
 		if len(g) != 4 {
@@ -492,5 +492,55 @@ func TestSignUnreact_RoundTripAndBinding(t *testing.T) {
 	_, _ = rand.Read(garbage)
 	if VerifyUnreact(pub, reactionID, garbage) {
 		t.Error("garbage signature must not verify")
+	}
+}
+
+// TestSignDelete_RoundTripAndBinding locks the F6 delete signature: it
+// round-trips and binds to (kind, contextID, msgID) AND the signing key — a
+// different kind, a different context, a different msgID, or a different key all
+// fail (cross-context / replay-retarget / forgery blocked) — and rejects garbage.
+func TestSignDelete_RoundTripAndBinding(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		kind      = "room"
+		contextID = "rm_abc123"
+		msgID     = "msg_def456"
+	)
+	sig := SignDelete(priv, kind, contextID, msgID)
+
+	if !VerifyDelete(pub, kind, contextID, msgID, sig) {
+		t.Fatal("valid delete signature should verify")
+	}
+	if VerifyDelete(pub, "dm", contextID, msgID, sig) {
+		t.Error("must not verify against a different kind (cross-context blocked)")
+	}
+	if VerifyDelete(pub, kind, "rm_other", msgID, sig) {
+		t.Error("must not verify against a different contextID (cross-context blocked)")
+	}
+	if VerifyDelete(pub, kind, contextID, "msg_other", sig) {
+		t.Error("must not verify against a different msgID (replay/retarget blocked)")
+	}
+	otherPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if VerifyDelete(otherPub, kind, contextID, msgID, sig) {
+		t.Error("must not verify against a different key (forgery blocked)")
+	}
+	garbage := make([]byte, ed25519.SignatureSize)
+	_, _ = rand.Read(garbage)
+	if VerifyDelete(pub, kind, contextID, msgID, garbage) {
+		t.Error("garbage signature must not verify")
+	}
+
+	// Field-boundary: the length-prefixing must make ("room","ab","c") and
+	// ("room","a","bc") distinct even though kind+contextID+msgID concatenate
+	// identically — a signature for one must not verify the other.
+	s1 := SignDelete(priv, "room", "ab", "c")
+	if VerifyDelete(pub, "room", "a", "bc", s1) {
+		t.Error("length-prefixing must keep field boundaries unambiguous")
 	}
 }

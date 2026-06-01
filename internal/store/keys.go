@@ -78,6 +78,33 @@ func (s *Store) GetEpochKey(room string, epoch int64) ([]byte, error) {
 	return key, err
 }
 
+// StoreHistoricalEpochKey saves an unwrapped room epoch key into the
+// history-only store (separate table from epoch_keys). F7 Phase D scoped-key
+// model: keys delivered via skip-verified sync_batch/history_result frames are
+// written ONLY here (by the client's storeEpochKeyHistorical path) and read
+// ONLY by the history resolver (RoomEpochKeyForHistory), which gates them to
+// genuinely-historical epochs (epoch < currentEpoch). They must never feed
+// live/current decryption.
+func (s *Store) StoreHistoricalEpochKey(room string, epoch int64, key []byte) error {
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO historical_epoch_keys (room, epoch, key) VALUES (?, ?, ?)`,
+		room, epoch, key,
+	)
+	return err
+}
+
+// GetHistoricalEpochKey retrieves a history-only epoch key. Returns (nil, nil)
+// if absent — missing is not an error. The epoch < currentEpoch usability gate
+// is enforced by the caller (RoomEpochKeyForHistory); this is dumb storage.
+func (s *Store) GetHistoricalEpochKey(room string, epoch int64) ([]byte, error) {
+	var key []byte
+	err := s.db.QueryRow(`SELECT key FROM historical_epoch_keys WHERE room = ? AND epoch = ?`, room, epoch).Scan(&key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return key, err
+}
+
 // GetAllEpochKeys loads every stored epoch key. Used on startup to populate
 // the in-memory key cache so previously-synced messages can be decrypted
 // without a server round-trip.
@@ -964,6 +991,13 @@ func (s *Store) PurgeRoomMessages(roomID string) ([]string, error) {
 	// wrapped keys anyway, and the room is being removed from the
 	// user's view entirely
 	if _, err := s.db.Exec(`DELETE FROM epoch_keys WHERE room = ?`, roomID); err != nil {
+		return fileIDs, err
+	}
+	// F7 Phase D: drop history-only epoch keys for the room too, so a
+	// client-local hard /delete (room_deleted / deleted_rooms) leaves no
+	// scoped keys behind. Left/retired rooms do NOT purge — they keep
+	// historical keys for scrollback.
+	if _, err := s.db.Exec(`DELETE FROM historical_epoch_keys WHERE room = ?`, roomID); err != nil {
 		return fileIDs, err
 	}
 	return fileIDs, nil

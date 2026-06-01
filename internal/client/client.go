@@ -113,6 +113,13 @@ type Client struct {
 	retired      map[string]string           // retired userID -> retired_at timestamp
 	epochKeys    map[string]map[int64][]byte // room -> epoch -> unwrapped key
 	currentEpoch map[string]int64            // room -> current epoch number
+	// historyEpochKeys (F7 Phase D) is the history-ONLY epoch-key scope, kept
+	// strictly separate from epochKeys. Keys delivered via skip-verified
+	// sync_batch / history_result land here (never in epochKeys), read only by
+	// the history resolver (RoomEpochKeyForHistory) and only for genuinely
+	// historical epochs (epoch < currentEpoch). Never feeds live/current
+	// decryption — see docs/planning/open/f7-phase-d-scoped-key-model.md.
+	historyEpochKeys map[string]map[int64][]byte // room -> epoch -> unwrapped history-only key
 	// pendingEpochAtt (F7) stashes a signature-verified epoch_key whose member
 	// hash didn't match the local roster (or whose roster wasn't loaded yet),
 	// while we request a fresh room_members_list. Drained — single-shot — when
@@ -160,21 +167,22 @@ func New(cfg Config) *Client {
 		cfg.Logger = slog.Default()
 	}
 	return &Client{
-		cfg:             cfg,
-		logger:          cfg.Logger,
-		profiles:        make(map[string]*protocol.Profile),
-		groupMembers:    make(map[string][]string),
-		groupAdmins:     make(map[string]map[string]bool),
-		dms:             make(map[string][2]string),
-		retired:         make(map[string]string),
-		epochKeys:       make(map[string]map[int64][]byte),
-		currentEpoch:    make(map[string]int64),
-		pendingEpochAtt: make(map[string]protocol.EpochKey),
-		rotatedEpoch:    make(map[string]int64),
-		seqCounters:     make(map[string]int64),
-		roomMemberCache: make(map[string][]string),
-		sendQueue:       NewQueue(),
-		done:            make(chan struct{}),
+		cfg:              cfg,
+		logger:           cfg.Logger,
+		profiles:         make(map[string]*protocol.Profile),
+		groupMembers:     make(map[string][]string),
+		groupAdmins:      make(map[string]map[string]bool),
+		dms:              make(map[string][2]string),
+		retired:          make(map[string]string),
+		epochKeys:        make(map[string]map[int64][]byte),
+		currentEpoch:     make(map[string]int64),
+		historyEpochKeys: make(map[string]map[int64][]byte),
+		pendingEpochAtt:  make(map[string]protocol.EpochKey),
+		rotatedEpoch:     make(map[string]int64),
+		seqCounters:      make(map[string]int64),
+		roomMemberCache:  make(map[string][]string),
+		sendQueue:        NewQueue(),
+		done:             make(chan struct{}),
 	}
 }
 
@@ -1370,47 +1378,27 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 	}
 }
 
-// storeEpochKey unwraps and stores an epoch key in memory AND persists it
-// to the local encrypted DB so it survives across app restarts. Without
-// persistence, the client would lose the ability to decrypt past messages.
+// storeEpochKey unwraps and stores a VERIFIED (adopted) epoch key in memory AND
+// persists it to the local encrypted DB so it survives across app restarts, and
+// advances currentEpoch when this is a newer epoch. This is the adopted/live
+// path (verified epoch_key); the history-only sync/history path is the separate
+// storeEpochKeyHistorical (F7 Phase D) — the two key scopes never mix.
 //
-// If the key is already in memory for this (room, epoch), the unwrap and
-// DB write are skipped entirely — avoids redundant ECDH+HKDF work when
-// the server re-sends a key the client already has (common on reconnect).
+// If the key is already in memory for this (room, epoch), the unwrap and DB
+// write are skipped entirely — avoids redundant ECDH+HKDF work when the server
+// re-sends a key the client already has (common on reconnect).
 func (c *Client) storeEpochKey(room string, epoch int64, wrappedKey string) {
-	c.storeEpochKeyInner(room, epoch, wrappedKey, true)
-}
-
-// storeEpochKeyHistorical stores an epoch key for OLD-message decryption only,
-// WITHOUT advancing currentEpoch. F7 sync-path guard: keys delivered via
-// sync_batch / history_result are historical and skip-verified, so they must
-// never establish/advance the current epoch — only a verified epoch_key (the
-// live/connect path) does. Without this, a malicious server could deliver the
-// current epoch's key (wrapped for a shadow reader) via sync to dodge the F7
-// attestation check (see docs/planning/open/f7-room-member-attestation.md §6.5).
-func (c *Client) storeEpochKeyHistorical(room string, epoch int64, wrappedKey string) {
-	c.storeEpochKeyInner(room, epoch, wrappedKey, false)
-}
-
-// storeEpochKeyInner unwraps and stores an epoch key in memory AND persists it
-// to the local encrypted DB so it survives across app restarts. advanceCurrent
-// gates whether this key may move currentEpoch forward (true for verified
-// epoch_key adoption; false for historical sync/history keys — see the F7
-// sync-path guard above).
-func (c *Client) storeEpochKeyInner(room string, epoch int64, wrappedKey string, advanceCurrent bool) {
-	// Skip if already in memory (server re-sent a key we already have)
+	// Skip if already adopted (server re-sent a key we already have).
 	c.mu.RLock()
 	existing := c.epochKeys[room][epoch]
 	c.mu.RUnlock()
 	if existing != nil {
-		// Still update currentEpoch in case this is a newer epoch number
-		if advanceCurrent {
-			c.mu.Lock()
-			if epoch > c.currentEpoch[room] {
-				c.currentEpoch[room] = epoch
-			}
-			c.mu.Unlock()
+		// Still advance currentEpoch in case this is a newer epoch number.
+		c.mu.Lock()
+		if epoch > c.currentEpoch[room] {
+			c.currentEpoch[room] = epoch
 		}
+		c.mu.Unlock()
 		return
 	}
 
@@ -1425,7 +1413,7 @@ func (c *Client) storeEpochKeyInner(room string, epoch int64, wrappedKey string,
 		c.epochKeys[room] = make(map[int64][]byte)
 	}
 	c.epochKeys[room][epoch] = key
-	if advanceCurrent && epoch > c.currentEpoch[room] {
+	if epoch > c.currentEpoch[room] {
 		c.currentEpoch[room] = epoch
 	}
 	store := c.store
@@ -1436,6 +1424,47 @@ func (c *Client) storeEpochKeyInner(room string, epoch int64, wrappedKey string,
 	if store != nil {
 		if err := store.StoreEpochKey(room, epoch, key); err != nil {
 			c.logger.Warn("failed to persist epoch key", "room", room, "epoch", epoch, "error", err)
+		}
+	}
+}
+
+// storeEpochKeyHistorical stores an epoch key into the history-ONLY scope
+// (historyEpochKeys map + historical_epoch_keys table), kept strictly separate
+// from the adopted epochKeys/epoch_keys. F7 Phase D scoped-key model: keys
+// delivered via sync_batch / history_result are historical and skip-verified, so
+// they must NEVER land in the adopted store, establish/advance currentEpoch, or
+// feed live/current decryption. The history resolver (RoomEpochKeyForHistory)
+// reads them only for genuinely-historical epochs (epoch < currentEpoch).
+// Without this separation a malicious server could deliver the current epoch's
+// key (wrapped for a shadow reader) via sync to dodge the F7 attestation check
+// (see docs/planning/open/f7-phase-d-scoped-key-model.md).
+func (c *Client) storeEpochKeyHistorical(room string, epoch int64, wrappedKey string) {
+	// Skip if already in the history store (server re-sent a key we have).
+	c.mu.RLock()
+	existing := c.historyEpochKeys[room][epoch]
+	c.mu.RUnlock()
+	if existing != nil {
+		return
+	}
+
+	key, err := c.UnwrapKey(wrappedKey)
+	if err != nil {
+		c.logger.Warn("failed to unwrap historical epoch key", "room", room, "epoch", epoch, "error", err)
+		return
+	}
+
+	c.mu.Lock()
+	if c.historyEpochKeys[room] == nil {
+		c.historyEpochKeys[room] = make(map[int64][]byte)
+	}
+	c.historyEpochKeys[room][epoch] = key
+	store := c.store
+	c.mu.Unlock()
+
+	// Persist to the history-only table (survives restart). Non-fatal on error.
+	if store != nil {
+		if err := store.StoreHistoricalEpochKey(room, epoch, key); err != nil {
+			c.logger.Warn("failed to persist historical epoch key", "room", room, "epoch", epoch, "error", err)
 		}
 	}
 }

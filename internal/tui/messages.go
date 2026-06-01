@@ -862,7 +862,7 @@ func (m *MessagesModel) PrependMessages(msgs []DisplayMessage) {
 	m.cursor += len(msgs) // post-dedup count — keep cursor on the same message
 }
 
-func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
+func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client, fromSync bool) {
 	if msg.Room != m.room {
 		return // not the active room
 	}
@@ -889,8 +889,23 @@ func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
 	var attachments []DisplayAttachment
 
 	if c != nil {
-		payload, err := c.DecryptRoomMessage(msg.Room, msg.Epoch, msg.Payload)
-		if err == nil {
+		// F7 Phase D: sync/history replay (fromSync) decrypts via the
+		// history-aware resolver and SKIPS undecryptable rows — matching
+		// persistence's drop, so a row never appears-then-disappears on the next
+		// LoadFromDB. Live stays adopted-only and renders "(encrypted)".
+		var payload *protocol.DecryptedPayload
+		var err error
+		if fromSync {
+			payload, err = c.DecryptRoomMessageForHistory(msg.Room, msg.Epoch, msg.Payload)
+		} else {
+			payload, err = c.DecryptRoomMessage(msg.Room, msg.Epoch, msg.Payload)
+		}
+		if err != nil {
+			if fromSync {
+				return // skip undecryptable sync/history row (matches the dropped store row)
+			}
+			// live: fall through and render "(encrypted)"
+		} else {
 			body = payload.Body
 			replyTo = payload.ReplyTo
 			mentions = payload.Mentions
@@ -901,13 +916,20 @@ func (m *MessagesModel) AddRoomMessage(msg protocol.Message, c *client.Client) {
 				if fileEpoch == 0 {
 					fileEpoch = msg.Epoch
 				}
+				// Resolve the attachment key in the same scope as the body.
+				var key []byte
+				if fromSync {
+					key = c.RoomEpochKeyForHistory(msg.Room, fileEpoch)
+				} else {
+					key = c.RoomEpochKey(msg.Room, fileEpoch)
+				}
 				attachments = append(attachments, DisplayAttachment{
 					FileID:      a.FileID,
 					Name:        a.Name,
 					Size:        a.Size,
 					Mime:        a.Mime,
 					IsImage:     isImageMime(a.Mime),
-					DecryptKey:  c.RoomEpochKey(msg.Room, fileEpoch),
+					DecryptKey:  key,
 					ContentHash: a.ContentHash, // F11: verified on download
 				})
 			}
@@ -1067,33 +1089,38 @@ func (m *MessagesModel) AddDMMessage(msg protocol.DM, c *client.Client) {
 
 // buildDisplayMsg creates a DisplayMessage from a room protocol message without appending it.
 // Used by history prepend where messages go to the front, not the back.
-func (m *MessagesModel) buildDisplayMsg(msg protocol.Message, c *client.Client) DisplayMessage {
+func (m *MessagesModel) buildDisplayMsg(msg protocol.Message, c *client.Client) (DisplayMessage, bool) {
 	body := "(encrypted)"
 	replyTo := ""
 	var mentions []string
 	var attachments []DisplayAttachment
 
 	if c != nil {
-		payload, err := c.DecryptRoomMessage(msg.Room, msg.Epoch, msg.Payload)
-		if err == nil {
-			body = payload.Body
-			replyTo = payload.ReplyTo
-			mentions = payload.Mentions
-			for _, a := range payload.Attachments {
-				fileEpoch := a.FileEpoch
-				if fileEpoch == 0 {
-					fileEpoch = msg.Epoch
-				}
-				attachments = append(attachments, DisplayAttachment{
-					FileID:      a.FileID,
-					Name:        a.Name,
-					Size:        a.Size,
-					Mime:        a.Mime,
-					IsImage:     isImageMime(a.Mime),
-					DecryptKey:  c.RoomEpochKey(msg.Room, fileEpoch),
-					ContentHash: a.ContentHash, // F11: verified on download
-				})
+		// F7 Phase D: history_result rows decrypt via the history-aware
+		// resolver, and an undecryptable row is SKIPPED (ok=false) rather than
+		// prepended as a transient "(encrypted)" ghost — it was dropped from the
+		// store (storeRoomMessageFromCatchup), so it must not appear here either.
+		payload, err := c.DecryptRoomMessageForHistory(msg.Room, msg.Epoch, msg.Payload)
+		if err != nil {
+			return DisplayMessage{}, false
+		}
+		body = payload.Body
+		replyTo = payload.ReplyTo
+		mentions = payload.Mentions
+		for _, a := range payload.Attachments {
+			fileEpoch := a.FileEpoch
+			if fileEpoch == 0 {
+				fileEpoch = msg.Epoch
 			}
+			attachments = append(attachments, DisplayAttachment{
+				FileID:      a.FileID,
+				Name:        a.Name,
+				Size:        a.Size,
+				Mime:        a.Mime,
+				IsImage:     isImageMime(a.Mime),
+				DecryptKey:  c.RoomEpochKeyForHistory(msg.Room, fileEpoch),
+				ContentHash: a.ContentHash, // F11: verified on download
+			})
 		}
 	}
 
@@ -1112,7 +1139,7 @@ func (m *MessagesModel) buildDisplayMsg(msg protocol.Message, c *client.Client) 
 		ReplyTo:     replyTo,
 		Mentions:    mentions,
 		Attachments: attachments,
-	}
+	}, true
 }
 
 // buildDisplayGroup creates a DisplayMessage from a group DM protocol message without appending it.

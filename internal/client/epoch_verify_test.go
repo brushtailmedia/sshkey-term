@@ -247,7 +247,7 @@ func TestSyncHistoryEpochKey_DoesNotOccupyCurrentEpochSlot(t *testing.T) {
 
 	msg := h.buildSignedRoomMessage(t, "msg_sync_history_current_epoch", evRoom, evEpoch, epochKey, "shadow-readable")
 	raw, _ := json.Marshal(msg)
-	h.alice.storeRoomMessage(raw, false)
+	h.alice.storeRoomMessageFromCatchup(raw)
 	if m := h.storedMessage(t, msg.ID); m != nil {
 		t.Errorf("current-epoch room message decrypted with a sync/history-only key; body=%q", m.Body)
 	}

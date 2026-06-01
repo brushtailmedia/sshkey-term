@@ -118,10 +118,30 @@ func (c *Client) VerifyUnreactAuthor(rm protocol.ReactionRemoved) bool {
 	return crypto.VerifyUnreact(pub, rm.ReactionID, sig)
 }
 
-// storeRoomMessage decrypts and stores a room message in the local DB.
-// When warnReplay is false, replay high-water checks still run but do not
-// emit WARN logs (used for sync/history catchup where old frames are normal).
+// storeRoomMessage decrypts and stores a LIVE room message in the local DB.
+// When warnReplay is false, replay high-water checks still run but do not emit
+// WARN logs. This is the live path: it uses the adopted-only decryptor and, on
+// a decrypt failure, persists an empty-body row (a "missing current key" signal,
+// consistent with the live TUI showing "(encrypted)"). The sync/history catchup
+// path is the separate storeRoomMessageFromCatchup.
 func (c *Client) storeRoomMessage(raw json.RawMessage, warnReplay bool) {
+	c.storeRoomMessageInner(raw, warnReplay, false)
+}
+
+// storeRoomMessageFromCatchup persists a room message carried inside a
+// sync_batch / history_result frame (F7 Phase D). Unlike the live path it
+// decrypts with the history-aware resolver (RoomEpochKeyForHistory, gated to
+// epoch < currentEpoch) and DROPS undecryptable rows instead of persisting an
+// empty-body ghost — mirroring storeGroupMessage and matching what the
+// sync/history TUI display does (so a row never "appears then disappears" on
+// reload). Keeping live and catchup as distinct entry points keeps the
+// security-critical live≠catchup distinction explicit rather than riding the
+// warnReplay flag.
+func (c *Client) storeRoomMessageFromCatchup(raw json.RawMessage) {
+	c.storeRoomMessageInner(raw, false, true)
+}
+
+func (c *Client) storeRoomMessageInner(raw json.RawMessage, warnReplay, fromCatchup bool) {
 	if c.store == nil {
 		return
 	}
@@ -167,7 +187,15 @@ func (c *Client) storeRoomMessage(raw json.RawMessage, warnReplay bool) {
 
 	var attachments []store.StoredAttachment
 
-	payload, err := c.DecryptRoomMessage(msg.Room, msg.Epoch, msg.Payload)
+	// F7 Phase D: the catchup/history path resolves keys through the
+	// history-aware resolver (adopted-first, else a history-only key gated to
+	// epoch < currentEpoch); the live path stays adopted-only.
+	var payload *protocol.DecryptedPayload
+	if fromCatchup {
+		payload, err = c.DecryptRoomMessageForHistory(msg.Room, msg.Epoch, msg.Payload)
+	} else {
+		payload, err = c.DecryptRoomMessage(msg.Room, msg.Epoch, msg.Payload)
+	}
 	if err == nil {
 		body = payload.Body
 		replyTo = payload.ReplyTo
@@ -179,7 +207,17 @@ func (c *Client) storeRoomMessage(raw json.RawMessage, warnReplay bool) {
 			if fileEpoch == 0 {
 				fileEpoch = msg.Epoch
 			}
-			key := c.RoomEpochKey(msg.Room, fileEpoch)
+			// Resolve the attachment key in the SAME scope as the body decrypt
+			// (history-aware on catchup) so a historical attachment's DecryptKey
+			// is baked correctly — adopted-only RoomEpochKey would return nil for
+			// a history-only key and leave the attachment permanently
+			// undownloadable (the download path takes the stored key verbatim).
+			var key []byte
+			if fromCatchup {
+				key = c.RoomEpochKeyForHistory(msg.Room, fileEpoch)
+			} else {
+				key = c.RoomEpochKey(msg.Room, fileEpoch)
+			}
 			attachments = append(attachments, store.StoredAttachment{
 				FileID:      a.FileID,
 				Name:        a.Name,
@@ -189,6 +227,12 @@ func (c *Client) storeRoomMessage(raw json.RawMessage, warnReplay bool) {
 				ContentHash: a.ContentHash, // F11: verified against the blob on download
 			})
 		}
+	} else if fromCatchup {
+		// F7 Phase D: drop undecryptable catchup/history rows rather than persist
+		// an empty-body ghost (mirrors storeGroupMessage). The row is re-delivered
+		// on a later sync once its epoch is historical and a usable key is present.
+		// The live path falls through and stores the empty-body row.
+		return
 	}
 
 	inserted, err := c.store.InsertMessage(store.StoredMessage{
@@ -677,7 +721,24 @@ func (c *Client) storeEditedDMMessage(raw json.RawMessage) {
 // guard here drops the reaction at insert time so the local store
 // stays clean. Matches the "can't decrypt — don't persist garbage"
 // defensive pattern below and the server-side tombstone guard.
+// storeReaction decrypts and stores a LIVE reaction in the local DB. Room
+// reactions use the adopted-only decryptor; the sync/history catchup path is the
+// separate storeReactionFromCatchup.
 func (c *Client) storeReaction(raw json.RawMessage) {
+	c.storeReactionInner(raw, false)
+}
+
+// storeReactionFromCatchup persists a room reaction carried inside a sync_batch
+// / history_result frame (F7 Phase D): the room branch decrypts with the
+// history-aware resolver (RoomEpochKeyForHistory) so an old-epoch reaction
+// decrypts during scrollback. Group/DM reactions are unaffected (per-message
+// wrapped keys; room-only fix). storeReaction already drops on a decrypt failure
+// (emoji == "" → no InsertReaction), so no extra ghost handling is needed.
+func (c *Client) storeReactionFromCatchup(raw json.RawMessage) {
+	c.storeReactionInner(raw, true)
+}
+
+func (c *Client) storeReactionInner(raw json.RawMessage, fromCatchup bool) {
 	if c.store == nil {
 		return
 	}
@@ -714,8 +775,16 @@ func (c *Client) storeReaction(raw json.RawMessage) {
 	// so the durable write can't be steered onto a different parent message.
 	var emoji string
 	if r.Room != "" {
-		dr, err := c.DecryptRoomReaction(r.Room, r.Epoch, r.Payload)
-		if err == nil {
+		// F7 Phase D: catchup room reactions decrypt with the history-aware
+		// resolver; live stays adopted-only.
+		var dr *protocol.DecryptedReaction
+		var derr error
+		if fromCatchup {
+			dr, derr = c.DecryptRoomReactionForHistory(r.Room, r.Epoch, r.Payload)
+		} else {
+			dr, derr = c.DecryptRoomReaction(r.Room, r.Epoch, r.Payload)
+		}
+		if derr == nil {
 			if dr.Target != r.ID {
 				return
 			}
@@ -787,7 +856,7 @@ func (c *Client) checkReplay(sender, deviceID, room, group string, seq int64, wa
 func (c *Client) handleCatchupMessage(msgType string, raw json.RawMessage) {
 	switch msgType {
 	case "message":
-		c.storeRoomMessage(raw, false)
+		c.storeRoomMessageFromCatchup(raw)
 	case "group_message":
 		c.storeGroupMessage(raw, false)
 	case "dm":

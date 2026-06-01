@@ -349,6 +349,26 @@ func TestVerifyPicker_SelectionOpensVerifyModel(t *testing.T) {
 	}
 }
 
+func TestVerifyModel_RendersSafetyNumberTwoRowsFourColumns(t *testing.T) {
+	v := VerifyModel{
+		visible:       true,
+		displayName:   "Alice",
+		myDisplayName: "Me",
+		safetyNumber:  "1128 5735 6818 7221 9633 6518 7333 5783",
+	}
+
+	out := stripANSI(v.View(100))
+	if !strings.Contains(out, "1128  5735  6818  7221") {
+		t.Fatalf("first safety-number row should render four groups, got:\n%s", out)
+	}
+	if !strings.Contains(out, "9633  6518  7333  5783") {
+		t.Fatalf("second safety-number row should render four groups, got:\n%s", out)
+	}
+	if strings.Contains(out, "6818  7221\n") {
+		t.Fatalf("safety number appears to still render as 3-column rows:\n%s", out)
+	}
+}
+
 // Typed `/verify @user` on an already-verified user must surface a
 // friendly status and NOT re-open the safety-number flow — matches
 // the picker candidate filter which excludes already-verified users.
