@@ -3853,18 +3853,18 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(cmds...)
 }
 
-// connectFailedKeyInfo returns fingerprint + authorized key for the
-// pending-approval overlay. On first connect failure, a.client is still nil
-// (Connect() failed before connectedWithClient was dispatched), so we
-// fall back to reading KeyPath+".pub" directly.
+// connectFailedKeyInfo returns the fingerprint + authorized key shown (and
+// copied) on the pending-approval overlay, for the CURRENT server.
+//
+// It always sources from a.cfg.KeyPath — the authoritative key path for the
+// current server, set at startup (main.go) and repointed on every switch
+// (switchServerByIndexInternal). It deliberately does NOT consult a.client: this
+// overlay only renders in the not-connected branch (the else of the reconnect
+// check), where a.client is either nil (first run) or the PREVIOUS server's
+// closed-but-not-nilled client after a switch / Add Server. Trusting a.client
+// there showed and copied the wrong server's key (fingerprint included) — the
+// "adding a second server copies the first server's public key" bug.
 func (a App) connectFailedKeyInfo() (string, string) {
-	if a.client != nil {
-		fp := strings.TrimSpace(a.client.KeyFingerprint())
-		pub := strings.TrimSpace(a.client.PublicKeyAuthorized())
-		if fp != "" || pub != "" {
-			return fp, pub
-		}
-	}
 	return keyInfoFromPubPath(a.cfg.KeyPath)
 }
 

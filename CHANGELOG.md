@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Add Server: the pending-approval screen showed and copied the *wrong* server's public key.** When adding a second server while connected to the first, the connect-failed / pending-approval overlay derived its fingerprint + public key from `a.client` — which, after the Add-Server flow switches to the new server, is the *previous* server's closed-but-not-nilled client — so it displayed and copied **server 1's** key (and fingerprint) instead of the newly-added server's. `connectFailedKeyInfo` now sources the key authoritatively from `a.cfg.KeyPath` (set at startup and repointed on every switch), never `a.client`. The overlay only renders while disconnected, where `a.client` is always nil (first run) or stale (post-switch), so dropping the `a.client` branch is lossless — and it also fixes the wrong *fingerprint* shown there. Tests: `internal/tui/connectfailed_keyinfo_test.go`.
+
 ## [v0.5.0] - 2026-06-02
 
 ### Security
