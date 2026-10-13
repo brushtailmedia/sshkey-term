@@ -197,13 +197,18 @@ type App struct {
 	// assignment landed on a throwaway copy, leaving Update's mouse
 	// handlers reading zero-valued rectangles. See computeLayout's
 	// doc-comment for the full history.
-	contextMenu     ContextMenuModel
-	memberMenu      MemberMenuModel
-	statusPicker    StatusPickerModel
-	picker          PickerModel // shared single-select picker (bare-form verbs)
-	passphrase      PassphraseModel
-	passphraseCh    chan []byte
-	passphraseCache map[string][]byte // keyPath -> passphrase
+	contextMenu  ContextMenuModel
+	memberMenu   MemberMenuModel
+	statusPicker StatusPickerModel
+	picker       PickerModel // shared single-select picker (bare-form verbs)
+	// filePicker is the keyboard-only tree explorer behind bare `/upload` /
+	// `/u` (upload-file-picker). filePickerLastRoot remembers where the user
+	// last browsed for this process lifetime (GATE G2; not persisted).
+	filePicker         FilePickerModel
+	filePickerLastRoot string
+	passphrase         PassphraseModel
+	passphraseCh       chan []byte
+	passphraseCache    map[string][]byte // keyPath -> passphrase
 
 	// pendingCreateDM tracks an in-flight create_dm so the client can
 	// transparently retry if the server returns server_busy (a cleanup
@@ -616,6 +621,19 @@ func (a *App) goOffline() {
 	a.statusBar.SetError("offline - local history only")
 }
 
+// clearConnectProgressStatus drops a connection-progress message
+// ("connecting...", a ladder attempt, an offline notice) from the status
+// bar once a connect succeeds. Those messages live in the error slot, which
+// persists until the next user action — without this, "connecting..."
+// outlives the connection it announced. Anything else in the slot is left
+// alone.
+func (a *App) clearConnectProgressStatus() {
+	msg := a.statusBar.errorMsg
+	if strings.HasPrefix(msg, "connecting") || strings.HasPrefix(msg, "offline - ") {
+		a.statusBar.ClearError()
+	}
+}
+
 // initialRetryMsg is one gen-stamped tick of the initial-connect ladder
 // (D9). A stale gen means a switch or manual toggle happened since it was
 // scheduled, and the tick must do nothing.
@@ -683,6 +701,10 @@ func (a *App) switchServerByIndexInternal(idx int, force bool) tea.Cmd {
 	// or `Ctrl+g <current digit>` — is a no-op switch that must still reveal
 	// the server underneath. No-op when the wizard isn't open.
 	a.addServer.Hide()
+	// Defensive parity with addServer: the modal intercept chain makes a
+	// switch-while-open unreachable by keyboard, but a stale file-picker
+	// selection must never survive a server change.
+	a.filePicker.Hide()
 	if a.appConfig == nil || idx < 0 || idx >= len(a.appConfig.Servers) || (!force && idx == a.serverIdx) {
 		return nil
 	}
@@ -1651,6 +1673,30 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 
+		// File picker intercepts all keys when visible. Esc at App level
+		// (same pattern as statusPicker/picker above); the viewport is
+		// re-derived before every Update exactly like the emoji picker, so
+		// a resize is absorbed on the next key. Focus returns to the input
+		// on any close. Keyboard-only by design — mouse events are eaten by
+		// the consume list in the mouse dispatcher.
+		if a.filePicker.IsVisible() {
+			if msg.Type == tea.KeyEsc {
+				a.filePicker.Hide()
+				a.filePickerLastRoot = a.filePicker.LastRoot()
+				a.focus = FocusInput
+				return a, nil
+			}
+			layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+			a.filePicker.SetViewport(layout.MessagesWidth, layout.InputY0-layout.MessagesY0)
+			var cmd tea.Cmd
+			a.filePicker, cmd = a.filePicker.Update(msg)
+			if !a.filePicker.IsVisible() {
+				a.filePickerLastRoot = a.filePicker.LastRoot()
+				a.focus = FocusInput
+			}
+			return a, cmd
+		}
+
 		// Context menu intercepts all keys. Same Esc-at-App-level
 		// pattern as memberMenu above. The user reported (2026-05-05)
 		// that pressing Esc with the menu open did NOT dismiss the
@@ -2498,6 +2544,36 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.infoPanel.ShowUser(msg.User, a.client, a.sidebar.online, a.sidebar.status, a.messages.dm)
 			}
 		}
+		return a, nil
+
+	case FilePickerSelectedMsg:
+		// The file picker echoed an Enter-on-file (upload-file-picker). The
+		// widget already Hid itself (hide-then-emit); restore focus and
+		// remember the root for the next open.
+		a.focus = FocusInput
+		a.filePickerLastRoot = a.filePicker.LastRoot()
+		// Wrong-server guard: the request carries the connection generation
+		// at open; a switch (or reconnect) since then bumped a.connGen. The
+		// modal chain makes this structurally unreachable by keyboard — the
+		// check makes the guarantee explicit rather than inferred (same rule
+		// UploadResultEvent uses for results).
+		if msg.Request.Gen != a.connGen {
+			a.statusBar.SetError("Upload cancelled: the connection changed while the picker was open")
+			return a, nil
+		}
+		// Re-validate: the file may have vanished between listing and Enter.
+		if err := validateUploadPath(msg.Path); err != nil {
+			a.statusBar.SetError(err.Error())
+			return a, nil
+		}
+		// Offline-browse gate (GATE P0, resolved): the connection may have
+		// dropped while the user browsed. canUseServerAction also implies
+		// a.client != nil, which startUpload's by-value capture requires.
+		if !a.canUseServerAction() {
+			a.statusBar.SetError("offline - reconnect to upload files")
+			return a, nil
+		}
+		a.startUpload(msg.Request.Room, msg.Request.Group, msg.Request.DM, msg.Path)
 		return a, nil
 
 	case PickerSelectedMsg:
@@ -3728,6 +3804,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.client = msg.client
 		a.setConnState(ConnStateOnline)
+		a.clearConnectProgressStatus()
 		a.reconnectAttempt = 0
 
 		// Seed our own online state so the green dot shows up next
@@ -4200,7 +4277,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		a.lastAdminPicker.IsVisible() ||
 		a.saveAttachment.IsVisible() ||
 		a.contextMenu.IsVisible() || a.memberMenu.IsVisible() ||
-		a.statusPicker.IsVisible() || a.picker.IsVisible() {
+		a.statusPicker.IsVisible() || a.picker.IsVisible() || a.filePicker.IsVisible() {
 		return a, nil
 	}
 
@@ -5376,6 +5453,58 @@ func (a *App) currentDMRetiredPartner() (bool, string) {
 	return false, ""
 }
 
+// startUpload launches the upload goroutine for ONE validated file path
+// against the given context. Shared by the typed `/upload <path>` route and
+// the file picker's selection so the two can never drift. Callers have
+// already passed canUseServerAction() (so a.client is live) and checked that
+// exactly one of room/group/dm is set. Body moved verbatim from the former
+// /upload case — the capture rationale below still applies.
+func (a *App) startUpload(room, group, dm, path string) {
+	body := filepath.Base(path)
+	// Synchronous status update — this mutation propagates because the
+	// callers are pointer-receiver paths, so the change persists via
+	// Update's returned model.
+	a.statusBar.SetError("Uploading " + body + "...")
+	// Capture by value: client and the result channel are reference
+	// types, so the goroutine doesn't need to dereference the
+	// (about-to-go-stale) `a *App` pointer after Update returns.
+	// Goroutine pushes a UploadResultEvent through the channel;
+	// waitForMsg picks it up and delivers it as a tea.Msg, which
+	// updateInner's `case UploadResultEvent` handler turns into a
+	// canonical-state SetError call. Pre-fix path mutated statusBar
+	// directly from the goroutine — those writes landed on the
+	// orphaned local-to-updateInner App copy and never reached
+	// the rendered model, so server-side rejections (oversized,
+	// missing_hash, etc.) failed completely silently.
+	c := a.client
+	resultCh := a.sidebar.uploadResultCh
+	// Capture gen at launch time so an upload kicked off
+	// against server A doesn't surface its completion status
+	// against server B after a switch.
+	gen := a.connGen
+	go func() {
+		var err error
+		switch {
+		case room != "":
+			err = c.SendRoomMessageFile(room, body, path, "", nil)
+		case group != "":
+			err = c.SendGroupMessageFile(group, body, path, "", nil)
+		case dm != "":
+			err = c.SendDMMessageFile(dm, body, path, "", nil)
+		}
+		// Non-blocking send — buffer of 16 plus the rarity of
+		// concurrent uploads makes drops effectively impossible,
+		// but `default` keeps us from stalling the goroutine on
+		// a wedged channel.
+		if resultCh != nil {
+			select {
+			case resultCh <- UploadResultEvent{Name: body, Err: err, gen: gen}:
+			default:
+			}
+		}
+	}()
+}
+
 // handleSlashCommand processes slash commands that need app-level handling.
 func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 	// V8 dispatch-layer read-only gate — the authoritative single source of
@@ -5785,74 +5914,31 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 		a.applyMuteState(target, kind, !a.muted[target])
 	case "/upload":
 		if sc.Arg == "" {
-			a.statusBar.SetError("Usage: /upload <file path>")
+			// Bare form → file picker (upload-file-picker: bare verb → picker,
+			// typed arg → direct path, the shared-picker routing idiom). The
+			// router used to drop the bare form silently.
+			a.openFilePicker(sc)
 			return
 		}
-		// Check if file exists
-		path := sc.Arg
-		if _, err := os.Stat(path); err != nil {
-			// Check if running over SSH
-			msg := "File not found: " + path
-			if os.Getenv("SSH_CLIENT") != "" || os.Getenv("SSH_TTY") != "" {
-				msg += " (running remotely — copy the file first with scp)"
-			}
-			a.statusBar.SetError(msg)
+		// Typed route: tilde / drag-and-drop quoting normalized, then the
+		// exists + is-a-directory check (upload-file-picker Step 2).
+		path := normalizeUploadPath(sc.Arg)
+		if err := validateUploadPath(path); err != nil {
+			a.statusBar.SetError(err.Error())
 			return
 		}
-		if a.client == nil {
-			a.statusBar.SetError("Not connected")
+		// Offline-browse gate (GATE P0, resolved): a live connection is
+		// required to upload. Same guard position the old a.client == nil
+		// check held, so the stat → gate → context order is unchanged.
+		if !a.canUseServerAction() {
+			a.statusBar.SetError("offline - reconnect to upload files")
 			return
 		}
 		if sc.Room == "" && sc.Group == "" && sc.DM == "" {
 			a.statusBar.SetError("No active room or group")
 			return
 		}
-		body := filepath.Base(path)
-		// Synchronous status update — this mutation propagates because
-		// handleSlashCommand is pointer-receiver, so the change persists
-		// via Update's returned model.
-		a.statusBar.SetError("Uploading " + body + "...")
-		// Capture by value: client and the result channel are reference
-		// types, so the goroutine doesn't need to dereference the
-		// (about-to-go-stale) `a *App` pointer after Update returns.
-		// Goroutine pushes a UploadResultEvent through the channel;
-		// waitForMsg picks it up and delivers it as a tea.Msg, which
-		// updateInner's `case UploadResultEvent` handler turns into a
-		// canonical-state SetError call. Pre-fix path mutated statusBar
-		// directly from the goroutine — those writes landed on the
-		// orphaned local-to-updateInner App copy and never reached
-		// the rendered model, so server-side rejections (oversized,
-		// missing_hash, etc.) failed completely silently.
-		c := a.client
-		room := sc.Room
-		group := sc.Group
-		dm := sc.DM
-		resultCh := a.sidebar.uploadResultCh
-		// Capture gen at launch time so an upload kicked off
-		// against server A doesn't surface its completion status
-		// against server B after a switch.
-		gen := a.connGen
-		go func() {
-			var err error
-			switch {
-			case room != "":
-				err = c.SendRoomMessageFile(room, body, path, "", nil)
-			case group != "":
-				err = c.SendGroupMessageFile(group, body, path, "", nil)
-			case dm != "":
-				err = c.SendDMMessageFile(dm, body, path, "", nil)
-			}
-			// Non-blocking send — buffer of 16 plus the rarity of
-			// concurrent uploads makes drops effectively impossible,
-			// but `default` keeps us from stalling the goroutine on
-			// a wedged channel.
-			if resultCh != nil {
-				select {
-				case resultCh <- UploadResultEvent{Name: body, Err: err, gen: gen}:
-				default:
-				}
-			}
-		}()
+		a.startUpload(sc.Room, sc.Group, sc.DM, path)
 	case "/rename":
 		// Phase 14: client-side admin pre-check. Non-admins get a
 		// friendly local rejection; admins pass through to the server
@@ -6440,6 +6526,56 @@ func (a *App) whoisReadout(targetID string) {
 	// renders fingerprint, pubkey, presence, verified state,
 	// first-seen, role, retirement.
 	a.infoPanel.ShowUser(targetID, a.client, a.sidebar.online, a.sidebar.status, a.messages.dm)
+}
+
+// uploadTargetTitle names the destination in the file picker's header,
+// using the same resolvers and #/@ conventions as the quick switcher.
+func (a *App) uploadTargetTitle(sc *SlashCommandMsg) string {
+	label := ""
+	switch {
+	case sc.Room != "":
+		label = "#" + a.resolveRoomDisplayName(sc.Room)
+	case sc.Group != "":
+		label = a.lookupGroupName(sc.Group)
+	case sc.DM != "" && a.client != nil:
+		if other := a.client.DMOther(sc.DM); other != "" {
+			label = "@" + a.resolveDisplayName(other)
+		}
+	}
+	if strings.TrimSpace(label) == "" || label == "#" || label == "@" {
+		return "Upload file"
+	}
+	return "Upload to " + label
+}
+
+// openFilePicker is the SINGLE entry behind bare `/upload` and `/u`
+// (upload-file-picker). Its only obligations are its own guards — no modal
+// can be open when a slash command is typed (the intercept chain eats keys
+// first), and docked panels legitimately coexist — and rule #10: never
+// show a dead modal (an unreadable start root surfaces a status message
+// instead).
+func (a *App) openFilePicker(sc *SlashCommandMsg) {
+	// Offline-browse gate (GATE P0, resolved): never open the picker when an
+	// upload could not be sent — browse-then-fail is the wrong order.
+	if !a.canUseServerAction() {
+		a.statusBar.SetError("offline - reconnect to upload files")
+		return
+	}
+	if sc.Room == "" && sc.Group == "" && sc.DM == "" {
+		a.statusBar.SetError("No active room or group")
+		return
+	}
+	root := a.filePickerLastRoot
+	if root == "" {
+		root = filePickerDefaultRoot()
+	}
+	layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
+	a.filePicker.SetViewport(layout.MessagesWidth, layout.InputY0-layout.MessagesY0)
+	req := FilePickerRequest{Room: sc.Room, Group: sc.Group, DM: sc.DM, Title: a.uploadTargetTitle(sc), Gen: a.connGen}
+	if err := a.filePicker.Show(req, root); err != nil {
+		a.statusBar.SetError("Cannot open " + root + ": " + err.Error())
+		return
+	}
 }
 
 // openPicker is the SINGLE entry for the shared picker (#6/§6). Both
@@ -8569,7 +8705,8 @@ func (a *App) anyModalVisible() bool {
 		a.search.IsVisible() ||
 		a.quickSwitch.IsVisible() ||
 		a.statusPicker.IsVisible() ||
-		a.picker.IsVisible()
+		a.picker.IsVisible() ||
+		a.filePicker.IsVisible()
 }
 
 // appMinWidth and appMinHeight are the minimum terminal dimensions
@@ -8946,6 +9083,23 @@ func (a App) viewBody() string {
 			row = 1
 		}
 		return overlay(screen, a.picker.View(a.width), col, row, a.width, a.height)
+	}
+	if a.filePicker.IsVisible() {
+		// Same placement family as the shared picker (messages-pane inset),
+		// but the row derives from the RENDERED height — the body is dynamic,
+		// so the picker's fixed `InputY0 - 22` would misplace it. Sizing is
+		// re-applied on this render copy, as EmojiPickerModel.SetViewport's
+		// comment prescribes; App.View is a value receiver so nothing
+		// persists from here.
+		fp := a.filePicker
+		fp.SetViewport(layout.MessagesWidth, layout.InputY0-layout.MessagesY0)
+		dialog := fp.View()
+		col := layout.MessagesX0 + 2
+		row := layout.InputY0 - lipgloss.Height(dialog) - 1
+		if row < 1 {
+			row = 1
+		}
+		return overlay(screen, dialog, col, row, a.width, a.height)
 	}
 	if a.statusPicker.IsVisible() {
 		// Anchor: a few cells above the input bar, indented from

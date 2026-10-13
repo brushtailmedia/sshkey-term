@@ -232,7 +232,8 @@ func completeCommands(prefix string) *CompletionModel {
 	commands := []CompletionItem{
 		{Text: "/delete", Display: "/delete", Description: "delete message"},
 		{Text: "/rename ", Display: "/rename", Description: "rename group DM (admin)"},
-		{Text: "/upload ", Display: "/upload", Description: "upload file"},
+		{Text: "/upload ", Display: "/upload", Description: "upload file (bare: open the file picker)"},
+		{Text: "/u", Display: "/u", Description: "upload a file (alias; bare opens the picker)"},
 		{Text: "/verify ", Display: "/verify", Description: "verify user"},
 		{Text: "/unverify ", Display: "/unverify", Description: "remove verification"},
 		{Text: "/whois ", Display: "/whois", Description: "show user's fingerprint + verified state"},

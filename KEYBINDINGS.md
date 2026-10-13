@@ -123,6 +123,20 @@ When a sole admin runs `/leave` or `/delete` on a group with other members, the 
 | `Esc` | Cancel |
 | `1`-`8` | Quick select from top row (👍 👎 😂 ❤️ 🎉 😮 😢 🔥) |
 
+### File Picker (when open — bare `/upload` or `/u`)
+
+A keyboard-only tree explorer over the local filesystem (of the machine the client runs on), starting at your home directory and remembering where you last browsed for the session. Folders expand in place (`▸`/`▾`); only the rows you have expanded are searched by the filter. Hidden (dot) files are not listed.
+
+| Key | Action |
+|---|---|
+| Type | Filter the loaded (expanded) rows |
+| `↑` / `↓` / `PgUp` / `PgDn` / `Home` / `End` | Move the cursor |
+| `→` | Expand the folder under the cursor |
+| `←` | Collapse the folder; on a file, jump to its parent folder |
+| `Enter` | `../` = up one level · folder = expand/collapse · file = upload it |
+| `Backspace` | Edit the filter (never navigates) |
+| `Esc` | Cancel |
+
 ---
 
 ## Slash Commands
@@ -140,7 +154,8 @@ When a configured server cannot be reached, the app still opens on that server's
 
 | Command | Context | Action |
 |---|---|---|
-| `/upload [path]` | Room, group, DM | Upload a file |
+| `/upload [path]` | Room, group, DM | Upload a file. Bare `/upload` opens the file picker (below); a typed path accepts `~/…`, quoted and backslash-escaped drag-and-drop paths. |
+| `/u [path]` | Room, group, DM | Alias for `/upload` |
 | `/rename [name]` | Group only (admin) | Rename current group DM. Non-admin attempts get a friendly client-side rejection. |
 
 > Note: Reply (`r`), react (`e`), pin (`p`), delete (`d`), and unreact (`u`) are keyboard shortcuts on selected messages, not slash commands. See the Message Actions table above.

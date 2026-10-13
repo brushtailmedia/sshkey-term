@@ -580,10 +580,15 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		// handleSlashCommand "/typing" case was never reached — the
 		// command silently did nothing.
 		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
-	case "/upload":
-		if arg != "" {
-			i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
-		}
+	case "/upload", "/u":
+		// `/u` is a full alias. Canonicalize HERE so App — and every policy
+		// gate after it (offline-browse, read-only room) — only ever sees
+		// "/upload"; every other case forwards `cmd`, this one forwards the
+		// literal on purpose. The bare form now forwards too: App routes an
+		// empty Arg to the file picker. (The old `if arg != ""` guard made
+		// bare `/upload` a Mode-A silent no-op — App's usage error was
+		// unreachable from typed input.)
+		i.pendingCmd = &SlashCommandMsg{Command: "/upload", Arg: arg, Room: room, Group: group, DM: dm}
 	case "/add", "/kick", "/promote", "/demote", "/transfer":
 		// Forward ALL invocations to App so it can route per the
 		// shared-picker-widget.md §9 step 5: bare verb in a group →

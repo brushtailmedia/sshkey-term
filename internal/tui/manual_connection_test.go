@@ -7,6 +7,7 @@ package tui
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
@@ -193,5 +194,39 @@ func TestInitialLadder_NoCacheServerShowsOverlayImmediately(t *testing.T) {
 	b := newGenTokenApp(3)
 	if cmd := b.handleConnectError(errors.New("dial: refused")); cmd != nil || !b.connectFailed.IsVisible() {
 		t.Fatal("first contact (nil client) must show the overlay with no ladder")
+	}
+}
+
+// Connection-progress statuses live in the status bar's error slot, which
+// persists until the next user action: a successful connect must clear
+// them itself, or "connecting..." outlives the connection it announced.
+func TestConnectSuccess_ClearsConnectingStatus(t *testing.T) {
+	for _, progress := range []string{
+		"connecting...",
+		"connecting... (attempt 3/4)",
+		"offline - connect failed",
+		"offline - local history only",
+	} {
+		a := newGenTokenApp(4)
+		a.statusBar.SetError(progress)
+		fresh := client.New(client.Config{})
+		client.SetConnectedForTesting(fresh, true)
+		na := runUpdate(t, a, connectedWithClient{client: fresh, gen: 4})
+		if na.connState != ConnStateOnline {
+			t.Fatalf("%q: expected Online after connect", progress)
+		}
+		if na.statusBar.errorMsg != "" {
+			t.Fatalf("%q must be cleared on a successful connect, still %q", progress, na.statusBar.errorMsg)
+		}
+	}
+
+	// Unrelated statuses are left alone.
+	a := newGenTokenApp(5)
+	a.statusBar.SetError("Upload cancelled: the connection changed while the picker was open")
+	fresh := client.New(client.Config{})
+	client.SetConnectedForTesting(fresh, true)
+	na := runUpdate(t, a, connectedWithClient{client: fresh, gen: 5})
+	if !strings.HasPrefix(na.statusBar.errorMsg, "Upload cancelled") {
+		t.Fatalf("a non-progress status must survive a connect, got %q", na.statusBar.errorMsg)
 	}
 }

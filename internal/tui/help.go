@@ -217,7 +217,8 @@ func (h HelpModel) renderContent(width int) string {
 	commands := []cmdEntry{
 		{cmd: "/help or /?", desc: "this screen"},
 		{cmd: "/search <query>", desc: "search messages"},
-		{cmd: "/upload <path>", desc: "upload a file"},
+		{cmd: "/upload [path]", desc: "upload a file — bare opens the file picker"},
+		{cmd: "/u [path]", desc: "alias for /upload"},
 		{cmd: "/online", desc: "connect the current server (alias: /connect)"},
 		{cmd: "/offline", desc: "disconnect - local history only (alias: /disconnect)"},
 		{cmd: "/verify <user>", desc: "verify safety number"},
