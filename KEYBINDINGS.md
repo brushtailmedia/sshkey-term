@@ -38,6 +38,7 @@ Press `Ctrl+g`, then one of:
 | `1`-`9` | Switch to server N (a digit past the configured count opens Add Server) |
 | `h` / `l` | Previous / next server in the ring (Add Server is a ring slot after the last server) |
 | `j` | Server quick-switch overlay (configured servers + an Add server row) |
+| `o` | Toggle online/offline for the current server — Offline → connect; Online or Connecting → disconnect (or cancel the attempt) and keep browsing local history |
 | `g` or `Esc` | Cancel nav mode |
 
 After `Ctrl+g`, a which-key popup lists these continuations once you pause (default `300ms`). Set `[navigation] nav_mode_popup_delay_ms = 0` to show it instantly, or `nav_mode_popup = false` to disable it. Nav mode does not auto-exit: press a listed key to run it, `g`/`Esc` to cancel, or any other key/click to dismiss.
@@ -125,6 +126,15 @@ When a sole admin runs `/leave` or `/delete` on a group with other members, the 
 ---
 
 ## Slash Commands
+
+### Connection (offline browse)
+
+When a configured server cannot be reached, the app still opens on that server's cached history (sidebar, rooms, groups, DMs) with an `offline ●` footer. Sends and other server actions are blocked until you reconnect; `/help`, `/search`, `/mykey`, `/typing` and typed `/whois <user>` keep working offline.
+
+| Command | Context | Action |
+|---|---|---|
+| `/online` or `/connect` | Any | Connect (or reconnect) the current server. Also `Ctrl+g o` while offline. |
+| `/offline` or `/disconnect` | Any | Disconnect and keep browsing local history. Also `Ctrl+g o` while online or connecting. |
 
 ### Messaging
 

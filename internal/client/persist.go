@@ -988,6 +988,11 @@ func (c *Client) StoreProfile(p *protocol.Profile) bool {
 	}
 
 	c.store.PinKey(p.User, p.KeyFingerprint, p.PubKey)
+	// Offline-browse D1: persist the display name next to the pinned key so
+	// an offline open can show names instead of nanoids.
+	if p.DisplayName != "" {
+		_ = c.store.SetDisplayName(p.User, p.DisplayName)
+	}
 	return true
 }
 

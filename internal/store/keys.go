@@ -746,6 +746,58 @@ type LeftRoom struct {
 	LeaveReason string // Phase 20: "" | "removed" | "user_retired"
 }
 
+// GetActiveRooms returns the ids of rooms the user is currently in (not
+// left, not retired), ordered by id. Added for offline sidebar hydration
+// (offline-startup-browse): it is a UI enumerator, NOT a revival of the
+// Phase-20-removed GetActiveRoomIDs reconciliation walk (see the removal
+// note near GetAllGroups) — do not remove it as dead Phase-20 code.
+func (s *Store) GetActiveRooms() ([]string, error) {
+	rows, err := s.db.Query(`SELECT id FROM rooms WHERE left_at = 0 AND retired_at = 0 ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// SetDisplayName persists a user's display name alongside their pinned key
+// so it survives offline (offline-startup-browse D1). The pinned_keys row
+// must already exist — StoreProfile calls this right after PinKey.
+func (s *Store) SetDisplayName(user, name string) error {
+	_, err := s.db.Exec(`UPDATE pinned_keys SET display_name = ? WHERE user = ?`, name, user)
+	return err
+}
+
+// GetAllDisplayNames returns user → display name for every pinned key that
+// has a persisted name. Used to seed the in-memory profile cache on an
+// offline open.
+func (s *Store) GetAllDisplayNames() (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT user, display_name FROM pinned_keys WHERE display_name != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]string)
+	for rows.Next() {
+		var user, name string
+		if err := rows.Scan(&user, &name); err != nil {
+			return nil, err
+		}
+		out[user] = name
+	}
+	return out, rows.Err()
+}
+
 // GetLeftRooms returns every room the user has left (left_at > 0). Used
 // by the TUI to merge archived entries back into the sidebar on
 // connect/reconnect — the server only sends active rooms in room_list,

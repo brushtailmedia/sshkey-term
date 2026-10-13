@@ -47,6 +47,9 @@ import (
 // the send. Mentions are re-extracted from the new body; ReplyTo and
 // Attachments are copied verbatim from the original.
 func (c *Client) EditRoomMessage(msgID, room, newBody string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	orig, err := c.loadOriginalMessage(msgID)
 	if err != nil {
 		return err
@@ -75,7 +78,7 @@ func (c *Client) EditRoomMessage(msgID, room, newBody string) error {
 		Seq:         seq,
 		DeviceID:    c.cfg.DeviceID,
 		Mentions:    mentions,
-		ReplyTo:     orig.ReplyTo, // preserved
+		ReplyTo:     orig.ReplyTo,                                  // preserved
 		Attachments: storedToProtocolAttachments(orig.Attachments), // preserved verbatim
 	}
 	payloadJSON, _ := json.Marshal(payload)
@@ -114,6 +117,9 @@ func (c *Client) EditRoomMessage(msgID, room, newBody string) error {
 // time — the server validates against GetGroupMembers at edit time and
 // rejects with invalid_wrapped_keys if the sets don't match).
 func (c *Client) EditGroupMessage(msgID, group, newBody string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	orig, err := c.loadOriginalMessage(msgID)
 	if err != nil {
 		return err
@@ -173,6 +179,9 @@ func (c *Client) EditGroupMessage(msgID, group, newBody string) error {
 // The server validates that both parties appear in wrapped_keys and
 // rejects if either has a frozen view (per-user left_at ratchet).
 func (c *Client) EditDMMessage(msgID, dmID, newBody string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	orig, err := c.loadOriginalMessage(msgID)
 	if err != nil {
 		return err

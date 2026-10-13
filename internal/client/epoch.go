@@ -10,6 +10,12 @@ import (
 
 // handleEpochTrigger generates a new epoch key, wraps it for all members, and sends epoch_rotate.
 func (c *Client) handleEpochTrigger(raw json.RawMessage) {
+	// Offline-browse R18: only ever invoked from readLoop today, but the
+	// guard lives at the source so a future caller cannot rotate an epoch
+	// (and encode epoch_rotate) on a dead connection.
+	if !c.IsConnected() {
+		return
+	}
 	var trigger protocol.EpochTrigger
 	if err := json.Unmarshal(raw, &trigger); err != nil {
 		c.logger.Error("parse epoch_trigger", "error", err)

@@ -557,6 +557,11 @@ func (i *InputModel) handleCommand(text string, c *client.Client, room, group, d
 		// group-admin mutating verbs in earlier picker steps).
 		// Admin pre-check still runs App-side before the wire send.
 		i.pendingCmd = &SlashCommandMsg{Command: cmd, Arg: arg, Room: room, Group: group, DM: dm}
+	case "/online", "/connect", "/offline", "/disconnect":
+		// Offline-browse manual controls (offline-startup-browse Step 6).
+		// Forwarded to App, which owns connection state; valid in any
+		// context, no argument.
+		i.pendingCmd = &SlashCommandMsg{Command: cmd}
 	case "/mute":
 		// Forward to App: it picks target+kind from the active
 		// context (room/group/dm) and toggles via `applyMuteState`

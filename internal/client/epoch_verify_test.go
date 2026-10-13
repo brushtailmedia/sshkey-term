@@ -24,6 +24,10 @@ import (
 // drainPendingEpochAttestation directly.
 func (h *editVerifyHarness) discardSends() {
 	h.alice.enc = protocol.NewEncoder(io.Discard)
+	// Live-connection model: the offline-browse gate (IsConnected) must see
+	// this harness as online or handleEpochTrigger/RequestRoomMembers return
+	// early instead of exercising the verification paths under test.
+	h.alice.connected.Store(true)
 }
 
 const evRoom = "rm_general"

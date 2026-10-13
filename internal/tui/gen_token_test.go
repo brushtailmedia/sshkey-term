@@ -81,7 +81,7 @@ func TestStaleConnectedWithClient_DropsAndClosesClient(t *testing.T) {
 	if a2.client != nil {
 		t.Errorf("stale connectedWithClient overwrote a.client (current gen %d, stale gen %d)", a.connGen, msg.gen)
 	}
-	if a2.connected {
+	if a2.connState == ConnStateOnline {
 		t.Errorf("stale connectedWithClient flipped a.connected = true")
 	}
 	// Verify Close() ran by checking the Done channel — Close()
@@ -113,7 +113,7 @@ func TestCurrentGenConnectedWithClient_StillOverwritesClient(t *testing.T) {
 	if a2.client != fresh {
 		t.Errorf("current-gen connectedWithClient failed to install client; a.client = %p, want %p", a2.client, fresh)
 	}
-	if !a2.connected {
+	if a2.connState != ConnStateOnline {
 		t.Errorf("current-gen connectedWithClient did not flip a.connected = true")
 	}
 	// Inverse predicate: Done() channel must still be open for the
@@ -158,13 +158,13 @@ func TestStaleServerMsg_NoSideEffects(t *testing.T) {
 // state. Post-fix, it must be silently dropped.
 func TestStaleErrMsg_NoModalNoReconnect(t *testing.T) {
 	a := newGenTokenApp(2)
-	a.connected = true
+	a.connState = ConnStateOnline
 	a.reconnectAttempt = 0
 
 	stale := ErrMsg{Err: fmt.Errorf("disconnected"), gen: 1}
 	a2 := runUpdate(t, a, stale)
 
-	if !a2.connected {
+	if a2.connState != ConnStateOnline {
 		t.Errorf("stale ErrMsg flipped a.connected to false")
 	}
 	if a2.reconnectAttempt != 0 {
@@ -446,7 +446,7 @@ func TestInitialConnGen_NonZero(t *testing.T) {
 // a stale ErrMsg, the connect-failed overlay must not flash.
 func TestStaleErrMsg_DoesNotShowConnectFailedOverlay(t *testing.T) {
 	a := newGenTokenApp(2)
-	a.connected = false
+	a.connState = ConnStateConnecting
 	a.reconnectAttempt = 0
 
 	stale := ErrMsg{Err: fmt.Errorf("dial failed"), gen: 1}

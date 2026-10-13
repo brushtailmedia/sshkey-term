@@ -76,7 +76,7 @@ func newAppForPassphraseTest(t *testing.T, keyPath string) App {
 // instead of hanging the test process.
 func assertPreflightDispatches(t *testing.T, a App) {
 	t.Helper()
-	cmd := a.connect(a.connGen)
+	cmd := a.connect(a.connGen, false) // no offline fallback: preserves the pre-offline-browse preflight contract under test
 	if cmd == nil {
 		t.Fatal("connect() returned nil cmd")
 	}
@@ -103,7 +103,7 @@ func assertPreflightDispatches(t *testing.T, a App) {
 // exits cleanly without blocking when Connect eventually returns.
 func assertPreflightFallsThrough(t *testing.T, a App) {
 	t.Helper()
-	cmd := a.connect(a.connGen)
+	cmd := a.connect(a.connGen, false) // no offline fallback: preserves the pre-offline-browse preflight contract under test
 	if cmd == nil {
 		t.Fatal("connect() returned nil cmd")
 	}
@@ -193,7 +193,7 @@ func TestApp_PassphraseDialogRendersWhenNotConnected(t *testing.T) {
 		// it returns the too-small bouncer.
 		width:           120,
 		height:          40,
-		connected:       false, // critical: dialog must render even pre-connect
+		connState:       ConnStateConnecting, // critical: dialog must render even pre-connect
 		passphrase:      NewPassphrase(),
 		passphraseCache: make(map[string][]byte),
 		passphraseCh:    make(chan []byte, 1),

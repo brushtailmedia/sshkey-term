@@ -57,11 +57,30 @@ type passphraseNeededMsg struct {
 }
 
 // App is the top-level Bubble Tea model.
+// ConnectionState is the TUI's single source of truth for connectivity
+// (offline-startup-browse Step 4, R8). It replaces the old `connected bool`
+// so the footer, input gating and the View gate cannot drift apart. Writes
+// go through setConnState and are allowed ONLY inside gen-checked message
+// branches (connectedWithClient / ErrMsg / offlineWithClient, after their
+// stale-drop) or synchronous user actions (server switch, /online /offline).
+type ConnectionState int
+
+const (
+	ConnStateConnecting ConnectionState = iota // zero value: cold start, attempt or backoff in progress
+	ConnStateOnline
+	ConnStateOffline // browse-cached mode: failed initial connect, manual /offline, or ladder exhausted
+)
+
 type App struct {
 	client    *client.Client
 	cfg       client.Config
-	connected bool
-	err       error
+	connState ConnectionState // see ConnectionState; written only via setConnState
+	// initialAttempt counts failed initial-connect attempts for a server
+	// with cached history (offline-browse D9 ladder: immediate, +1s, +2s,
+	// +5s, then offline). 0 = no ladder in progress. Mid-session drops use
+	// reconnectAttempt and are untouched by this.
+	initialAttempt int
+	err            error
 
 	// UI state
 	sidebar       SidebarModel
@@ -389,7 +408,9 @@ func (a App) Init() tea.Cmd {
 	// gen 1 rather than calling nextConnGen.
 	return tea.Batch(
 		a.input.Init(),
-		a.connect(a.connGen),
+		// Cold start: no client exists yet, so a failed dial may fall back
+		// to the local store (offline browse) when this server has cache.
+		a.connect(a.connGen, true),
 	)
 }
 
@@ -430,7 +451,11 @@ func (a *App) sendServerHistory(room, group, dm, before string) {
 // scoped is happening.
 func (a *App) startConnect() tea.Cmd {
 	gen := a.nextConnGen()
-	return a.connect(gen)
+	// Offline-browse R20: fall back to a local-only client ONLY when the TUI
+	// has no usable client at all (cold start, or post-switch once the switch
+	// path nils it). A mid-session reconnect attempt already holds a client
+	// with an open store and must never open a second one.
+	return a.connect(gen, a.client == nil)
 }
 
 func (a *App) openQuickSwitch() {
@@ -469,11 +494,149 @@ func commandAllowedInReadOnlyRoom(text string) bool {
 	}
 	verb := strings.ToLower(strings.SplitN(trimmed, " ", 2)[0])
 	switch verb {
-	case "/delete", "/search", "/help", "/?":
+	case "/delete", "/search", "/help", "/?",
+		// Connection controls are context-free: a user browsing an archived
+		// room offline must still be able to reconnect by slash.
+		"/online", "/connect", "/offline", "/disconnect":
 		return true
 	default:
 		return false
 	}
+}
+
+// commandAllowedOffline is the offline-browse slash allow-list (offline-
+// startup-browse Step 4, D5–D8). Same shape as commandAllowedInReadOnlyRoom
+// but a DIFFERENT list: `/delete` is allowed in read-only rooms yet sends
+// leave_dm/delete_group/delete_room, so it is blocked here; `/setstatus`
+// looks read-only but its picker encodes set_status on selection. Only
+// verbs that touch nothing beyond local state/config pass; `/whois` passes
+// ONLY in its typed form (D6 — the bare form opens a picker over a cold
+// profile cache). A bare message returns false.
+func commandAllowedOffline(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "/") {
+		return false
+	}
+	parts := strings.SplitN(trimmed, " ", 2)
+	verb := strings.ToLower(parts[0])
+	arg := ""
+	if len(parts) > 1 {
+		arg = strings.TrimSpace(parts[1])
+	}
+	switch verb {
+	case "/help", "/?", "/search", "/mykey", "/typing",
+		"/online", "/connect", "/offline", "/disconnect":
+		return true
+	case "/whois":
+		return arg != ""
+	default:
+		return false
+	}
+}
+
+// setConnState is the ONLY writer of connState: it keeps the status bar's
+// offline flag in lockstep (R8 — one source of truth, no drift).
+func (a *App) setConnState(s ConnectionState) {
+	a.connState = s
+	a.statusBar.SetOffline(s == ConnStateOffline)
+}
+
+// canUseServerAction gates message actions that need the server (react,
+// edit, delete, pin, download …) while offline-browsing. Copy / select /
+// reply-compose are local and never gated.
+func (a *App) canUseServerAction() bool {
+	return a.connState == ConnStateOnline && a.client != nil && a.client.IsConnected()
+}
+
+// attachmentCached reports whether the decrypted blob for fileID already
+// sits in this server's files dir — the same check save_attachment performs
+// inline, shared so preview/open can be cache-first too (offline-browse R14).
+func (a *App) attachmentCached(fileID string) bool {
+	if !config.ValidFileID(fileID) {
+		return false
+	}
+	_, err := os.Stat(config.AttachmentPath(a.cfg.DataDir, fileID))
+	return err == nil
+}
+
+// openCachedAttachment is client.OpenFile behind a package variable so tests
+// can stub the OS-level open (which would otherwise launch a viewer).
+var openCachedAttachment = client.OpenFile
+
+// handleSlashCommandCmd is the dispatch entry for slash commands that can
+// return a tea.Cmd. The connection verbs (offline-startup-browse Step 6) are
+// routed here, ahead of handleSlashCommand's room-scoped gates — reconnecting
+// must never depend on which room is active. Everything else delegates to
+// handleSlashCommand unchanged.
+func (a *App) handleSlashCommandCmd(sc *SlashCommandMsg) tea.Cmd {
+	switch sc.Command {
+	case "/online", "/connect":
+		return a.goOnline()
+	case "/offline", "/disconnect":
+		a.goOffline()
+		return nil
+	}
+	a.handleSlashCommand(sc)
+	return nil
+}
+
+// goOnline is `/online` `/connect` and the Offline→Connecting leg of
+// `Ctrl+g o`. Bumping the gen (inside startConnect) stales any in-flight
+// attempt or ladder tick — the same pattern ConnectFailedRetryMsg uses.
+func (a *App) goOnline() tea.Cmd {
+	if a.connState == ConnStateOnline {
+		a.statusBar.SetError("already connected")
+		return nil
+	}
+	a.initialAttempt = 0
+	a.reconnectAttempt = 0
+	a.setConnState(ConnStateConnecting)
+	a.statusBar.SetError("connecting...")
+	return a.startConnect()
+}
+
+// goOffline is `/offline` `/disconnect` and the Online/Connecting→Offline
+// leg of `Ctrl+g o`. It disconnects WITHOUT closing the store, so the
+// sidebar and history stay exactly as they are (R9: never wipe visible
+// state). The gen bump stales in-flight connects and any pending
+// reconnect/ladder ticks.
+func (a *App) goOffline() {
+	if a.connState == ConnStateOffline {
+		a.statusBar.SetError("offline - local history only")
+		return
+	}
+	a.nextConnGen()
+	if a.client != nil {
+		_ = a.client.Disconnect()
+	}
+	a.reconnectAttempt = 0
+	a.initialAttempt = 0
+	a.setConnState(ConnStateOffline)
+	a.statusBar.SetConnected(false)
+	a.statusBar.SetError("offline - local history only")
+}
+
+// initialRetryMsg is one gen-stamped tick of the initial-connect ladder
+// (D9). A stale gen means a switch or manual toggle happened since it was
+// scheduled, and the tick must do nothing.
+type initialRetryMsg struct {
+	attempt int
+	gen     uint64
+}
+
+// scheduleInitialRetry returns the ladder tick after the given number of
+// failed initial attempts: +1s after the 1st, +2s after the 2nd, +5s after
+// the 3rd. Mid-session reconnects use reconnectDelay instead (untouched).
+func (a *App) scheduleInitialRetry(failed int) tea.Cmd {
+	delays := []time.Duration{time.Second, 2 * time.Second, 5 * time.Second}
+	d := delays[len(delays)-1]
+	if failed >= 1 && failed <= len(delays) {
+		d = delays[failed-1]
+	}
+	gen := a.connGen
+	return tea.Tick(d, func(time.Time) tea.Msg {
+		return initialRetryMsg{attempt: failed + 1, gen: gen}
+	})
 }
 
 func (a *App) toggleMemberPanel() {
@@ -543,9 +706,16 @@ func (a *App) switchServerByIndexInternal(idx int, force bool) tea.Cmd {
 		a.abandonActiveHistoryRequest()
 		a.client.Close()
 	}
+	// Offline-browse R9/R10: drop the closed client so startConnect's
+	// `a.client == nil` lets the switched-to server fall back to ITS local
+	// store (per-server DataDir/KeyPath repointed below), and so no code
+	// path can read the stale client. Safe because connectFailedKeyInfo
+	// sources from a.cfg.KeyPath, never a.client.
+	a.client = nil
+	a.initialAttempt = 0
 
 	a.serverIdx = idx
-	a.connected = false
+	a.setConnState(ConnStateConnecting)
 	a.reconnectAttempt = 0
 
 	// Update config for new server.
@@ -635,7 +805,7 @@ func (a *App) exitNavMode() {
 // offline the panel still opens, just without a refresh.
 func (a *App) openDeviceManager() {
 	a.deviceMgr.Show()
-	if a.client != nil && a.connected {
+	if a.client != nil && a.connState == ConnStateOnline {
 		a.client.SendListDevices()
 	}
 }
@@ -657,6 +827,16 @@ func (a *App) handleNavModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	case "n":
 		a.exitNavMode()
 		a.openNewConversation()
+		return nil, true
+	case "o":
+		// Offline-browse toggle (offline-startup-browse Step 6), three
+		// states: Online → go offline (keep history); Connecting → cancel
+		// the attempt/ladder and stay on local history; Offline → connect.
+		a.exitNavMode()
+		if a.connState == ConnStateOffline {
+			return a.goOnline(), true
+		}
+		a.goOffline()
 		return nil, true
 	case "m":
 		a.exitNavMode()
@@ -841,7 +1021,7 @@ type KeyChangeEvent struct {
 // carry the prior (now-stale) generation. See
 // fix-cross-server-db-isolation.md §"Connect command" and §"Bump-
 // order tests".
-func (a App) connect(gen uint64) tea.Cmd {
+func (a App) connect(gen uint64, allowLocalFallback bool) tea.Cmd {
 	return func() tea.Msg {
 		msgCh := make(chan ServerMsg, 100)
 		errCh := make(chan error, 1)
@@ -958,6 +1138,18 @@ func (a App) connect(gen uint64) tea.Cmd {
 			if strings.Contains(errStr, "passphrase") {
 				return passphraseNeededMsg{gen: gen, keyPath: keyPath}
 			}
+			// Offline-browse fallback (offline-startup-browse Step 2): when
+			// the TUI has no usable client at all, open the local store and,
+			// if this server has synced before, land in browse mode instead
+			// of a dead end. No cache (first contact / pending approval)
+			// falls through to ErrMsg so the connect-failed overlay keeps
+			// its key-approval UX. The passphrase preflight above has already
+			// run, so OpenLocal's key parse uses the cached passphrase (R12).
+			if allowLocalFallback {
+				if lerr := c.OpenLocal(); lerr == nil && c.HasLocalCache() {
+					return offlineWithClient{client: c, err: err, gen: gen}
+				}
+			}
 			return ErrMsg{Err: err, gen: gen}
 		}
 
@@ -1006,6 +1198,17 @@ type connectedWithClient struct {
 	// loop, SSH connection, store handle, and keepalive goroutine
 	// behind. See fix-cross-server-db-isolation.md §"Connect command".
 	gen uint64
+}
+
+// offlineWithClient is the connect command's result when the dial failed
+// but the encrypted local store opened AND this server has synced before
+// (offline-startup-browse): the TUI adopts the local-only client so cached
+// history can be browsed. err is the dial error, routed through the same
+// handler as ErrMsg. Carries gen for the identical stale-drop rule.
+type offlineWithClient struct {
+	client *client.Client
+	err    error
+	gen    uint64
 }
 
 // saveAttachmentOpenMsg flips the save-as modal open after a
@@ -2026,6 +2229,23 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// navigation keys to move focus away. Slash commands like
 			// /delete still work because we explicitly let "enter" through
 			// and the input filters slash commands separately.
+			// Offline-browse (Step 4): when not online, navigation and typing
+			// stay possible but sends are blocked — only the offline-safe
+			// slash allow-list goes through. Same philosophy as the archived-
+			// context block right below. The client-side guards already
+			// silence the keystroke SendTyping before this point.
+			if a.connState != ConnStateOnline {
+				switch msg.String() {
+				case "tab", "shift+tab", "up", "down", "left", "right":
+					// fall through: navigation stays available
+				case "enter":
+					if !commandAllowedOffline(a.input.Value()) {
+						a.statusBar.SetError("offline - reconnect to send messages")
+						return a, nil
+					}
+					// fall through for allow-listed commands
+				}
+			}
 			if a.messages.IsLeft() || a.messages.IsRoomRetired() {
 				switch msg.String() {
 				case "tab", "shift+tab", "up", "down", "left", "right":
@@ -2086,9 +2306,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.statusBar.ClearError()
 				a.messages.SnapToOwnSend()
 			}
-			// Check for pending slash commands
+			// Check for pending slash commands. The connection verbs return
+			// a connect cmd that MUST propagate (offline-startup-browse
+			// Step 6) — dropping it would switch state but never dial.
 			if sc := a.input.PendingCommand(); sc != nil {
-				a.handleSlashCommand(sc)
+				if cmd := a.handleSlashCommandCmd(sc); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			}
 		}
 
@@ -3201,6 +3425,17 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MessageAction:
 		a.statusBar.ClearError()
+		// Offline-browse (Step 4): server-mutating actions need a live
+		// connection. Attachment open/preview/save are deliberately NOT
+		// gated here — cached blobs render from disk (R14); a blob that is
+		// not cached surfaces Step 5's clean client-side error instead.
+		if !a.canUseServerAction() {
+			switch msg.Action {
+			case "react", "unreact", "delete", "pin", "unpin":
+				a.statusBar.SetError("offline - this action needs the server")
+				return a, nil
+			}
+		}
 		switch msg.Action {
 		case "reply":
 			preview := msg.Msg.Body
@@ -3252,6 +3487,17 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// returned `a` becomes the new canonical model.
 			if a.client != nil && len(msg.Msg.Attachments) > 0 {
 				att := msg.Msg.Attachments[0]
+				// Cache-first (offline-browse R14; mirrors save_attachment): open
+				// the already-decrypted copy directly and download only on a
+				// miss. Offline with no cached copy, say so.
+				if a.attachmentCached(att.FileID) {
+					go openCachedAttachment(config.AttachmentPath(a.cfg.DataDir, att.FileID), att.Name)
+					return a, nil
+				}
+				if !a.canUseServerAction() {
+					a.statusBar.SetError(att.Name + " is not cached — reconnect to download it")
+					return a, nil
+				}
 				a.statusBar.SetError("Downloading " + att.Name + "...")
 				c := a.client
 				fileID := att.FileID
@@ -3313,6 +3559,19 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for _, att := range msg.Msg.Attachments {
 					if !att.IsImage {
 						continue
+					}
+					// Cache-first (offline-browse R14; mirrors save_attachment).
+					// The preview pane renders <filesDir>/<fileID> straight from
+					// disk, so a blob that is already decrypted needs no server
+					// round-trip. Offline with no cached copy, say so instead of
+					// surfacing a raw "not connected".
+					if a.attachmentCached(att.FileID) {
+						a.statusBar.SetError("Preview ready: " + att.Name)
+						break
+					}
+					if !a.canUseServerAction() {
+						a.statusBar.SetError(att.Name + " is not cached — reconnect to download it")
+						break
 					}
 					a.statusBar.SetError("Loading preview of " + att.Name + "...")
 					c := a.client
@@ -3459,8 +3718,16 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
+		// Offline-browse R20: a reconnect/switch-connect may arrive while a
+		// prior client (online or local-only browse) still holds the store.
+		// Close it before adopting the new one so we never leak a handle;
+		// the brief WAL-mode overlap until this point is pre-existing and
+		// safe (per-handle SetMaxOpenConns(1)).
+		if a.client != nil && a.client != msg.client {
+			_ = a.client.Close()
+		}
 		a.client = msg.client
-		a.connected = true
+		a.setConnState(ConnStateOnline)
 		a.reconnectAttempt = 0
 
 		// Seed our own online state so the green dot shows up next
@@ -3489,45 +3756,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Populate sidebar and messages
 		a.sidebar.SetRooms(a.client.Rooms())
-		a.messages.resolveName = a.client.DisplayName
-		a.pinnedBar.SetResolveName(a.client.DisplayName)
-		a.messages.resolveRoomName = a.client.DisplayRoomName
-		a.messages.resolveGroupName = a.client.DisplayGroupName
-		a.messages.resolveDMName = a.client.DisplayDMName
-		a.search.resolveName = a.client.DisplayName
-		a.search.resolveRoomName = a.client.DisplayRoomName
-		a.search.resolveGroupName = a.client.DisplayGroupName
-		a.search.resolveDMName = a.client.DisplayDMName
-		if st := a.client.Store(); st != nil {
-			a.search.SetFTS(st.HasFTS())
-		}
-		a.sidebar.resolveName = a.client.DisplayName
-		a.sidebar.resolveDMName = a.client.DisplayDMName
-		a.sidebar.resolveDMOther = a.client.DMOther
-		a.sidebar.resolveRoomName = a.client.DisplayRoomName
-		a.sidebar.resolveVerified = func(user string) bool {
-			if a.client == nil {
-				return false
-			}
-			st := a.client.Store()
-			if st == nil {
-				return false
-			}
-			_, verified, err := st.GetPinnedKey(user)
-			return err == nil && verified
-		}
-		// Phase 14: live callback into the client's in-memory admin
-		// set so the sidebar ★ indicator updates immediately on
-		// group_event{promote,demote} without waiting for a
-		// group_list refetch.
-		a.sidebar.resolveIsLocalAdmin = func(groupID string) bool {
-			if a.client == nil {
-				return false
-			}
-			return a.client.IsGroupAdmin(groupID, a.client.UserID())
-		}
-		a.newConv.resolveName = a.client.DisplayName
-		a.infoPanel.resolveRoomName = a.client.DisplayRoomName
+		a.wireClientResolvers()
 		if len(a.client.Rooms()) > 0 {
 			a.switchMessageContext(a.client.Rooms()[0], "", "")
 			a.syncMessagesLeftState()
@@ -3788,6 +4017,16 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.passphraseCh <- msg.Passphrase
 		return a, a.startConnect()
 
+	case initialRetryMsg:
+		if msg.gen != a.connGen {
+			// Stale ladder tick: a server switch or manual /offline
+			// happened after it was scheduled. The current generation
+			// owns connectivity decisions.
+			return a, nil
+		}
+		a.statusBar.SetError(fmt.Sprintf("connecting... (attempt %d/4)", msg.attempt))
+		return a, a.startConnect() // bump gen + connect
+
 	case reconnectAttemptMsg:
 		if msg.gen != a.connGen {
 			// Stale timer from a prior connect attempt — without
@@ -3800,6 +4039,32 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusBar.SetReconnecting(msg.attempt, 0)
 		return a, a.startConnect() // bump gen + connect
 
+	case offlineWithClient:
+		// Offline-browse landing (offline-startup-browse Step 2): the dial
+		// failed but the local store opened with cached history. Stale-drop
+		// first, exactly like connectedWithClient — a superseded attempt
+		// must close its client (and store handle) and change nothing.
+		if msg.gen != a.connGen {
+			if msg.client != nil {
+				_ = msg.client.Close()
+			}
+			return a, nil
+		}
+		// R20: never hold two clients/stores for the same server.
+		if a.client != nil && a.client != msg.client {
+			_ = a.client.Close()
+		}
+		a.client = msg.client // connState stays Connecting until handleConnectError decides
+		// Same error handling as ErrMsg (shared helper so the two paths
+		// cannot diverge). Until Step 4 reroutes it, this still shows
+		// today's overlay/reconnect behavior — a zero-visible-change landing.
+		if cmd := a.handleConnectError(msg.err); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		// Step 3: populate sidebar/messages from the local store — visible
+		// because the View gate keys on a.client, not connectivity (Step 4).
+		a.hydrateOfflineUI()
+
 	case ErrMsg:
 		if msg.gen != a.connGen {
 			// Stale error from a superseded connect attempt — drop
@@ -3809,38 +4074,8 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// owns those decisions.
 			return a, nil
 		}
-		a.err = msg.Err
-		a.statusBar.SetConnected(false)
-		// A current-server disconnect ends any in-flight display-name rename with
-		// an unknown outcome: the set_profile may or may not have been written, and
-		// no self-`profile`/error will arrive on this dead connection. Clear the
-		// pending marker so Settings doesn't stick on "Saving…"; the reconnect
-		// welcome self-`profile` re-renders the authoritative name (and still fires
-		// the success toast via case "profile" if it matches renameAttempted).
-		if a.renameInFlight {
-			a.renameInFlight = false
-			a.renameAttempted = ""
-			if a.settings.IsVisible() {
-				a.settings.SetDisplayNameRenamePending(false)
-				a.settings.SetErrorNotice("Connection lost — display-name change status unknown")
-			}
-		}
-		if a.connected || a.reconnectAttempt > 0 {
-			// Was previously connected — auto-reconnect with exponential backoff
-			a.connected = false
-			a.reconnectAttempt++
-			delay := reconnectDelay(a.reconnectAttempt)
-			a.statusBar.SetReconnecting(a.reconnectAttempt, delay)
-			cmds = append(cmds, a.reconnect(a.reconnectAttempt))
-		} else {
-			// First-ever connection failed — show guidance overlay
-			// with key info so the user can share with admin
-			fp, pubKey := a.connectFailedKeyInfo()
-			if fp == "" {
-				// Client didn't initialize — read key directly
-				fp = "unknown"
-			}
-			a.connectFailed.Show(msg.Err.Error(), fp, pubKey)
+		if cmd := a.handleConnectError(msg.Err); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 
 	case ConnectFailedRetryMsg:
@@ -4148,6 +4383,225 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 	}
 
 	return a, nil
+}
+
+// handleConnectError is the shared body of `case ErrMsg` and
+// `case offlineWithClient` (offline-startup-browse Step 2): records the
+// error, clears any in-flight rename, and either schedules the mid-session
+// reconnect (returning its cmd) or shows the first-fail overlay (returning
+// nil). Callers have already applied their gen check — this must never run
+// for a stale generation.
+func (a *App) handleConnectError(err error) tea.Cmd {
+	a.err = err
+	a.statusBar.SetConnected(false)
+	// A current-server disconnect ends any in-flight display-name rename with
+	// an unknown outcome: the set_profile may or may not have been written, and
+	// no self-`profile`/error will arrive on this dead connection. Clear the
+	// pending marker so Settings doesn't stick on "Saving…"; the reconnect
+	// welcome self-`profile` re-renders the authoritative name (and still fires
+	// the success toast via case "profile" if it matches renameAttempted).
+	if a.renameInFlight {
+		a.renameInFlight = false
+		a.renameAttempted = ""
+		if a.settings.IsVisible() {
+			a.settings.SetDisplayNameRenamePending(false)
+			a.settings.SetErrorNotice("Connection lost — display-name change status unknown")
+		}
+	}
+	if a.connState == ConnStateOnline || a.reconnectAttempt > 0 {
+		// Was previously connected — auto-reconnect with exponential backoff
+		a.setConnState(ConnStateConnecting)
+		a.reconnectAttempt++
+		delay := reconnectDelay(a.reconnectAttempt)
+		a.statusBar.SetReconnecting(a.reconnectAttempt, delay)
+		return a.reconnect(a.reconnectAttempt)
+	}
+	// First-ever connection failed. A server with cached history lands in
+	// offline-browse (Step 4 UX) instead of a dead-end overlay; a server
+	// with no cache (first contact / pending approval) keeps today's
+	// guidance overlay with the key info the admin needs.
+	if a.client != nil && a.client.HasLocalCache() {
+		// Bounded initial-connect ladder (D9): the immediate attempt, then
+		// +1s, +2s, +5s; after the 4th failure settle into offline-browse.
+		// Cached history is already on screen while this runs. Each tick
+		// is gen-stamped, so a switch or manual /offline stales it.
+		a.initialAttempt++
+		if a.initialAttempt < 4 {
+			a.setConnState(ConnStateConnecting)
+			return a.scheduleInitialRetry(a.initialAttempt)
+		}
+		a.initialAttempt = 0
+		a.setConnState(ConnStateOffline)
+		a.statusBar.SetError("offline - connect failed")
+		return nil
+	}
+	fp, pubKey := a.connectFailedKeyInfo()
+	if fp == "" {
+		// Client didn't initialize — read key directly
+		fp = "unknown"
+	}
+	a.connectFailed.Show(err.Error(), fp, pubKey)
+	return nil
+}
+
+// wireClientResolvers points every panel's name/verification resolver at
+// the current client. Extracted verbatim from the connectedWithClient
+// handler (offline-startup-browse Step 3) so the offline hydrate path wires
+// the same resolvers — pure code move, no logic change.
+func (a *App) wireClientResolvers() {
+	a.messages.resolveName = a.client.DisplayName
+	a.pinnedBar.SetResolveName(a.client.DisplayName)
+	a.messages.resolveRoomName = a.client.DisplayRoomName
+	a.messages.resolveGroupName = a.client.DisplayGroupName
+	a.messages.resolveDMName = a.client.DisplayDMName
+	a.search.resolveName = a.client.DisplayName
+	a.search.resolveRoomName = a.client.DisplayRoomName
+	a.search.resolveGroupName = a.client.DisplayGroupName
+	a.search.resolveDMName = a.client.DisplayDMName
+	if st := a.client.Store(); st != nil {
+		a.search.SetFTS(st.HasFTS())
+	}
+	a.sidebar.resolveName = a.client.DisplayName
+	a.sidebar.resolveDMName = a.client.DisplayDMName
+	a.sidebar.resolveDMOther = a.client.DMOther
+	a.sidebar.resolveRoomName = a.client.DisplayRoomName
+	a.sidebar.resolveVerified = func(user string) bool {
+		if a.client == nil {
+			return false
+		}
+		st := a.client.Store()
+		if st == nil {
+			return false
+		}
+		_, verified, err := st.GetPinnedKey(user)
+		return err == nil && verified
+	}
+	// Phase 14: live callback into the client's in-memory admin
+	// set so the sidebar ★ indicator updates immediately on
+	// group_event{promote,demote} without waiting for a
+	// group_list refetch.
+	a.sidebar.resolveIsLocalAdmin = func(groupID string) bool {
+		if a.client == nil {
+			return false
+		}
+		return a.client.IsGroupAdmin(groupID, a.client.UserID())
+	}
+	a.newConv.resolveName = a.client.DisplayName
+	a.infoPanel.resolveRoomName = a.client.DisplayRoomName
+}
+
+// hydrateOfflineUI populates the sidebar and messages pane from the local
+// store for a local-only client (offline-startup-browse Step 3, R4 parity).
+// It mirrors EXACTLY what the live room_list / group_list / dm_list handlers
+// derive from equivalent frames, minus anything that needs the server:
+// no unread counts (D2), no presence/status (D4), no requests. Tolerates a
+// client without a store (R13/R20).
+func (a *App) hydrateOfflineUI() {
+	if a.client == nil {
+		return
+	}
+	st := a.client.Store()
+	if st == nil {
+		a.statusBar.SetError("No local history for this server yet.")
+		return
+	}
+	a.wireClientResolvers()
+	// The inline-image / preview render path is cache-first and reads
+	// <filesDir>/<fileID> straight from disk — it needs the per-server files
+	// dir. connectedWithClient sets it far from the context block this
+	// function mirrors, which is how the first cut missed it (every cached
+	// image then read as "not cached" on a cold offline open).
+	a.messages.SetFilesDir(config.FilesDir(a.cfg.DataDir))
+
+	// Rooms (R17): active + archived (left) + retired, merged with the same
+	// seen-set the room_list handler uses, then the same marker loop.
+	ids, _ := st.GetActiveRooms()
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		seen[id] = true
+	}
+	if archived, err := st.GetLeftRooms(); err == nil {
+		for _, ar := range archived {
+			if seen[ar.ID] {
+				continue
+			}
+			seen[ar.ID] = true
+			ids = append(ids, ar.ID)
+		}
+	}
+	if retired, err := st.GetRetiredRooms(); err == nil {
+		for _, rr := range retired {
+			if seen[rr.ID] {
+				continue
+			}
+			seen[rr.ID] = true
+			ids = append(ids, rr.ID)
+		}
+	}
+	a.sidebar.SetRooms(ids)
+	for _, id := range ids {
+		if st.IsRoomLeft(id) {
+			a.sidebar.MarkRoomLeft(id)
+		} else {
+			a.sidebar.MarkRoomRejoined(id)
+		}
+		if st.IsRoomRetired(id) {
+			a.sidebar.MarkRoomRetired(id)
+		}
+	}
+
+	// Groups: GetAllGroups returns every row (active + archived) — the same
+	// union the online path assembles from group_list + GetArchivedGroups.
+	// It is a map, so sort the ids: map iteration order would shuffle the
+	// sidebar on every start.
+	if all, err := st.GetAllGroups(); err == nil {
+		gids := make([]string, 0, len(all))
+		for id := range all {
+			gids = append(gids, id)
+		}
+		sort.Strings(gids)
+		groups := make([]protocol.GroupInfo, 0, len(gids))
+		for _, id := range gids {
+			info := all[id]
+			var members []string
+			if info[1] != "" {
+				members = strings.Split(info[1], ",")
+			}
+			groups = append(groups, protocol.GroupInfo{ID: id, Name: info[0], Members: members})
+		}
+		a.sidebar.SetGroups(groups)
+		for _, g := range groups {
+			if st.IsGroupLeft(g.ID) {
+				a.sidebar.MarkGroupLeft(g.ID)
+			}
+		}
+	}
+
+	// DMs: mirror the dm_list filter — hidden tombstones excluded.
+	if dms, err := st.GetAllDMs(); err == nil {
+		active := make([]protocol.DMInfo, 0, len(dms))
+		for _, dm := range dms {
+			if dm.Hidden {
+				continue
+			}
+			active = append(active, protocol.DMInfo{ID: dm.ID, Members: []string{dm.UserA, dm.UserB}})
+		}
+		a.sidebar.SetDMs(active)
+	}
+	a.sidebar.SetSelfUserID(a.client.UserID())
+
+	// Initial context, mirroring connectedWithClient.
+	if len(ids) > 0 {
+		a.switchMessageContext(ids[0], "", "")
+		a.syncMessagesLeftState()
+		a.messages.LoadFromDB(a.client)
+		a.syncPinnedBarForContext()
+		a.refreshMessageContent()
+		a.memberPanel.Refresh(ids[0], "", "", a.client, a.sidebar.online, a.sidebar.status)
+		a.input.SetMembers(a.activeMemberEntries())
+		a.input.SetNonMembers(a.activeNonMemberEntries())
+	}
+	a.syncLocalIdentityUI()
 }
 
 // reconnectDelay returns the backoff duration for a given attempt number.
@@ -8211,7 +8665,7 @@ func (a App) viewBody() string {
 	// Passphrase overlay must also take precedence over the
 	// !connected fallback below. The pre-flight encryption check in
 	// connect() dispatches passphraseNeededMsg BEFORE any actual
-	// connection attempt — at that moment a.connected is still false,
+	// connection attempt — at that moment a.client is still nil,
 	// so without this hoist the view would render "Connecting..."
 	// and the dialog (visible at the model level) would be invisible
 	// to the user. Symptom: terminal sits at "Connecting..." forever
@@ -8221,11 +8675,14 @@ func (a App) viewBody() string {
 		return a.passphrase.View(a.width)
 	}
 
-	if a.err != nil && !a.connected {
-		return fmt.Sprintf("\n  Connection error: %v\n\n  Press Ctrl+c to quit.\n", a.err)
-	}
-
-	if !a.connected {
+	// Offline-browse (Step 4, R16): a usable client — online OR a local-only
+	// browse client — renders the full shell; connState (not client-nilness)
+	// drives the footer and input gating. The spinner / raw error remain
+	// only for the nothing-to-show cold window before any client exists.
+	if a.client == nil {
+		if a.err != nil {
+			return fmt.Sprintf("\n  Connection error: %v\n\n  Press Ctrl+c to quit.\n", a.err)
+		}
 		return "\n  Connecting...\n"
 	}
 

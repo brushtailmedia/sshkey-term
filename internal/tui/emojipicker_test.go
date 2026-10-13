@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/brushtailmedia/sshkey-term/internal/client"
 )
 
 func emojiPickerRunes(s string) tea.KeyMsg {
@@ -428,7 +430,8 @@ func TestAppEmojiPicker_ClearsKittyPreviewLayer(t *testing.T) {
 
 func newEmojiOverlayTestApp() App {
 	a := App{
-		connected:   true,
+		connState:   ConnStateOnline,
+		client:      client.New(client.Config{}), // the shell renders only with a usable client (R16)
 		width:       100,
 		height:      30,
 		sidebar:     NewSidebar(),

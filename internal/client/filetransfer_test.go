@@ -79,6 +79,7 @@ func TestDownloadFile_HappyPath(t *testing.T) {
 		DataDir:  t.TempDir(),
 	})
 	c.enc = protocol.NewEncoder(reqSink)
+	c.connected.Store(true) // live-connection model: pass the offline-browse gate
 	c.downloadChan = &stubChannel{r: bytes.NewReader(frame.Bytes())}
 
 	go func() {
@@ -158,6 +159,7 @@ func TestDownloadFile_RejectsServerSubstitutedBlob(t *testing.T) {
 
 	c := New(Config{DeviceID: "dev_test_swap", DataDir: t.TempDir()})
 	c.enc = protocol.NewEncoder(&bytes.Buffer{})
+	c.connected.Store(true) // live-connection model: pass the offline-browse gate
 	c.downloadChan = &stubChannel{r: bytes.NewReader(frame.Bytes())}
 
 	go func() {
@@ -188,6 +190,7 @@ func TestDownloadFile_DownloadErrorFailsFast(t *testing.T) {
 		DataDir:  t.TempDir(),
 	})
 	c.enc = protocol.NewEncoder(reqSink)
+	c.connected.Store(true) // live-connection model: pass the offline-browse gate
 	c.downloadChan = &stubChannel{r: bytes.NewReader(nil)}
 
 	wantErr := errors.New("not_found: file not found")

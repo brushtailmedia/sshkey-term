@@ -13,6 +13,7 @@ const (
 	navGroupGoTo navGroup = iota
 	navGroupPanels
 	navGroupServers
+	navGroupConnection // rendered stacked under "go to", not as its own column
 )
 
 // navBinding is one Ctrl+g continuation. `keys` is the *display* form
@@ -42,14 +43,19 @@ var navBindings = []navBinding{
 	{"l", "next server", navGroupServers},
 	{"j", "server switcher", navGroupServers},
 	{"1-9", "server number", navGroupServers},
+	{"o", "online/offline", navGroupConnection},
 }
 
+// navGroupOrder lists the COLUMNS. navGroupConnection is deliberately absent:
+// it renders stacked under the "go to" column (locked layout) rather than as
+// a fourth column — see renderNavPopup.
 var navGroupOrder = []navGroup{navGroupGoTo, navGroupPanels, navGroupServers}
 
 var navGroupTitles = map[navGroup]string{
-	navGroupGoTo:    "go to",
-	navGroupPanels:  "panels",
-	navGroupServers: "servers",
+	navGroupGoTo:       "go to",
+	navGroupPanels:     "panels",
+	navGroupServers:    "servers",
+	navGroupConnection: "connection",
 }
 
 // padNavKey right-pads a display key so descriptions align within a column.
@@ -66,14 +72,24 @@ func padNavKey(k string) string {
 // cancel footer, inside a bordered box. It is render-only — dispatch stays in
 // handleNavModeKey; the popup never intercepts keys.
 func renderNavPopup() string {
-	cols := make([]string, 0, len(navGroupOrder))
-	for _, g := range navGroupOrder {
+	groupLines := func(g navGroup) []string {
 		lines := []string{helpDescStyle.Render(navGroupTitles[g])}
 		for _, nb := range navBindings {
 			if nb.group != g {
 				continue
 			}
 			lines = append(lines, helpKeyStyle.Render(padNavKey(nb.keys))+"  "+nb.desc)
+		}
+		return lines
+	}
+	cols := make([]string, 0, len(navGroupOrder))
+	for _, g := range navGroupOrder {
+		lines := groupLines(g)
+		if g == navGroupGoTo {
+			// The connection group stacks under "go to" in the same column
+			// (offline-startup-browse Step 6, locked layout).
+			lines = append(lines, "")
+			lines = append(lines, groupLines(navGroupConnection)...)
 		}
 		cols = append(cols, lipgloss.NewStyle().MarginRight(3).Render(strings.Join(lines, "\n")))
 	}

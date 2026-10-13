@@ -24,9 +24,14 @@ func newEditAppHarness(t *testing.T) (App, *store.Store) {
 	c := client.New(client.Config{DeviceID: "dev_test"})
 	client.SetStoreForTesting(c, st)
 	client.SetUserIDForTesting(c, "usr_alice")
+	// This harness models a LIVE session: the offline-browse gates
+	// (client.IsConnected + App.connState) must see it as online or every
+	// server-bound action under test stops at "not connected".
+	client.SetConnectedForTesting(c, true)
 
 	a := App{
 		client:    c,
+		connState: ConnStateOnline,
 		messages:  NewMessages(),
 		input:     NewInput(),
 		statusBar: NewStatusBar(),

@@ -50,6 +50,9 @@ var (
 // the caller can stamp FileEpoch on the attachment metadata correctly (avoids
 // a race if the epoch rotates between upload and send).
 func (c *Client) UploadFile(localPath, room, group string) (fileID string, epoch int64, contentHash string, err error) {
+	if !c.IsConnected() { // offline-browse Step 5 gate — before any file I/O
+		return "", 0, "", ErrNotConnected
+	}
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return "", 0, "", fmt.Errorf("read file: %w", err)
@@ -75,6 +78,9 @@ func (c *Client) UploadFile(localPath, room, group string) (fileID string, epoch
 // Same Design A pattern as UploadGroupFile — each attachment carries its own
 // key in the encrypted payload.
 func (c *Client) UploadDMFile(localPath, dmID string, fileKey []byte) (string, string, error) {
+	if !c.IsConnected() { // offline-browse Step 5 gate — before any file I/O
+		return "", "", ErrNotConnected
+	}
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return "", "", fmt.Errorf("read file: %w", err)
@@ -94,6 +100,9 @@ func (c *Client) UploadDMFile(localPath, dmID string, fileKey []byte) (string, s
 // payload, decoupling upload from message send. See PROTOCOL.md "DM
 // attachments".
 func (c *Client) UploadGroupFile(localPath, group string, fileKey []byte) (string, string, error) {
+	if !c.IsConnected() { // offline-browse Step 5 gate — before any file I/O
+		return "", "", ErrNotConnected
+	}
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return "", "", fmt.Errorf("read file: %w", err)
@@ -108,6 +117,11 @@ func (c *Client) UploadGroupFile(localPath, group string, fileKey []byte) (strin
 // the upload_start → binary frame → upload_complete round-trip, and returns
 // the server-assigned file_id.
 func (c *Client) uploadEncrypted(data, encKey []byte, room, group, dm string) (string, string, error) {
+	// Single chokepoint behind the three exported upload entries: never
+	// enqueue an upload_start or touch the encoder on a dead connection.
+	if !c.IsConnected() {
+		return "", "", ErrNotConnected
+	}
 	encrypted, err := crypto.Encrypt(encKey, data)
 	if err != nil {
 		return "", "", fmt.Errorf("encrypt: %w", err)
@@ -349,6 +363,12 @@ func validFileID(fileID string) bool {
 
 // DownloadFile downloads and decrypts a file. Returns the local path.
 func (c *Client) DownloadFile(fileID string, decryptKey []byte, expectedContentHash string) (string, error) {
+	// offline-browse Step 5 gate (R14): cached blobs render from disk
+	// without reaching here; a blob that is not cached fails cleanly
+	// instead of attempting a fetch on a dead connection.
+	if !c.IsConnected() {
+		return "", ErrNotConnected
+	}
 	// F12: fileID is server-relayed (from a message's file_ids) and is used
 	// below as the local cache filename. Reject anything that isn't a safe
 	// single path component before any work, so a malicious server cannot make

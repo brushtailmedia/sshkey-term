@@ -339,6 +339,9 @@ func (s *Store) init() error {
 	if err := s.ensureRoomMembersSchema(); err != nil {
 		return err
 	}
+	if err := s.ensurePinnedKeysSchema(); err != nil {
+		return err
+	}
 
 	// FTS5 search index — optional, may not be available in all SQLite builds.
 	// Only create the triggers if the VIRTUAL TABLE was created successfully —
@@ -416,6 +419,40 @@ func (s *Store) ensureDirectMessageSchema() error {
 		return fmt.Errorf("migrate direct_messages.hidden: %w", err)
 	}
 	return nil
+}
+
+// ensurePinnedKeysSchema adds pinned_keys.display_name (offline-startup-
+// browse D1: display names must survive offline, where c.profiles is cold).
+// Same idempotent PRAGMA-then-ALTER pattern as ensureDirectMessageSchema.
+func (s *Store) ensurePinnedKeysSchema() error {
+	if s.pinnedKeysColumnExists("display_name") {
+		return nil
+	}
+	if _, err := s.db.Exec(`ALTER TABLE pinned_keys ADD COLUMN display_name TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("migrate pinned_keys.display_name: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) pinnedKeysColumnExists(name string) bool {
+	rows, err := s.db.Query(`PRAGMA table_info(pinned_keys)`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var colName, colType string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &dflt, &pk); err != nil {
+			return false
+		}
+		if colName == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) dmColumnExists(name string) bool {

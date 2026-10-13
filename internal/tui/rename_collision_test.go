@@ -280,7 +280,7 @@ func TestRename_EncodeFailureDoesNotSetMarker(t *testing.T) {
 // welcome self-`profile` re-renders the authoritative name.
 func TestRename_DisconnectClearsPending(t *testing.T) {
 	a := newRenameApp(t)
-	a.connected = true // a live connection that then drops -> reconnect branch
+	a.connState = ConnStateOnline // a live connection that then drops -> reconnect branch
 	a.renameInFlight = true
 	a.renameAttempted = "NewName"
 	a.settings.SetDisplayNameRenamePending(true)
@@ -300,7 +300,7 @@ func TestRename_DisconnectClearsPending(t *testing.T) {
 // the clear firing spuriously).
 func TestRename_DisconnectNoPendingIsNoop(t *testing.T) {
 	a := newRenameApp(t)
-	a.connected = true
+	a.connState = ConnStateOnline
 	// renameInFlight is false.
 
 	model, _ := a.updateInner(ErrMsg{Err: errors.New("connection lost"), gen: a.connGen})

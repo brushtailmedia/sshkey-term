@@ -22,6 +22,11 @@ var (
 	statusDisconnected = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#EF4444")).Render("●")
 
+	// Offline-browse: hollow dot for the right-side user indicator while
+	// disconnected — the username itself stays visible (locked UX).
+	statusUserOffline = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#64748B")).Render("○")
+
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#F59E0B"))
 
@@ -65,7 +70,11 @@ type StatusBarModel struct {
 	navigationMode bool
 	reconnecting   bool
 	reconnAttempt  int
-	errorMsg       string
+	// offline is offline-browse mode (cached history, no connection, no
+	// reconnect in flight). Mirrors App.connState == ConnStateOffline via
+	// setConnState; never set anywhere else.
+	offline  bool
+	errorMsg string
 
 	// refreshingUntil (Phase 17c Step 6) holds the earliest time at
 	// which the "refreshing…" keypress-ack indicator may disappear.
@@ -94,6 +103,12 @@ func (s *StatusBarModel) SetConnected(connected bool) {
 	if connected {
 		s.reconnecting = false
 	}
+}
+
+// SetOffline flags offline-browse mode for the footer. Driven exclusively
+// by App.setConnState so the bar can never disagree with App.connState.
+func (s *StatusBarModel) SetOffline(v bool) {
+	s.offline = v
 }
 
 func (s *StatusBarModel) SetNavigationMode(active bool) {
@@ -156,16 +171,21 @@ func (s StatusBarModel) View(width int) string {
 	// Left side: encryption + connection status
 	dot := statusDisconnected
 	connLabel := ""
+	label := " E2E encrypted"
 	if s.connected {
 		dot = statusConnected
 	} else if s.reconnecting {
 		dot = statusReconnecting
 		connLabel = fmt.Sprintf(" (reconnecting #%d)", s.reconnAttempt)
+	} else if s.offline {
+		// Offline-browse mode: the locked footer is "offline ●" (red dot).
+		label = " offline"
 	} else {
-		connLabel = " (offline)"
+		// Connecting. The old "(offline)" wording now means browse mode.
+		connLabel = " (connecting...)"
 	}
 
-	left := statusBarStyle.Render(" E2E encrypted") + " " + dot + statusBarStyle.Render(connLabel)
+	left := statusBarStyle.Render(label) + " " + dot + statusBarStyle.Render(connLabel)
 
 	// Right side: user
 	right := ""
@@ -177,7 +197,13 @@ func (s StatusBarModel) View(width int) string {
 				right += " " + statusReconnecting + statusBarStyle.Render(" pending")
 			}
 		}
-		right = statusBarStyle.Render(right+" ") + statusConnected
+		// Hollow user dot whenever the connection is down (offline-browse
+		// Step 4 — the dot was previously hardcoded green).
+		userDot := statusConnected
+		if !s.connected {
+			userDot = statusUserOffline
+		}
+		right = statusBarStyle.Render(right+" ") + userDot
 	}
 
 	// Error (persists until next user action clears it)

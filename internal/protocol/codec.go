@@ -19,6 +19,14 @@ func NewEncoder(w io.Writer) *Encoder {
 }
 
 func (e *Encoder) Encode(v any) error {
+	// Offline-browse chokepoint (offline-startup-browse Step 5): a
+	// local-only client has a nil encoder, and the TUI's direct
+	// `client.Enc().Encode(...)` sites would otherwise nil-deref on e.mu.
+	// A handled error beats a panic; every exported client method is ALSO
+	// guarded (ErrNotConnected) before reaching here.
+	if e == nil {
+		return fmt.Errorf("not connected: no encoder")
+	}
 	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)

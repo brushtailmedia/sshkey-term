@@ -218,6 +218,8 @@ func (h HelpModel) renderContent(width int) string {
 		{cmd: "/help or /?", desc: "this screen"},
 		{cmd: "/search <query>", desc: "search messages"},
 		{cmd: "/upload <path>", desc: "upload a file"},
+		{cmd: "/online", desc: "connect the current server (alias: /connect)"},
+		{cmd: "/offline", desc: "disconnect - local history only (alias: /disconnect)"},
 		{cmd: "/verify <user>", desc: "verify safety number"},
 		{cmd: "/leave", desc: "leave room or group DM"},
 		{cmd: "/delete", desc: "delete conversation from your view"},

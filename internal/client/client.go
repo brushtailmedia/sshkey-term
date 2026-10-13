@@ -4,12 +4,14 @@ package client
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -23,6 +25,12 @@ const (
 	ClientName    = "sshkey-chat"
 	ClientVersion = "0.1.0"
 )
+
+// ErrNotConnected is returned by every exported client method that would
+// encode to the server while no live connection exists — a local-only
+// (offline-browse) client, or after a drop. The TUI treats it as a clean
+// "offline" outcome, never a crash (offline-startup-browse Step 5).
+var ErrNotConnected = errors.New("not connected")
 
 // Config holds connection parameters.
 type Config struct {
@@ -148,6 +156,10 @@ type Client struct {
 	privKey         ed25519.PrivateKey
 	signer          ssh.Signer
 	lastSynced      string
+	// connected is true from handshake completion (set just before readLoop
+	// starts) until readLoop exits or Close/Disconnect runs. Offline-browse
+	// gates every encode-reaching path on it (offline-startup-browse R2/R18).
+	connected atomic.Bool
 
 	// sendQueue (Phase 17c Step 5) tracks in-flight outbound requests
 	// by their client-generated corr_id. Replaces fire-and-forget.
@@ -237,6 +249,30 @@ func (c *Client) hydrateLocalCache(st *store.Store) {
 		c.mu.Unlock()
 	} else {
 		c.logger.Warn("hydrate room member cache", "error", err)
+	}
+
+	// Offline-browse D1: seed display names persisted in pinned_keys so
+	// DisplayName() stops returning nanoids before any profile frame
+	// arrives. Seeds are PARTIAL (no Admin/Retired) — never use them for
+	// authority decisions; live profile frames overwrite them with full
+	// structs.
+	if names, err := st.GetAllDisplayNames(); err == nil {
+		c.mu.Lock()
+		for user, name := range names {
+			if _, ok := c.profiles[user]; !ok {
+				c.profiles[user] = &protocol.Profile{Type: "profile", User: user, DisplayName: name}
+			}
+		}
+		c.mu.Unlock()
+	}
+
+	// Offline-browse: self identity persisted by Connect() on the last
+	// online session. The == "" guard keeps online behavior identical
+	// (welcome has already set it by the time Connect opens the store).
+	if c.userID == "" {
+		if v, err := st.GetState("self_user_id"); err == nil && v != "" {
+			c.userID = v
+		}
 	}
 }
 
@@ -351,29 +387,22 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("handshake: %w", err)
 	}
 
-	// Open encrypted local DB (key derived from SSH private key)
-	if c.cfg.DataDir != "" {
-		dbPath := config.MessagesDBPath(c.cfg.DataDir)
-
-		// Derive DB encryption key from the SSH private key seed.
-		// Both derivation and open must succeed — we never store
-		// messages unencrypted.
-		dbKey, err := store.DeriveDBKey(c.privKey.Seed())
-		if err != nil {
-			c.logger.Error("failed to derive DB key — local storage disabled", "error", err)
-		} else if st, err := store.Open(dbPath, dbKey); err != nil {
-			c.logger.Error("failed to open local DB — local storage disabled", "path", dbPath, "error", err)
-		} else {
-			c.store = st
-
-			// Load last_synced from DB
-			if synced, err := st.GetState("last_synced"); err == nil && synced != "" {
-				c.lastSynced = synced
-			}
-
-			c.hydrateLocalCache(st)
-		}
+	// Open encrypted local DB (key derived from SSH private key). Extracted
+	// to OpenLocal so the offline-browse path can open the store without a
+	// dial; best-effort here exactly as before — a store failure never fails
+	// a connect (the error is logged inside OpenLocal).
+	_ = c.OpenLocal()
+	// Offline-browse: persist our own user id so a later offline open can
+	// hydrate it. This cannot happen in the welcome handler — handshake()
+	// sets userID before the store is open.
+	if c.store != nil && c.userID != "" {
+		_ = c.store.SetState("self_user_id", c.userID)
 	}
+
+	// Live from here: the handshake encode above legitimately ran while
+	// disconnected, so this flips only once the connection is fully up and
+	// immediately before the read loop that will clear it on exit.
+	c.connected.Store(true)
 
 	// Start message loop
 	go c.readLoop()
@@ -400,15 +429,84 @@ func (c *Client) Connect() error {
 	return nil
 }
 
+// OpenLocal opens the encrypted local store and hydrates the in-memory
+// caches WITHOUT requiring a network connection. Idempotent: returns nil
+// immediately when the store is already open. Safe to call before or
+// without Connect(). Errors are logged (matching the old in-Connect
+// behavior) and also returned so offline callers can distinguish
+// "no store" from "store open".
+func (c *Client) OpenLocal() error {
+	if c.store != nil {
+		return nil
+	}
+	if c.cfg.DataDir == "" {
+		return nil
+	}
+	if c.privKey == nil {
+		// Standalone (offline) open: Connect() has not parsed the key yet.
+		// When called from Connect() privKey is already set, so there is no
+		// double parse and no second passphrase prompt.
+		pk, err := ParseRawEd25519Key(c.cfg.KeyPath, c.cfg.OnPassphrase)
+		if err != nil {
+			c.logger.Error("failed to load key for local DB — local storage disabled", "error", err)
+			return err
+		}
+		c.privKey = pk
+	}
+	dbPath := config.MessagesDBPath(c.cfg.DataDir)
+
+	// Derive DB encryption key from the SSH private key seed.
+	// Both derivation and open must succeed — we never store
+	// messages unencrypted.
+	dbKey, err := store.DeriveDBKey(c.privKey.Seed())
+	if err != nil {
+		c.logger.Error("failed to derive DB key — local storage disabled", "error", err)
+		return err
+	}
+	st, err := store.Open(dbPath, dbKey)
+	if err != nil {
+		c.logger.Error("failed to open local DB — local storage disabled", "path", dbPath, "error", err)
+		return err
+	}
+	c.store = st
+
+	// Load last_synced from DB
+	if synced, err := st.GetState("last_synced"); err == nil && synced != "" {
+		c.lastSynced = synced
+	}
+
+	c.hydrateLocalCache(st)
+	return nil
+}
+
+// IsConnected reports whether the live connection is up: true between
+// handshake completion and the readLoop exiting (server drop) or
+// Close/Disconnect. A local-only client (OpenLocal without Connect) is
+// never connected.
+func (c *Client) IsConnected() bool {
+	return c.connected.Load()
+}
+
+// HasLocalCache reports whether this server has synced before: the store
+// is open AND last_synced is set (written on every sync_complete). It is
+// the offline-browse fallback predicate — first-contact / pending-approval
+// servers have no cache and must keep the connect-failed overlay UX.
+func (c *Client) HasLocalCache() bool {
+	return c.store != nil && c.lastSynced != ""
+}
+
 // Close disconnects from the server.
-func (c *Client) Close() error {
+// Disconnect tears down the live connection — done channel first (so
+// readLoop's error branch keeps suppressing the reconnect-trigger OnError
+// exactly as before), then the SSH channel and transport — but KEEPS the
+// local store open so the TUI can keep browsing cached history
+// (offline-startup-browse Step 6, R20). Idempotent.
+func (c *Client) Disconnect() error {
+	c.connected.Store(false)
 	select {
 	case <-c.done:
 	default:
 		close(c.done)
-	}
-	if c.store != nil {
-		c.store.Close()
 	}
 	if c.channel != nil {
 		c.channel.Close()
@@ -417,6 +515,16 @@ func (c *Client) Close() error {
 		return c.conn.Close()
 	}
 	return nil
+}
+
+// Close is Disconnect plus closing the local store: the full teardown used
+// by server switches and quit. External semantics are unchanged.
+func (c *Client) Close() error {
+	err := c.Disconnect()
+	if c.store != nil {
+		c.store.Close()
+	}
+	return err
 }
 
 // handshake performs the server_hello -> client_hello -> welcome exchange.
@@ -485,6 +593,10 @@ func (c *Client) handshake() error {
 
 // readLoop reads messages from the server and dispatches to callbacks.
 func (c *Client) readLoop() {
+	// Covers passive server drops too: the decode-error branch below simply
+	// returns without calling Close(), so this is the only place that
+	// reliably marks the connection dead on every exit path.
+	defer c.connected.Store(false)
 	for {
 		select {
 		case <-c.done:
@@ -1494,7 +1606,11 @@ func (c *Client) keepalive() {
 				c.logger.Warn("keepalive failed", "failures", failures, "error", err)
 				if failures >= maxFailures {
 					c.logger.Error("connection dead — closing after keepalive failures", "failures", failures)
-					c.Close()
+					// Disconnect, not Close: keep the store open so a
+					// keepalive-detected death leaves cached history
+					// browsable (offline-startup-browse R20). Same
+					// done-then-channel ordering as before.
+					c.Disconnect()
 					return
 				}
 			} else {
@@ -1732,6 +1848,24 @@ func SetUserIDForTesting(c *Client, userID string) {
 // Do not call from production code.
 func SetEncoderForTesting(c *Client, enc *protocol.Encoder) {
 	c.enc = enc
+	// An encoder only exists on a live connection, so installing one marks
+	// the client connected: the offline-browse mutation gate (IsConnected)
+	// otherwise stops every outbound frame these tests exist to capture.
+	c.connected.Store(enc != nil)
+}
+
+// SetConnectedForTesting marks the client live (or not) without a dial, for
+// tests that exercise server-bound paths — or the offline gate — directly.
+// Do not call from production code.
+func SetConnectedForTesting(c *Client, connected bool) {
+	c.connected.Store(connected)
+}
+
+// SetLastSyncedForTesting seeds the last_synced watermark so HasLocalCache
+// reports a previously-synced server without a real sync_complete. Do not
+// call from production code.
+func SetLastSyncedForTesting(c *Client, v string) {
+	c.lastSynced = v
 }
 
 // SetEpochKeyForTesting seeds the in-memory epoch-key cache for a

@@ -474,7 +474,7 @@ func TestApp_MemberPanelMouseClick_SelectsVisualRowWithLongNames(t *testing.T) {
 	a, _ := newEditAppHarness(t)
 	a.width = 120
 	a.height = 40
-	a.connected = true
+	a.connState = ConnStateOnline
 	a.sidebar = NewSidebar()
 	a.memberPanel = NewMemberPanel()
 	a.memberPanel.visible = true

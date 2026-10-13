@@ -100,6 +100,12 @@ func (c *Client) runSendQueueDriver() {
 // driverTick is one iteration of the driver loop: sweep timeouts then
 // scan for Category A retries due.
 func (c *Client) driverTick() {
+	// Offline-browse R18: the driver is an auto-sender. On a local-only or
+	// dropped connection it must stay dormant — never touch the encoder,
+	// never mark entries sending. Entries simply wait for the next connect.
+	if !c.IsConnected() {
+		return
+	}
 	// Gap 3: sweep timeouts. Timed-out entries are dropped silently.
 	for _, e := range c.sendQueue.SweepTimeouts() {
 		c.sendQueue.Drop(e.CorrID)
@@ -128,6 +134,9 @@ func (c *Client) driverTick() {
 // the client applies received epoch keys). Safe to call at any time;
 // no-op when there are no matching entries.
 func (c *Client) TriggerEpochRetry(roomID string) {
+	if !c.IsConnected() { // offline-browse R18: auto-sender stays dormant
+		return
+	}
 	now := time.Now()
 	toRetry := c.sendQueue.PendingForCategoryBRoomRetry(roomID, now)
 	for _, e := range toRetry {

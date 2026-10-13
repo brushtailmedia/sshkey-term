@@ -57,6 +57,9 @@ func (c *Client) nextSeqLocked(seqKey, target string) int64 {
 // current epoch key during upload). The attachment metadata travels inside
 // the encrypted message payload.
 func (c *Client) SendRoomMessageFull(room, body string, replyTo string, mentions []string, attachments []protocol.Attachment) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	c.mu.Lock()
 	epoch := c.currentEpoch[room]
 	key := c.epochKeys[room][epoch]
@@ -202,6 +205,9 @@ func (c *Client) SendGroupMessage(group, body string, replyTo string, mentions [
 // independently after decrypting the message payload. See PROTOCOL.md
 // "DM attachments".
 func (c *Client) SendGroupMessageFull(group, body, replyTo string, mentions []string, attachments []protocol.Attachment) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	// Build payload
 	c.mu.Lock()
 	seq := c.nextSeqLocked("group:"+group, group)
@@ -535,6 +541,9 @@ func (c *Client) DecryptGroupMessage(wrappedKeys map[string]string, payloadBase6
 
 // SendRoomReaction sends an encrypted reaction to a room message.
 func (c *Client) SendRoomReaction(room, targetMsgID, emoji string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	c.mu.Lock()
 	epoch := c.currentEpoch[room]
 	key := c.epochKeys[room][epoch]
@@ -581,6 +590,9 @@ func (c *Client) SendRoomReaction(room, targetMsgID, emoji string) error {
 
 // SendGroupReaction sends an encrypted reaction to a group DM message.
 func (c *Client) SendGroupReaction(group, targetMsgID, emoji string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	msgKey, err := crypto.GenerateKey()
 	if err != nil {
 		return err
@@ -632,6 +644,9 @@ func (c *Client) SendGroupReaction(group, targetMsgID, emoji string) error {
 // verify-or-drop the removal as genuinely ours and bound to this reaction in
 // this context (F6 unreact:v2).
 func (c *Client) SendUnreact(reactionID, room, group, dm string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	kind, contextID, ok := exactlyOneContext(room, group, dm)
 	if !ok {
 		return fmt.Errorf("SendUnreact: exactly one of room/group/dm must be set")
@@ -728,6 +743,11 @@ func (c *Client) DecryptGroupReaction(wrappedKeys map[string]string, payloadBase
 // should be non-empty — the server routes the broadcast based on which
 // context the caller is typing in.
 func (c *Client) SendTyping(room, group, dm string) error {
+	// Fires from keystrokes with no user intent to mutate: offline it is a
+	// silent no-op, not an error (offline-startup-browse R18).
+	if !c.IsConnected() {
+		return nil
+	}
 	return c.enc.Encode(protocol.Typing{
 		Type:  "typing",
 		Room:  room,
@@ -741,6 +761,11 @@ func (c *Client) SendTyping(room, group, dm string) error {
 // of that context (plus the caller's own other sessions for multi-device
 // sync).
 func (c *Client) SendRead(room, group, dm, lastRead string) error {
+	// Fires from conversation views automatically: offline it is a silent
+	// no-op, not an error (offline-startup-browse R18).
+	if !c.IsConnected() {
+		return nil
+	}
 	return c.enc.Encode(protocol.Read{
 		Type:     "read",
 		Room:     room,
@@ -760,6 +785,9 @@ func (c *Client) SendRead(room, group, dm, lastRead string) error {
 // Until that lands, this method enqueues the request but the
 // server doesn't act on it.
 func (c *Client) SendRoomUpdate(room, topic string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	envelope := protocol.RoomUpdate{
 		Type:  "room_update",
 		Room:  room,
@@ -773,6 +801,9 @@ func (c *Client) SendRoomUpdate(room, topic string) error {
 // (kind, contextID, id) so the server can route + verify and recipients
 // verify-or-drop (F6 delete:v1).
 func (c *Client) SendDelete(id, room, group, dm string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	kind, contextID, ok := exactlyOneContext(room, group, dm)
 	if !ok {
 		return fmt.Errorf("SendDelete: exactly one of room/group/dm must be set")
@@ -795,6 +826,9 @@ func (c *Client) SendDelete(id, room, group, dm string) error {
 
 // CreateGroup creates a new group DM.
 func (c *Client) CreateGroup(members []string, name string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	return c.enc.Encode(protocol.CreateGroup{
 		Type:    "create_group",
 		Members: members,
@@ -808,6 +842,9 @@ func (c *Client) CreateGroup(members []string, name string) error {
 // back to all of the user's connected sessions. Idempotent: safe to
 // call on a group the user has already left.
 func (c *Client) DeleteGroup(groupID string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	return c.enc.Encode(protocol.DeleteGroup{
 		Type:  "delete_group",
 		Group: groupID,
@@ -825,6 +862,9 @@ func (c *Client) DeleteGroup(groupID string) error {
 // (retired rooms); server picks the right flag based on the room's
 // retired state. Parallel to DeleteGroup.
 func (c *Client) DeleteRoom(roomID string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	return c.enc.Encode(protocol.DeleteRoom{
 		Type: "delete_room",
 		Room: roomID,
@@ -833,6 +873,9 @@ func (c *Client) DeleteRoom(roomID string) error {
 
 // CreateDM creates a new 1:1 DM with a single other user.
 func (c *Client) CreateDM(other string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	return c.enc.Encode(protocol.CreateDM{
 		Type:  "create_dm",
 		Other: other,
@@ -852,6 +895,9 @@ func (c *Client) CreateDM(other string) error {
 // caller must be an admin of the group. quiet suppresses the inline
 // system message on receiving clients (state updates still happen).
 func (c *Client) AddToGroup(groupID, userID string, quiet bool) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	return c.enc.Encode(protocol.AddToGroup{
 		Type:  "add_to_group",
 		Group: groupID,
@@ -864,6 +910,9 @@ func (c *Client) AddToGroup(groupID, userID string, quiet bool) error {
 // Kicks are deliberately always loud — there is no Quiet flag on the
 // wire verb, so this function mirrors that.
 func (c *Client) RemoveFromGroup(groupID, userID string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	return c.enc.Encode(protocol.RemoveFromGroup{
 		Type:  "remove_from_group",
 		Group: groupID,
@@ -874,6 +923,9 @@ func (c *Client) RemoveFromGroup(groupID, userID string) error {
 // PromoteGroupAdmin asks the server to promote a member to admin.
 // Unilateral — any admin can promote any non-admin member.
 func (c *Client) PromoteGroupAdmin(groupID, userID string, quiet bool) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	return c.enc.Encode(protocol.PromoteGroupAdmin{
 		Type:  "promote_group_admin",
 		Group: groupID,
@@ -886,6 +938,9 @@ func (c *Client) PromoteGroupAdmin(groupID, userID string, quiet bool) error {
 // member. Server rejects if demotion would leave the group with zero
 // admins (the caller must promote a successor first).
 func (c *Client) DemoteGroupAdmin(groupID, userID string, quiet bool) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	return c.enc.Encode(protocol.DemoteGroupAdmin{
 		Type:  "demote_group_admin",
 		Group: groupID,
@@ -901,6 +956,9 @@ func (c *Client) SendDMMessage(dmID, body string, replyTo string, mentions []str
 
 // SendDMMessageFull sends a 1:1 DM message with attachments.
 func (c *Client) SendDMMessageFull(dmID, body, replyTo string, mentions []string, attachments []protocol.Attachment) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	c.mu.Lock()
 	seq := c.nextSeqLocked("dm:"+dmID, dmID)
 	c.mu.Unlock()
@@ -1051,6 +1109,9 @@ func (c *Client) DecryptDMMessage(wrappedKeys map[string]string, payloadBase64 s
 
 // SendDMReaction sends an encrypted reaction to a 1:1 DM message.
 func (c *Client) SendDMReaction(dmID, targetMsgID, emoji string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	msgKey, err := crypto.GenerateKey()
 	if err != nil {
 		return err
@@ -1143,6 +1204,9 @@ func (c *Client) RequestHistory(room, group, dm, before string, limit int) error
 // history-state-model.md). The server echoes the corr_id on history_result and
 // on correlated errors.
 func (c *Client) RequestHistoryWithID(corrID, room, group, dm, before string, limit int) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate (R7: scroll-back stops cleanly at local history)
+		return ErrNotConnected
+	}
 	envelope := protocol.History{
 		Type:   "history",
 		Room:   room,
@@ -1170,6 +1234,9 @@ func (c *Client) RequestHistoryWithID(corrID, room, group, dm, before string, li
 // Valid reasons: "self_compromise" (key suspected compromised), "switching_key"
 // (user upgrading to a new key), "other".
 func (c *Client) SendRetireMe(reason string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	return c.enc.Encode(protocol.RetireMe{
 		Type:   "retire_me",
 		Reason: reason,
@@ -1180,6 +1247,9 @@ func (c *Client) SendRetireMe(reason string) error {
 // The response arrives as a device_list message and should be handled by the
 // OnMessage callback.
 func (c *Client) SendListDevices() error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	corrID := protocol.GenerateCorrID()
 	envelope := protocol.ListDevices{Type: "list_devices", CorrID: corrID}
 	c.sendQueue.EnqueueWithID(corrID, "list_devices", envelope)
@@ -1191,6 +1261,9 @@ func (c *Client) SendListDevices() error {
 // The response arrives as a device_revoke_result. The server validates
 // ownership and rejects attempts to revoke devices belonging to other users.
 func (c *Client) SendRevokeDevice(deviceID string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	return c.enc.Encode(protocol.RevokeDevice{
 		Type:     "revoke_device",
 		DeviceID: deviceID,
@@ -1201,6 +1274,9 @@ func (c *Client) SendRevokeDevice(deviceID string) error {
 // Admin-only — the server rejects non-admin callers with an error.
 // The response arrives as a pending_keys_list message.
 func (c *Client) SendListPendingKeys() error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	return c.enc.Encode(protocol.ListPendingKeys{Type: "list_pending_keys"})
 }
 
@@ -1229,6 +1305,9 @@ func (c *Client) ClearPendingAlert() {
 
 // RequestRoomMembers asks the server for the member list of a room.
 func (c *Client) RequestRoomMembers(room string) error {
+	if !c.IsConnected() { // offline-browse Step 5 gate
+		return ErrNotConnected
+	}
 	corrID := protocol.GenerateCorrID()
 	envelope := protocol.RoomMembers{Type: "room_members", Room: room, CorrID: corrID}
 	c.sendQueue.EnqueueWithID(corrID, "room_members", envelope)
