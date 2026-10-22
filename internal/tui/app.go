@@ -3829,6 +3829,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// setter stays as defensive backup this phase. See
 			// presence-dot-self-leak-fix.md.
 			a.sidebar.SetSelfUserID(uid)
+			a.messages.SetSelfUserID(uid)
 		}
 
 		// Populate sidebar and messages
@@ -4666,6 +4667,7 @@ func (a *App) hydrateOfflineUI() {
 		a.sidebar.SetDMs(active)
 	}
 	a.sidebar.SetSelfUserID(a.client.UserID())
+	a.messages.SetSelfUserID(a.client.UserID())
 
 	// Initial context, mirroring connectedWithClient.
 	if len(ids) > 0 {
@@ -8227,6 +8229,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		// presence-dot-self-leak-fix.md.
 		if a.client != nil {
 			a.sidebar.SetSelfUserID(a.client.UserID())
+			a.messages.SetSelfUserID(a.client.UserID())
 		}
 	case "dm_created":
 		var m protocol.DMCreated

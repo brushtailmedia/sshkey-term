@@ -24,9 +24,9 @@ func TestDecode_LargeRoomList(t *testing.T) {
 	// Build a room_list big enough to exceed the legacy 1 MiB line cap:
 	// 200 rooms x 300 members x ~24 bytes/ID ≈ 1.4 MiB on the wire.
 	const (
-		numRooms          = 200
-		membersPerRoom    = 300
-		legacyCap         = 1024 * 1024
+		numRooms       = 200
+		membersPerRoom = 300
+		legacyCap      = 1024 * 1024
 	)
 	rl := RoomList{Type: "room_list"}
 	for r := 0; r < numRooms; r++ {

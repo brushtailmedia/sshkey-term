@@ -131,6 +131,9 @@ func TestHydrateOfflineUI_ParityWithLiveHandlers(t *testing.T) {
 	if a.sidebar.selfUserID != "usr_self" {
 		t.Errorf("sidebar selfUserID = %q, want usr_self", a.sidebar.selfUserID)
 	}
+	if a.messages.selfUserID != "usr_self" {
+		t.Errorf("messages selfUserID = %q, want usr_self (own-message green header)", a.messages.selfUserID)
+	}
 
 	// Initial context + identity + resolvers, mirroring connectedWithClient.
 	if a.messages.room != "room_a" {

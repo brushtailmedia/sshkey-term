@@ -22,13 +22,13 @@ func TestBackoffForAttempts_ExponentialWithCap(t *testing.T) {
 		wantMin  time.Duration
 		wantMax  time.Duration
 	}{
-		{0, 0, 250 * time.Millisecond},           // floor
+		{0, 0, 250 * time.Millisecond}, // floor
 		{1, 150 * time.Millisecond, 250 * time.Millisecond},
 		{2, 350 * time.Millisecond, 450 * time.Millisecond},
 		{3, 750 * time.Millisecond, 850 * time.Millisecond},
 		{4, 1500 * time.Millisecond, 1700 * time.Millisecond},
 		{5, 3000 * time.Millisecond, 3300 * time.Millisecond},
-		{6, 4999 * time.Millisecond, 5001 * time.Millisecond}, // capped at 5s
+		{6, 4999 * time.Millisecond, 5001 * time.Millisecond},  // capped at 5s
 		{10, 4999 * time.Millisecond, 5001 * time.Millisecond}, // still capped
 	}
 	for _, tc := range cases {

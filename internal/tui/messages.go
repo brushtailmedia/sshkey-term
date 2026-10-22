@@ -24,6 +24,10 @@ import (
 
 var (
 	usernameStyle = lipgloss.NewStyle().Bold(true)
+	// ownUsernameStyle marks messages sent by the local user so they stand
+	// out while scrolling. Same green as the sidebar's online dot
+	// (sidebar.go onlineDot) so the palette stays one green.
+	ownUsernameStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#22C55E"))
 
 	timestampStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#64748B"))
@@ -186,6 +190,7 @@ type MessagesModel struct {
 	resolveRoomName  func(string) string  // room nanoid → display name (set by App)
 	resolveGroupName func(string) string  // group nanoid → display name (set by App)
 	resolveDMName    func(string) string  // dm nanoid → other user's display name (set by App)
+	selfUserID       string               // the local user's ID; own messages get ownUsernameStyle (set by App via SetSelfUserID)
 	loadingHistory   bool                 // a history request is in flight (the "Loading" concept)
 	remoteState      HistoryRemoteState   // server truth: does older history exist? (replaces the overloaded hasMore)
 	hintVisible      bool                 // whether the top "press up to load more" hint should render
@@ -465,6 +470,26 @@ func (m *MessagesModel) ensureCursorVisible() {
 // SetRetired updates the set of known-retired users. Called by the app when
 // user_retired / retired_users events arrive. Used by View() to append a
 // [retired] marker next to historical sender names.
+// SetSelfUserID records the local user's ID so the pane can render the
+// sender header of the user's own messages in ownUsernameStyle. Mirrors
+// SidebarModel.SetSelfUserID and is called from the same three sites
+// (connect, offline hydration, the dm_list backup) so online and offline
+// starts agree.
+func (m *MessagesModel) SetSelfUserID(id string) {
+	m.selfUserID = id
+}
+
+// usernameStyleFor picks the sender-header style for a message: green for
+// the local user's own messages, plain bold for everyone else. An empty
+// FromID (system rows, legacy rows) never matches, even while selfUserID is
+// still unset at startup.
+func (m *MessagesModel) usernameStyleFor(fromID string) lipgloss.Style {
+	if fromID != "" && fromID == m.selfUserID {
+		return ownUsernameStyle
+	}
+	return usernameStyle
+}
+
 func (m *MessagesModel) SetRetired(users map[string]string) {
 	m.retired = make(map[string]bool, len(users))
 	for user := range users {
@@ -2056,7 +2081,7 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 				if m.resolveName != nil && msg.FromID != "" {
 					from = m.resolveName(msg.FromID)
 				}
-				header := usernameStyle.Render(from)
+				header := m.usernameStyleFor(msg.FromID).Render(from)
 				if m.retired[msg.FromID] {
 					header += " " + helpDescStyle.Render("[retired]")
 				}
