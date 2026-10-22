@@ -2006,6 +2006,14 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 
 		if msg.IsSystem {
 			line := systemMsgStyle.Render(" ── " + msg.SystemText + " ──")
+			if i == m.cursor {
+				// The cursor can land here (arrow keys, search and
+				// reply-to-parent jumps). Draw the same selection band
+				// as a normal message so a run of system rows never
+				// looks like the keypress did nothing. Applied before
+				// lineRows so the rowMap matches what is drawn.
+				line = selectedMsgStyle.Width(width - 2).Render(line)
+			}
 			lineRows = strings.Count(line, "\n") + 1
 			b.WriteString(line)
 			prevSender = ""
@@ -2020,6 +2028,13 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 				tombstone = "message removed by " + deleterName
 			}
 			line := systemMsgStyle.Render(" ── " + tombstone + " ──")
+			if i == m.cursor {
+				// Same as the system-row case: a deleted message is
+				// still a row the cursor walks through, and consecutive
+				// deletions were invisible to navigate. The actions stay
+				// gated on !Deleted; only the highlight changes.
+				line = selectedMsgStyle.Width(width - 2).Render(line)
+			}
 			lineRows = strings.Count(line, "\n") + 1
 			b.WriteString(line)
 			prevSender = ""
