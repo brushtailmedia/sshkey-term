@@ -39,8 +39,8 @@ func TestThreadPanel_EnterOnParentRowStillGoesUp(t *testing.T) {
 	p.Show("mid", nestedMessages())
 	p, _ = p.Update(keyRune('k')) // ".."
 	q, cmd := p.Update(enterKey())
-	if act := threadActionOf(t, cmd); act.Data != "top" || act.Msg.ID != "mid" {
-		t.Errorf("Enter on ..: root=%q focus=%q, want top/mid", act.Data, act.Msg.ID)
+	if act := threadActionOf(t, cmd); act.Data != "top" || act.Msg.ID != "top" {
+		t.Errorf("Enter on ..: root=%q focus=%q, want top/top (land on the parent)", act.Data, act.Msg.ID)
 	}
 	if !q.IsVisible() {
 		t.Error("going up must not hide the panel")

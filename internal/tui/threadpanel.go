@@ -299,20 +299,20 @@ func (t ThreadPanelModel) openTarget() string {
 // openHighlighted emits the "thread" action for the row the cursor points
 // to — the parent thread on "..", a reply's own thread when it has replies
 // — or nothing. The App shows this panel again with the new root: the
-// "close and open" of drilling down or going up. Msg is what the App
-// selects in the new view: going up via "..", the root you came from;
-// drilling down, the new root.
+// "close and open" of drilling down or going up. Msg names what the App
+// selects in the new view, and in both directions that is the new root:
+// drilling down, the reply you opened; going up via "..", the parent
+// itself — the row under its own "..", or the top. So repeated climbing is
+// always `k` then Enter, and the landing row matches a fresh open. (Owner,
+// 2026-10-24: landing on the reply you came from left the cursor several
+// rows below "..".) Only the ID is needed, so that is all Msg carries.
 func (t ThreadPanelModel) openHighlighted() (ThreadPanelModel, tea.Cmd) {
 	target := t.openTarget()
 	if target == "" {
 		return t, nil
 	}
-	focus := t.messages[0]
-	if idx, ok := t.msgAt(t.cursor); ok {
-		focus = t.messages[idx]
-	}
 	return t, func() tea.Msg {
-		return MessageAction{Action: "thread", Msg: focus, Data: target}
+		return MessageAction{Action: "thread", Msg: DisplayMessage{ID: target}, Data: target}
 	}
 }
 

@@ -120,14 +120,15 @@ func TestThreadPanel_SelectUnknownKeepsCursor(t *testing.T) {
 	}
 }
 
-// ".." carries the root you came from; drill-down carries the new root.
+// Both directions name the new root as the row to land on: ".." the
+// parent itself, drill-down the reply opened.
 func TestThreadPanel_OpenActionsCarryFocus(t *testing.T) {
 	var p ThreadPanelModel
 	p.Show("mid", nestedMessages())
 	p, _ = p.Update(keyRune('k')) // ".."
 	_, cmd := p.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if act := threadActionOf(t, cmd); act.Data != "top" || act.Msg.ID != "mid" {
-		t.Errorf("..: root=%q focus=%q, want top/mid", act.Data, act.Msg.ID)
+	if act := threadActionOf(t, cmd); act.Data != "top" || act.Msg.ID != "top" {
+		t.Errorf("..: root=%q focus=%q, want top/top (land on the parent itself)", act.Data, act.Msg.ID)
 	}
 
 	p.Show("top", nestedMessages())
@@ -156,19 +157,20 @@ func TestApp_PaneT_OpensWholeThreadOnPressedMessage(t *testing.T) {
 	}
 }
 
-// End to end inside the view: Enter on ".." goes up and lands on the row
-// you came from; t on a reply drills down and lands on the new root.
+// End to end inside the view: Enter on ".." goes up and lands on the parent
+// itself (the new root); t on a reply drills down and lands on the new root.
 func TestApp_ThreadNavigationLandsCursor(t *testing.T) {
 	a := newPaneThreadApp(t)
 	a.threadPanel.Show("mid", a.messages.messages)
 	a.threadPanel, _ = a.threadPanel.Update(keyRune('k')) // ".."
 	model, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	a = deliver(t, model.(App), cmd)
-	if a.threadPanel.rootID != "top" || highlightedID(a.threadPanel) != "mid" {
-		t.Errorf("after ..: root=%q highlighted=%q; want top with mid highlighted", a.threadPanel.rootID, highlightedID(a.threadPanel))
+	if a.threadPanel.rootID != "top" || highlightedID(a.threadPanel) != "top" || a.threadPanel.cursor != a.threadPanel.rowOffset() {
+		t.Errorf("after ..: root=%q highlighted=%q cursor=%d; want top on its root row", a.threadPanel.rootID, highlightedID(a.threadPanel), a.threadPanel.cursor)
 	}
 
-	model, cmd = a.Update(keyRune('t')) // mid is highlighted: drill down
+	a.threadPanel, _ = a.threadPanel.Update(keyRune('j')) // mid
+	model, cmd = a.Update(keyRune('t'))                   // drill down
 	a = deliver(t, model.(App), cmd)
 	if a.threadPanel.rootID != "mid" || highlightedID(a.threadPanel) != "mid" || a.threadPanel.cursor != a.threadPanel.rowOffset() {
 		t.Errorf("after drill-down: root=%q highlighted=%q cursor=%d; want mid on its root row", a.threadPanel.rootID, highlightedID(a.threadPanel), a.threadPanel.cursor)
