@@ -53,27 +53,23 @@ func TestThreadPanel_FrameFitsTerminal(t *testing.T) {
 	}
 }
 
-// The footer never pushes the bottom border off: it takes a compact form
-// when the full key line does not fit, and at widths where even that
-// wraps, its measured height comes out of the body budget.
+// The footer never pushes the bottom border off: at widths where it wraps,
+// its measured height comes out of the body budget, and every key stays
+// listed.
 func TestThreadPanel_FooterNeverBreaksFrame(t *testing.T) {
 	root := DisplayMessage{ID: "root", From: "Alice", FromID: "usr_alice", Body: "root body", TS: 1000}
 	reply := DisplayMessage{ID: "reply", From: "Bob", FromID: "usr_bob", Body: "a reply", TS: 1001, ReplyTo: "root"}
 	var p ThreadPanelModel
 	p.Show("root", []DisplayMessage{root, reply})
 
-	for _, size := range [][2]int{{46, 12}, {40, 12}, {30, 12}, {20, 12}} {
+	for _, size := range [][2]int{{60, 12}, {46, 12}, {40, 12}, {30, 12}, {20, 12}} {
 		view := p.View(size[0], size[1])
 		assertFramed(t, view, size[0], size[1])
-		if !strings.Contains(view, "r=reply") {
-			t.Errorf("%v: footer missing", size)
+		for _, key := range []string{"t=thread", "Enter=go to", "r=reply", "e=react", "Esc/q=close"} {
+			if !strings.Contains(view, key) {
+				t.Errorf("%v: footer lacks %q", size, key)
+			}
 		}
-	}
-	if !strings.Contains(p.View(46, 12), "t/Enter=open") {
-		t.Errorf("full footer expected when it fits")
-	}
-	if v := p.View(40, 12); strings.Contains(v, "t/Enter=open") || !strings.Contains(v, "Esc/q=close") {
-		t.Errorf("compact footer expected at 40 columns, keeping Esc/q=close")
 	}
 }
 

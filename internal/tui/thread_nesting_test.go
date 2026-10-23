@@ -36,6 +36,19 @@ func threadActionOf(t *testing.T, cmd tea.Cmd) MessageAction {
 	return act
 }
 
+// rowHintCount counts the selection-only "t=thread" row hints in a thread
+// view, excluding the footer, whose key list also says "t=thread".
+func rowHintCount(view string) int {
+	n := 0
+	for _, l := range strings.Split(view, "\n") {
+		if strings.Contains(l, "Enter=go to") {
+			continue // the footer
+		}
+		n += strings.Count(l, "t=thread")
+	}
+	return n
+}
+
 func lineContaining(view, needle string) string {
 	for _, l := range strings.Split(view, "\n") {
 		if strings.Contains(l, needle) {
@@ -136,9 +149,9 @@ func TestThreadPanel_TOpensReplyWithReplies(t *testing.T) {
 
 	p, _ = p.Update(keyRune('k'))
 	p, _ = p.Update(keyRune('k')) // root
-	q, cmd = p.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	q, cmd = p.Update(keyRune('t'))
 	if cmd != nil || !q.IsVisible() {
-		t.Errorf("Enter on the root must do nothing (cmd=%v visible=%v)", cmd != nil, q.IsVisible())
+		t.Errorf("t on the root must do nothing (cmd=%v visible=%v)", cmd != nil, q.IsVisible())
 	}
 }
 
@@ -157,18 +170,18 @@ func TestThreadPanel_NoCountWhereChildrenVisible_HintFollowsT(t *testing.T) {
 	if !strings.Contains(view, "Thread (4 replies)") {
 		t.Errorf("header must count the whole subtree:\n%s", view)
 	}
-	if strings.Contains(view, "t=thread") {
+	if rowHintCount(view) != 0 {
 		t.Errorf("no hint on the root: re-rooting there is a no-op")
 	}
 	p, _ = p.Update(keyRune('j')) // mid: has replies, all visible
-	if c := strings.Count(p.View(60, 20), "t=thread"); c != 1 {
+	if c := rowHintCount(p.View(60, 20)); c != 1 {
 		t.Errorf("hint count on a reply with replies = %d, want 1", c)
 	}
 	if _, cmd := p.Update(keyRune('t')); cmd == nil {
 		t.Errorf("t must re-root on a reply with replies")
 	}
 	p, _ = p.Update(keyRune('j')) // leaf1: childless
-	if strings.Contains(p.View(60, 20), "t=thread") {
+	if rowHintCount(p.View(60, 20)) != 0 {
 		t.Errorf("no hint on a childless reply")
 	}
 }

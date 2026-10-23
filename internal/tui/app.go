@@ -3808,6 +3808,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.messages.ScrollToMessage(msg.Msg.ID)
 		case "unreact":
 			a.sendUnreactForMessage(msg.Msg, msg.Data)
+		case "goto":
+			// From the thread view: Enter on a row closed the view (the
+			// panel hid itself) and asks to land on that message in the
+			// pane — a navigation jump, so focus goes where you arrived,
+			// as the pinned-bar and search jumps do.
+			a.messages.ScrollToMessage(msg.Msg.ID)
+			a.focus = FocusMessages
 		case "thread":
 			// Data is the root to show; Msg is the message to land on —
 			// from the pane the one `t` was pressed on (or the capped row

@@ -32,10 +32,12 @@ const maxThreadDepth = 3
 // depth-first (each reply followed by its own replies, siblings in time
 // order), maxThreadDepth levels below the root. Deeper rows are hidden, not
 // flattened — a row at the cap with descendants shows "· N more replies",
-// and `t`/Enter re-roots the view there for fresh levels; a `..` row at the
-// top of a nested view opens the parent's thread (the file picker's `../`
-// idiom). `r` replies to and `e` reacts on the highlighted message at any
-// depth; both close the view first (see Update). Esc/q close.
+// and `t` re-roots the view there for fresh levels; a `..` row at the top
+// of a nested view opens the parent's thread (the file picker's `../`
+// idiom) on `t` or Enter. Enter on a message closes the view and goes to
+// that message in the pane. `r` replies to and `e` reacts on the
+// highlighted message at any depth; both close the view first (see
+// Update). Esc/q close.
 //
 // Depth drives the indent, three columns per level, and an arrow marks
 // every row below the top, so the root needs no label: the one row without
@@ -288,6 +290,26 @@ func (t ThreadPanelModel) openTarget() string {
 	return ""
 }
 
+// openHighlighted emits the "thread" action for the row the cursor points
+// to — the parent thread on "..", a reply's own thread when it has replies
+// — or nothing. The App shows this panel again with the new root: the
+// "close and open" of drilling down or going up. Msg is what the App
+// selects in the new view: going up via "..", the root you came from;
+// drilling down, the new root.
+func (t ThreadPanelModel) openHighlighted() (ThreadPanelModel, tea.Cmd) {
+	target := t.openTarget()
+	if target == "" {
+		return t, nil
+	}
+	focus := t.messages[0]
+	if idx, ok := t.msgAt(t.cursor); ok {
+		focus = t.messages[idx]
+	}
+	return t, func() tea.Msg {
+		return MessageAction{Action: "thread", Msg: focus, Data: target}
+	}
+}
+
 func (t ThreadPanelModel) Update(msg tea.KeyMsg) (ThreadPanelModel, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
@@ -301,20 +323,26 @@ func (t ThreadPanelModel) Update(msg tea.KeyMsg) (ThreadPanelModel, tea.Cmd) {
 		if t.cursor < t.rowCount()-1 {
 			t.cursor++
 		}
-	case "t", "enter":
-		// Open the thread the highlighted row points to. The App's
-		// "thread" handler shows this panel again with the new root —
-		// the "close and open" of drilling down or going up.
-		if target := t.openTarget(); target != "" {
-			// Msg is what the App selects in the new view: going up via
-			// "..", the root you came from; drilling down, the new root.
-			focus := t.messages[0]
-			if idx, ok := t.msgAt(t.cursor); ok {
-				focus = t.messages[idx]
-			}
-			return t, func() tea.Msg {
-				return MessageAction{Action: "thread", Msg: focus, Data: target}
-			}
+	case "t":
+		// `t` opens: the parent thread on "..", a reply's own thread when
+		// it has replies.
+		return t.openHighlighted()
+	case "enter":
+		// Enter goes there: on ".." up to the parent thread, as `t`; on a
+		// message, out of the view to that message in the pane — a
+		// navigation jump, so the App lands focus on the pane with the
+		// cursor on it. The view closes first (it draws full-screen).
+		if t.hasParent && t.cursor == 0 {
+			return t.openHighlighted()
+		}
+		idx, ok := t.msgAt(t.cursor)
+		if !ok {
+			return t, nil
+		}
+		target := t.messages[idx]
+		t.Hide()
+		return t, func() tea.Msg {
+			return MessageAction{Action: "goto", Msg: target}
 		}
 	case "r", "e":
 		// Reply to, or react on, the highlighted message. The view closes
@@ -360,13 +388,10 @@ func (t ThreadPanelModel) View(width, height int) string {
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
-	// Footer: the full key line when it fits, else a compact one — and its
-	// wrapped height is measured rather than assumed, so a narrow panel
-	// never pushes the bottom border off the frame.
-	footer := " r=reply  e=react  t/Enter=open  Esc/q=close"
-	if lipgloss.Width(footer) > contentWidth {
-		footer = " r=reply e=react t=open Esc/q=close"
-	}
+	// One footer. At narrow widths it wraps, and its wrapped height is
+	// measured rather than assumed, so a narrow panel never pushes the
+	// bottom border off the frame.
+	footer := " t=thread  Enter=go to  r=reply  e=react  Esc/q=close"
 	footerRows := lipgloss.Height(lipgloss.NewStyle().Width(contentWidth).Render(footer))
 	// Header is two rows (title + blank); footer is a blank row + its rows.
 	bodyRows := contentHeight - 3 - footerRows

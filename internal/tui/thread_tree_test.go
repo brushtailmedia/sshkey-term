@@ -83,15 +83,15 @@ func TestThreadTree_CapHidesAndCounts(t *testing.T) {
 	if strings.Contains(view, "body d") || strings.Contains(view, "body e") {
 		t.Errorf("rows below the cap must be hidden, not flattened:\n%s", view)
 	}
-	if strings.Contains(view, "t=thread") {
+	if rowHintCount(view) != 0 {
 		t.Errorf("no hint while the root is highlighted")
 	}
 	p.cursor = 2 // b: has replies, visible below it
-	if c := strings.Count(p.View(80, 24), "t=thread"); c != 1 {
+	if c := rowHintCount(p.View(80, 24)); c != 1 {
 		t.Errorf("hint count on a reply with visible replies = %d, want 1", c)
 	}
 	p.cursor = 3 // c: at the cap, descendants hidden
-	if c := strings.Count(p.View(80, 24), "t=thread"); c != 1 {
+	if c := rowHintCount(p.View(80, 24)); c != 1 {
 		t.Errorf("hint count with the capped row highlighted = %d, want 1", c)
 	}
 }
