@@ -195,6 +195,8 @@ type MessagesModel struct {
 	remoteState      HistoryRemoteState   // server truth: does older history exist? (replaces the overloaded hasMore)
 	hintVisible      bool                 // whether the top "press up to load more" hint should render
 	probeDone        bool                 // a quiet server probe was already spent while the hint was hidden
+	serverReachable  bool                 // the App's connection state as the pane sees it: true only while online
+	localExhausted   bool                 // the local cache holds nothing older than the loaded set (short initial load, or a short local page)
 	connGen          uint64               // App-synced connection generation; stamps outgoing HistoryRequestMsg (mirrors currentUserID)
 	// activeHistoryCorrID is the corr_id of the in-flight server history
 	// request; it pins the inbound history_result so an A->B->A stale result
@@ -686,8 +688,9 @@ func (m *MessagesModel) SetContext(room, group, dm string) {
 	m.probeDone = false
 	m.loadingHistory = false
 	m.activeHistoryCorrID = ""
-	m.left = false        // caller should call SetLeft after if the new context is archived
-	m.roomRetired = false // caller should call SetRoomRetired after if the new context is a retired room
+	m.localExhausted = false // a fresh context gets a fresh initial load
+	m.left = false           // caller should call SetLeft after if the new context is archived
+	m.roomRetired = false    // caller should call SetRoomRetired after if the new context is a retired room
 	// Clear typing indicators on context switch. SetTyping only inserts
 	// entries that match the current context, but stale entries from the
 	// previous context can linger (entries time out via the 5-second
@@ -767,13 +770,19 @@ func (m *MessagesModel) LoadFromDB(c *client.Client) {
 
 	if err != nil || len(stored) == 0 {
 		m.hintVisible = false
+		// An empty cache holds nothing older either (a read error proves
+		// nothing). Offline, this is what lets Up at the top walk the
+		// cursor instead of probing a server that is not there.
+		m.localExhausted = err == nil
 		return
 	}
 
 	// The local DB controls only the hint, not remote exhaustion: if the
 	// initial load filled the window, older pages likely exist, so show the
-	// hint. remoteState stays whatever SetContext set (Unknown).
+	// hint. remoteState stays whatever SetContext set (Unknown). A short
+	// initial load means the cache holds nothing older than this.
 	m.hintVisible = len(stored) >= initialHistoryLoadLimit
+	m.localExhausted = len(stored) < initialHistoryLoadLimit
 
 	m.messages = nil
 	msgIDs := make([]string, 0, len(stored))
@@ -873,7 +882,37 @@ func loadDM(c *client.Client, dm string) ([]store.StoredMessage, error) {
 // even if a future count-based reload re-raised hintVisible, a proven-
 // exhausted context never re-shows the hint.
 func (m *MessagesModel) shouldShowHistoryHint() bool {
-	return m.hintVisible && len(m.messages) > 0 && m.remoteState != HistoryExhausted
+	return m.hintVisible && len(m.messages) > 0 && m.remoteState != HistoryExhausted && !m.historyUnavailableOffline()
+}
+
+// historyUnavailableOffline reports that there is nothing to load: the
+// local cache has no older rows and the server cannot be reached. The pane
+// then behaves exactly like one whose history is exhausted — Up at the top
+// walks the cursor, the hint is hidden — until the connection comes back,
+// when the server may still have more.
+func (m *MessagesModel) historyUnavailableOffline() bool {
+	return !m.serverReachable && m.localExhausted
+}
+
+// SetServerReachable is the App's connection state as the pane sees it:
+// true only while online. The App sets it on every connection-state change
+// and before routing input to the pane.
+func (m *MessagesModel) SetServerReachable(reachable bool) {
+	m.serverReachable = reachable
+}
+
+// markHistoryOfflineExhausted ends a history load that cannot continue: the
+// local cache gave no more rows and the server is unreachable. Unlike
+// abortHistoryRequest it does NOT re-arm the probe budget — this is not an
+// aborted probe but a known dead end until reconnect — and it records local
+// exhaustion so the next Up at the top walks the cursor instead of firing
+// again. (The cold-offline-start loop: every probe aborted, every abort
+// re-armed the budget, so every Up at the top was swallowed.)
+func (m *MessagesModel) markHistoryOfflineExhausted() {
+	m.loadingHistory = false
+	m.activeHistoryCorrID = ""
+	m.localExhausted = true
+	m.hintVisible = false
 }
 
 // markLocalHistoryPage records the outcome of a local scroll-back page. A
@@ -884,13 +923,19 @@ func (m *MessagesModel) markLocalHistoryPage(count, limit int) {
 	if count >= limit {
 		m.loadingHistory = false
 		m.hintVisible = true
+		m.localExhausted = false
+		return
 	}
+	// A short page: the cache holds nothing older than this. Online the
+	// server leg continues; offline there is nothing left to load.
+	m.localExhausted = true
 }
 
 // markServerHistoryResult records the server's history_result truth and ends
 // the in-flight load. has_more drives both the remote state and the hint.
 func (m *MessagesModel) markServerHistoryResult(hasMore bool) {
 	m.loadingHistory = false
+	m.localExhausted = false // the answer may have stored older rows; the next local page re-learns
 	if hasMore {
 		m.remoteState = HistoryAvailable
 		m.hintVisible = true
@@ -930,7 +975,7 @@ func validHistoryContext(room, group, dm string) bool {
 // when no request should fire. "No request" is not "ignore the keypress":
 // callers fall through to cursor/viewport browsing when this returns nil.
 func (m *MessagesModel) requestHistory() tea.Cmd {
-	if m.loadingHistory || m.remoteState == HistoryExhausted || len(m.messages) == 0 {
+	if m.loadingHistory || m.remoteState == HistoryExhausted || len(m.messages) == 0 || m.historyUnavailableOffline() {
 		return nil
 	}
 	room := m.room

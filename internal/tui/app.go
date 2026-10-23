@@ -544,6 +544,30 @@ func commandAllowedOffline(text string) bool {
 func (a *App) setConnState(s ConnectionState) {
 	a.connState = s
 	a.statusBar.SetOffline(s == ConnStateOffline)
+	a.syncPaneReachability()
+}
+
+// syncPaneReachability tells the message pane whether the server can be
+// reached, so its history gate can decline up front while offline with an
+// exhausted local cache (Up at the top then walks the cursor). Called on
+// every connection-state change and before input reaches the pane, so the
+// pane never acts on a stale answer.
+func (a *App) syncPaneReachability() {
+	a.messages.SetServerReachable(a.canUseServerAction())
+}
+
+// continueHistoryOnServer is the server leg of a history load after the
+// local cache gave no page or a short one. Offline there is no server leg:
+// the load ends as "exhausted while offline" — not an abort, because an
+// abort re-arms the probe budget, which is exactly what looped a cold
+// offline start (every Up at the top probed, failed, re-armed, and was
+// swallowed without moving the cursor).
+func (a *App) continueHistoryOnServer(room, group, dm, before string) {
+	if !a.canUseServerAction() {
+		a.messages.markHistoryOfflineExhausted()
+		return
+	}
+	a.sendServerHistory(room, group, dm, before)
 }
 
 // canUseServerAction gates message actions that need the server (react,
@@ -2218,6 +2242,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case FocusMessages:
 			var cmd tea.Cmd
+			a.syncPaneReachability()
 			a.messages, cmd = a.messages.Update(msg)
 			if cmd != nil {
 				cmds = append(cmds, cmd)
@@ -3509,14 +3534,15 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// (markLocalHistoryPage left it on for a short page), so this
 				// is one logical load; markServerHistoryResult clears it.
 				if !full {
-					a.sendServerHistory(msg.Room, msg.Group, msg.DM, msg.BeforeID)
+					a.continueHistoryOnServer(msg.Room, msg.Group, msg.DM, msg.BeforeID)
 				}
 				return a, nil
 			}
 		}
-		// No local data — fall through to server. Loading stays set;
+		// No local data — fall through to server (offline: the load ends
+		// as exhausted-while-offline). Loading stays set online;
 		// markServerHistoryResult clears it when history_result arrives.
-		a.sendServerHistory(msg.Room, msg.Group, msg.DM, msg.BeforeID)
+		a.continueHistoryOnServer(msg.Room, msg.Group, msg.DM, msg.BeforeID)
 		return a, nil
 
 	case MessageAction:
@@ -4346,6 +4372,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			// Cursor movement remains tied to up/down arrow keys.
 			atTop := a.messages.ScrollUp(3)
 			if atTop && !a.messages.loadingHistory && len(a.messages.messages) > 0 {
+				a.syncPaneReachability()
 				return a, a.messages.requestHistory()
 			}
 		} else if panel == "sidebar" {
