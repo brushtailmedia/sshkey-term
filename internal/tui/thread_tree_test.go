@@ -72,8 +72,14 @@ func TestThreadTree_CapHidesAndCounts(t *testing.T) {
 	if !strings.Contains(view, "Thread (5 replies)") {
 		t.Errorf("header must count shown and hidden replies:\n%s", view)
 	}
-	if l := lineContaining(view, "Dave"); !strings.Contains(l, "· 2 more replies") {
-		t.Errorf("row at the cap must count what is hidden beneath it: %q", l)
+	// The stub sits where the first hidden child would: one level below
+	// the capped row, under an arrow — never on the capped row's own line.
+	if l := lineContaining(view, "Dave"); strings.Contains(l, "more") {
+		t.Errorf("the count must not sit on the capped row's header: %q", l)
+	}
+	stub := "│" + strings.Repeat(replyIndent, 4) + "↳ 2 more replies"
+	if l := lineContaining(view, "more repl"); !strings.Contains(l, stub) {
+		t.Errorf("stub = %q, want it at child depth: %q", l, stub)
 	}
 	for _, name := range []string{"Bob", "Carol"} {
 		if l := lineContaining(view, name); strings.Contains(l, "more") {
@@ -91,8 +97,13 @@ func TestThreadTree_CapHidesAndCounts(t *testing.T) {
 		t.Errorf("hint count on a reply with visible replies = %d, want 1", c)
 	}
 	p.cursor = 3 // c: at the cap, descendants hidden
-	if c := rowHintCount(p.View(80, 24)); c != 1 {
+	capped := p.View(80, 24)
+	if c := rowHintCount(capped); c != 1 {
 		t.Errorf("hint count with the capped row highlighted = %d, want 1", c)
+	}
+	// The hint lands on the stub, so it reads "press t to see these".
+	if l := lineContaining(capped, "more repl"); !strings.Contains(l, "t=thread") {
+		t.Errorf("hint must sit on the stub line: %q", l)
 	}
 }
 
@@ -129,8 +140,11 @@ func TestThreadTree_CapCountsFromNestedRoot(t *testing.T) {
 	}
 	view := p.View(80, 24)
 	deep := strings.Repeat(replyIndent, 4) // .. is 0, a is 1, d is 4
-	if l := lineContaining(view, "Erin"); !strings.Contains(l, "│"+deep+"↳ Erin") || !strings.Contains(l, "· 1 more reply") {
-		t.Errorf("d must sit at absolute depth 4 with its count: %q", l)
+	if l := lineContaining(view, "Erin"); !strings.Contains(l, "│"+deep+"↳ Erin") || strings.Contains(l, "more") {
+		t.Errorf("d must sit at absolute depth 4 with no count on its header: %q", l)
+	}
+	if l := lineContaining(view, "more repl"); !strings.Contains(l, "│"+strings.Repeat(replyIndent, 5)+"↳ 1 more reply") {
+		t.Errorf("the stub must sit one level below d: %q", l)
 	}
 	if !strings.Contains(view, "Thread (4 replies)") {
 		t.Errorf("header must count shown and hidden:\n%s", view)
@@ -153,15 +167,19 @@ func TestThreadTree_TombstoneKeepsChildren(t *testing.T) {
 	}
 }
 
-// A deleted row at the cap still shows its hidden count, so the subtree
-// beneath it is not lost from view.
+// A deleted row at the cap keeps its stub, so the subtree beneath it is
+// not lost from view.
 func TestThreadTree_DeletedCapRowShowsCount(t *testing.T) {
 	msgs := chainMessages()
 	msgs[3].Deleted = true // c, at the cap
 	var p ThreadPanelModel
 	p.Show("root", msgs)
-	if l := lineContaining(p.View(80, 24), "message deleted"); !strings.Contains(l, "· 2 more replies") {
-		t.Errorf("deleted row at the cap must still count what is hidden: %q", l)
+	view := p.View(80, 24)
+	if l := lineContaining(view, "message deleted"); strings.Contains(l, "more") {
+		t.Errorf("the count must not sit on the tombstone line: %q", l)
+	}
+	if l := lineContaining(view, "more repl"); !strings.Contains(l, "│"+strings.Repeat(replyIndent, 4)+"↳ 2 more replies") {
+		t.Errorf("deleted row at the cap must keep its stub beneath it: %q", l)
 	}
 }
 

@@ -410,7 +410,8 @@ func threadReplyTotals(msgs []DisplayMessage) map[string]int {
 
 // replyCountMarker is the gray "· N replies" after a message's timestamp
 // (or trailing its body when the header is grouped away): the size of the
-// thread under it, the thread view's "· N more replies" idiom.
+// thread under it. (The thread view counts only what it hides, on a stub
+// line where the hidden replies would sit — a different fact.)
 func replyCountMarker(n int) string {
 	return timestampStyle.Render(fmt.Sprintf("  · %d %s", n, pluralize(n, "reply", "replies")))
 }

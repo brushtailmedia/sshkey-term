@@ -31,8 +31,9 @@ const maxThreadDepth = 3
 // ThreadPanelModel shows a thread as a tree: the root and its replies,
 // depth-first (each reply followed by its own replies, siblings in time
 // order), maxThreadDepth levels below the root. Deeper rows are hidden, not
-// flattened — a row at the cap with descendants shows "· N more replies",
-// and `t` re-roots the view there for fresh levels; a `..` row at the top
+// flattened — a row at the cap with descendants gets a gray `↳ N more
+// replies` stub one level below it, where the first hidden reply would
+// sit, and `t` re-roots the view there for fresh levels; a `..` row at the top
 // of a nested view opens the parent's thread (the file picker's `../`
 // idiom) on `t` or Enter. Enter on a message closes the view and goes to
 // that message in the pane. `r` replies to and `e` reacts on the
@@ -246,10 +247,15 @@ func countDescendants(id string, children map[string][]int, all []DisplayMessage
 	return n
 }
 
-// moreReplies is the gray count on a row at the cap: everything hidden
-// beneath it.
-func moreReplies(n int) string {
-	return timestampStyle.Render(fmt.Sprintf("  · %d more %s", n, pluralize(n, "reply", "replies")))
+// moreRepliesStub is the placeholder for the replies hidden beneath a row
+// at the cap, drawn where the first hidden child would sit — one level
+// deeper, under the same gray arrow every reply has — so the reader sees
+// WHERE the missing replies are. (A count on the capped row's own header
+// read as that row's count, or as "one more after this".) The selection
+// hint lands on this line, so it reads as "press t to see these".
+func moreRepliesStub(depth, n int) string {
+	return indentFor(depth) + helpDescStyle.Render("↳") + " " +
+		timestampStyle.Render(fmt.Sprintf("%d more %s", n, pluralize(n, "reply", "replies")))
 }
 
 // Refresh re-collects the open thread from the current message list so a
@@ -499,10 +505,6 @@ func (t ThreadPanelModel) renderRow(row, contentWidth int) string {
 			tombstone = "message removed by " + msg.DeletedBy
 		}
 		line = arrow + systemMsgStyle.Render(" ── "+tombstone+" ──")
-		// A deleted row at the cap still shows what is hidden beneath it.
-		if c := t.hidden[idx]; c > 0 {
-			line += moreReplies(c)
-		}
 	} else {
 		ts := time.Unix(msg.TS, 0).Format("3:04 PM")
 		// Same sender-name rule as the pane: your own replies read green
@@ -512,11 +514,6 @@ func (t ThreadPanelModel) renderRow(row, contentWidth int) string {
 			from += " " + helpDescStyle.Render("[retired]")
 		}
 		header := arrow + " " + from + "  " + timestampStyle.Render(ts)
-		// A count only where something is hidden: a row at the cap with
-		// descendants beneath it. Rows whose children are visible need none.
-		if c := t.hidden[idx]; c > 0 {
-			header += moreReplies(c)
-		}
 		line = header + "\n"
 
 		// Body and reaction rows align under the name: one column in at
@@ -540,6 +537,15 @@ func (t ThreadPanelModel) renderRow(row, contentWidth int) string {
 				line += "\n" + bodyIndent + "  " + p
 			}
 		}
+	}
+
+	// Hidden replies beneath a row at the cap: the stub sits where the
+	// first hidden child would, as the last line of this row's block (so
+	// the selection hint below attaches to it). Rows whose children are
+	// visible get nothing — the children are right there. A deleted row at
+	// the cap keeps its stub, so the conversation beneath it is not lost.
+	if c := t.hidden[idx]; c > 0 {
+		line += "\n" + moreRepliesStub(depth+1, c)
 	}
 
 	if row == t.cursor {
