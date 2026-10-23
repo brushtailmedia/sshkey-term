@@ -431,7 +431,6 @@ func TestApp_UpdateClearsPreviewPathWhenNavPopupReveals(t *testing.T) {
 	}
 
 	a1.navMode = true
-	a1.navPopupEnabled = true
 	a1.navModeTickGen = 7
 	model, _ = a1.Update(navPopupRevealMsg{Gen: 7})
 	a2 := model.(App)

@@ -745,7 +745,7 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 		// feedback). Active highlight persists when focus moves
 		// elsewhere so the user can see which room they're in.
 		if room == s.activeRoom || (i == s.cursor && focused) {
-			line = selectedMsgStyle.Width(contentWidth).Render(line)
+			line = renderSelected(selectedMsgStyle, contentWidth, line)
 		}
 		add(line, i)
 	}
@@ -815,7 +815,7 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 		// Active or cursor-under-focus → highlight (see rooms loop
 		// for full rationale).
 		if g.ID == s.activeGroup || (idx == s.cursor && focused) {
-			line = selectedMsgStyle.Width(contentWidth).Render(line)
+			line = renderSelected(selectedMsgStyle, contentWidth, line)
 		}
 		add(line, idx)
 	}
@@ -863,7 +863,7 @@ func (s SidebarModel) buildListLines(contentWidth int, focused bool) []sidebarLi
 			// Active or cursor-under-focus → highlight (see rooms
 			// loop for full rationale).
 			if dm.ID == s.activeDM || (idx == s.cursor && focused) {
-				line = selectedMsgStyle.Width(contentWidth).Render(line)
+				line = renderSelected(selectedMsgStyle, contentWidth, line)
 			}
 			add(line, idx)
 		}

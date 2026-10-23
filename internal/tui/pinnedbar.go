@@ -56,12 +56,27 @@ type PinnedBarModel struct {
 	// profile cache picks up the display name once the profile
 	// arrives. App wires this from client.DisplayName.
 	resolveName func(string) string
+	// selfUserID is the local user's ID; pins of your own messages render
+	// your name green via senderNameStyle. Set by App alongside the pane's.
+	selfUserID string
 }
 
 // SetResolveName wires the nanoid → display name lookup. Called
 // once during App init.
 func (p *PinnedBarModel) SetResolveName(fn func(string) string) {
 	p.resolveName = fn
+}
+
+// SetSelfUserID records the local user's ID so pins of your own messages
+// render your name green, the same rule as the pane and the thread view.
+// Wired at the same three sites as the other self-ID setters.
+func (p *PinnedBarModel) SetSelfUserID(id string) {
+	p.selfUserID = id
+}
+
+// nameStyleFor is the pinned bar's call to senderNameStyle.
+func (p PinnedBarModel) nameStyleFor(fromID string) lipgloss.Style {
+	return senderNameStyle(fromID, p.selfUserID)
 }
 
 // renderPinLine builds one expanded-row pin preview line using the exact
@@ -77,12 +92,12 @@ func (p PinnedBarModel) renderPinLine(pin PinnedMessage, width, pinIdx int) stri
 			from = resolved
 		}
 	}
-	line := fmt.Sprintf(" 📌 %s: %s", usernameStyle.Render(from), pin.Body)
+	line := fmt.Sprintf(" 📌 %s: %s", p.nameStyleFor(pin.FromID).Render(from), pin.Body)
 	if len(line) > width-4 {
 		line = line[:width-7] + "..."
 	}
 	if pinIdx == p.cursor {
-		line = pinnedSelectedStyle.Render(line)
+		line = renderSelected(pinnedSelectedStyle, 0, line)
 	}
 	return line
 }

@@ -201,7 +201,7 @@ func (s SearchModel) View(width, height int) string {
 			line := header + "\n" + body + "\n"
 
 			if i == s.cursor {
-				line = selectedMsgStyle.Width(width - 2).Render(line)
+				line = renderSelected(selectedMsgStyle, width-2, line)
 			}
 
 			b.WriteString(line)

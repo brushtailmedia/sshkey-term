@@ -44,6 +44,7 @@ var navBindings = []navBinding{
 	{"j", "server switcher", navGroupServers},
 	{"1-9", "server number", navGroupServers},
 	{"o", "online/offline", navGroupConnection},
+	{"r", "reconnect", navGroupConnection},
 }
 
 // navGroupOrder lists the COLUMNS. navGroupConnection is deliberately absent:

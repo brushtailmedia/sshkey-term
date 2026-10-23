@@ -269,9 +269,20 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 			i.completion = CompleteWithContext(text, pos, i.members, i.nonMembers)
 		}
 		return i, nil
-	case "alt+enter":
+	case "alt+enter", "ctrl+j":
 		// Insert a draft-only newline marker. We keep the input widget
 		// single-row and convert markers to '\n' only on send.
+		//
+		// Why not Shift+Enter: a terminal sends the same byte (CR) for
+		// Enter and Shift+Enter unless it speaks a modifier-reporting
+		// protocol (kitty keyboard protocol / modifyOtherKeys), which
+		// Bubble Tea v1 does not negotiate — the app cannot tell them
+		// apart. Ctrl+J is the line-feed byte — one byte, sent unchanged
+		// by every terminal — and is the key the docs recommend. Alt+Enter
+		// (ESC CR) is kept as an alternative: it needs Option-as-Meta on
+		// macOS, some terminals take it for fullscreen, and on a slow link
+		// it can arrive split as Esc then Enter (see the Esc clause in
+		// docs/planning/open/focus-consistency.md).
 		i.insertComposeNewline()
 		return i, nil
 	case "enter":

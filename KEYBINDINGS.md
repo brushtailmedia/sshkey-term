@@ -6,7 +6,7 @@
 
 ## Keyboard Shortcuts
 
-`Ctrl` on Linux/Windows, `Cmd` on macOS. Bubble Tea maps both — the code uses `tea.KeyCtrl*` which works on all platforms.
+`Ctrl` is the Control key on every platform, macOS included — `Cmd` never reaches a terminal app (`Cmd+Q` quits the terminal itself). `Alt` is `Option` on macOS, and only when the terminal sends Escape for it (Terminal.app "Use Option as Meta key", iTerm2 "Left Option key: Esc+").
 
 ### Global
 
@@ -15,9 +15,9 @@
 | `Enter` | `Enter` | Send message |
 | `Esc` | `Esc` | Close panel / cancel / back to input |
 | `Tab` | `Tab` | Cycle focus: Input → Sidebar → Messages → Members → Input |
-| `Ctrl+g` | `Cmd+g` | Enter navigation prefix mode |
-| `Ctrl+P` | `Cmd+P` | Toggle pinned messages |
-| `Ctrl+Q` | `Cmd+Q` | Quit (confirmation dialog) |
+| `Ctrl+g` | `Ctrl+g` | Enter navigation prefix mode |
+| `Ctrl+P` | `Ctrl+P` | Toggle pinned messages |
+| `Ctrl+Q` | `Ctrl+Q` | Quit (confirmation dialog) |
 | `Ctrl+C` | `Ctrl+C` | Force quit (alternative to Ctrl+Q) |
 | `?` | `?` | Open help screen (when not in input) |
 
@@ -39,16 +39,17 @@ Press `Ctrl+g`, then one of:
 | `h` / `l` | Previous / next server in the ring (Add Server is a ring slot after the last server) |
 | `j` | Server quick-switch overlay (configured servers + an Add server row) |
 | `o` | Toggle online/offline for the current server — Offline → connect; Online or Connecting → disconnect (or cancel the attempt) and keep browsing local history |
+| `r` | Reconnect: drop the current session and open a fresh one — Online → reconnect; Offline → connect; inert while connecting |
 | `g` or `Esc` | Cancel nav mode |
 
-After `Ctrl+g`, a which-key popup lists these continuations once you pause (default `300ms`). Set `[navigation] nav_mode_popup_delay_ms = 0` to show it instantly, or `nav_mode_popup = false` to disable it. Nav mode does not auto-exit: press a listed key to run it, `g`/`Esc` to cancel, or any other key/click to dismiss.
+After `Ctrl+g`, a which-key popup lists these continuations once you pause (300 ms). Nav mode does not auto-exit: press a listed key to run it, `g`/`Esc` to cancel, or any other key/click to dismiss.
 
 ### Navigation
 
 | Key | macOS | Action |
 |---|---|---|
 | `↑/↓` | `↑/↓` | Navigate sidebar / scroll messages (context-dependent) |
-| `j/k` | `j/k` | Navigate (vim-style, when not in input) |
+| `j/k` | `j/k` | Move down / up (j/k navigation, when not in the input) |
 | `PgUp` | `Fn+↑` | Scroll message history up (triggers lazy scroll-back from server) |
 | `Alt+↑/↓` | `Opt+↑/↓` | Switch to previous/next room or DM |
 | `Enter` | `Enter` | Confirm sidebar selection (when FocusSidebar) |
@@ -64,7 +65,7 @@ After `Ctrl+g`, a which-key popup lists these continuations once you pause (defa
 | `d` | Delete selected message (own only; admin: any in rooms) |
 | `c` | Copy message text to clipboard |
 | `g` | Jump to parent message (on a reply) |
-| `t` | Open thread view (message + all replies) |
+| `t` | Open the thread view on the whole thread the selected message belongs to (it walks up to the top-level message; the cursor lands on the selected message), as a tree three levels deep with who reacted with what; deeper replies are hidden behind "· N more replies" on the row at the cap. Inside it: `t` or `Enter` re-opens the view rooted at the highlighted reply (any reply that has replies — the hidden ones become visible), and the `..` row at the top of a nested view opens the parent thread; `r` replies to the highlighted message and `e` opens the emoji picker on it, both closing the view first so the input (or the picker) is in front; `Esc` or `q` closes |
 | `o` | Open attachment in system viewer |
 | `s` | Save attachment to disk |
 | `Enter` | Open context menu for selected message |
@@ -106,11 +107,12 @@ When a sole admin runs `/leave` or `/delete` on a group with other members, the 
 | Key | macOS | Action |
 |---|---|---|
 | `Enter` | `Enter` | Send message (or execute slash command). If the input is in edit mode, dispatches the appropriate edit verb instead. |
+| `Ctrl+J` (preferred) or `Alt+Enter` | `Ctrl+J` (preferred) or `Option+Enter` | Insert a newline in the draft (multi-line message). **Prefer `Ctrl+J`**: it is a single byte that every terminal sends unchanged. `Alt+Enter` needs Option set to send Esc on macOS, is taken for fullscreen by some terminals (Windows Terminal, WezTerm), and on a slow link can arrive as Esc followed by Enter. Shift+Enter cannot be used: a terminal sends the same byte for it as for Enter. |
 | `Tab` | `Tab` | Accept top tab-completion suggestion |
 | `Up` | `Up` | **Phase 15**: on an empty input in an active (not left, not retired) context, enters edit mode with the user's most recent non-deleted message pre-populated. Enter dispatches the edit; Esc cancels. Only fires when the input is empty — normal cursor navigation in multi-line mode is unaffected. |
 | `Esc` | `Esc` | **Phase 15**: if in edit mode, clears the buffer and exits edit mode without dispatching. Otherwise moves focus to the sidebar. |
-| `Ctrl+a` | `Cmd+a` | Move cursor to start of line (inherited textinput/readline behavior) |
-| `Ctrl+u` | `Cmd+u` | Delete from cursor to start of line (inherited textinput/readline behavior) |
+| `Ctrl+a` | `Ctrl+a` | Move cursor to start of line (inherited textinput/readline behavior) |
+| `Ctrl+u` | `Ctrl+u` | Delete from cursor to start of line (inherited textinput/readline behavior) |
 | `Cmd+v` / terminal paste key | `Cmd+v` | Paste text from the terminal/OS clipboard. This is terminal-level behavior, not an app-remappable keybinding. |
 
 ### Reaction Picker (when open)
@@ -241,43 +243,4 @@ Inline popup triggered by prefix characters in the input bar. `Tab` accepts the 
 
 ---
 
-## Keybinding Configuration
-
-Custom keybindings via `~/.sshkey-term/keybindings.toml`. Only uncommented lines override defaults. Format:
-
-```toml
-# ~/.sshkey-term/keybindings.toml
-
-# [global]
-# quit = "ctrl+q"
-# quick_switch = "ctrl+g k"
-# new_group = "ctrl+g n"
-# pinned_messages = "ctrl+p"
-# settings = "ctrl+g s"
-# search = "ctrl+g /"
-
-# [navigation]
-# prev_room = "alt+up"
-# next_room = "alt+down"
-# scroll_up = "pageup"
-# scroll_down = "pagedown"
-# nav_mode_popup_delay_ms = 300
-# nav_mode_popup = true
-
-# [message]
-# reply = "r"
-# react = "e"
-# unreact = "u"
-# pin = "p"
-# delete = "d"
-# copy = "c"
-# thread = "t"
-# jump_to_parent = "g"
-# open_attachment = "o"
-# save_attachment = "s"
-
-# [input]
-# send = "enter"
-```
-
-Load order: built-in defaults → `keybindings.toml` overrides. Invalid bindings are logged and ignored.
+Keybindings are fixed; there is no configuration file for them.

@@ -179,7 +179,10 @@ type App struct {
 	// ends on a mapped key, g/esc/ctrl+g, or any other key / mouse click.
 	navMode bool
 	// navModePopupDelay is how long after Ctrl+g the which-key popup
-	// reveals. Zero = reveal instantly.
+	// reveals. Fixed at defaultNavModePopupDelay in New; tests set it
+	// (zero = reveal instantly). Not user-configurable: the keybindings
+	// file that once carried it, and a kill switch, was removed 2026-10-23
+	// (owner decision — tested and fine at the defaults).
 	navModePopupDelay time.Duration
 	// navModeTickGen increments on each enter; the reveal tick carries a
 	// generation so a key consumed during the delay cancels a stale reveal.
@@ -187,8 +190,6 @@ type App struct {
 	// navPopupVisible gates the which-key popup render. Set by the reveal
 	// tick (only when no modal is up), cleared on exit.
 	navPopupVisible bool
-	// navPopupEnabled mirrors the nav_mode_popup config kill switch.
-	navPopupEnabled bool
 	// Layout is no longer cached on the App. It's a derived value of
 	// (width, height, memberPanel.IsVisible) and is computed on
 	// demand by mouse handlers and View via computeLayout(). The
@@ -286,6 +287,12 @@ const pendingFocusCreatedTTL = 30 * time.Second
 // existing dialog flow don't trigger it.
 const doubleQuitWindow = 500 * time.Millisecond
 
+// defaultNavModePopupDelay is the pause after Ctrl+g before the which-key
+// popup reveals: a quick `Ctrl+g k` never flashes it, a pause gets the
+// reminder. Tested at this value and fixed by owner decision (2026-10-23)
+// when the inert keybindings file was removed; not user-configurable.
+const defaultNavModePopupDelay = 300 * time.Millisecond
+
 const topicUpdatePendingStatus = "Topic update sent — pending server confirmation"
 
 // refreshingMinVisibleMs is the minimum duration the "refreshing…"
@@ -322,12 +329,6 @@ const (
 
 // New creates the app model.
 func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx int) App {
-	kb := config.LoadKeybindings(configDir)
-	popupDelayMs := kb.Navigation.NavModePopupDelayMs
-	if popupDelayMs < 0 {
-		popupDelayMs = 0
-	}
-
 	a := App{
 		cfg:         cfg,
 		sidebar:     NewSidebar(),
@@ -383,8 +384,7 @@ func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx i
 		muted:             config.LoadMutedMap(appCfg),
 		showHelpHint:      !appCfg.Notifications.HelpShown,
 		focus:             FocusInput,
-		navModePopupDelay: time.Duration(popupDelayMs) * time.Millisecond,
-		navPopupEnabled:   kb.Navigation.NavModePopup,
+		navModePopupDelay: defaultNavModePopupDelay,
 		// Seed connGen to 1, not 0. Production code never uses gen 0;
 		// keeping zero out of the valid range means a missing-stamp bug
 		// (struct constructed without setting gen) shows up immediately
@@ -657,6 +657,15 @@ func (a *App) scheduleInitialRetry(failed int) tea.Cmd {
 	})
 }
 
+// refreshThreadPanel re-collects the open thread after a reaction event so
+// the reactor lists it shows stay live; a no-op while the panel is hidden.
+func (a *App) refreshThreadPanel() {
+	if a.threadPanel.IsVisible() {
+		a.threadPanel.SetRetired(a.messages.retired)
+		a.threadPanel.Refresh(a.messages.messages)
+	}
+}
+
 func (a *App) toggleMemberPanel() {
 	a.memberPanel.Toggle()
 	if a.memberPanel.IsVisible() {
@@ -797,10 +806,10 @@ func (a *App) enterNavMode() tea.Cmd {
 	a.navMode = true
 	a.navModeTickGen++
 	a.statusBar.SetNavigationMode(true)
-	// No popup when the kill switch is off, or when a modal owns the screen
-	// (the popup is a bare-chat affordance — decision 6). Nav keys still
-	// dispatch in both cases; there's just nothing to reveal.
-	if !a.navPopupEnabled || a.anyModalVisible() {
+	// No popup when a modal owns the screen (the popup is a bare-chat
+	// affordance — decision 6). Nav keys still dispatch; there's just
+	// nothing to reveal.
+	if a.anyModalVisible() {
 		return nil
 	}
 	if a.navModePopupDelay <= 0 {
@@ -860,6 +869,24 @@ func (a *App) handleNavModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		}
 		a.goOffline()
 		return nil, true
+	case "r":
+		// Reconnect: a fresh session. Online → bounce (the reconnect
+		// request the central refresh handler drives: close, bump the
+		// connection generation, connect); Offline → connect, as `o`
+		// does; Connecting → inert, never a second ladder. Replaces the
+		// old global Ctrl+Shift+R, which legacy terminals cannot
+		// transmit (Shift is lost on Ctrl+letter).
+		a.exitNavMode()
+		switch a.connState {
+		case ConnStateConnecting:
+			return nil, true
+		case ConnStateOffline:
+			return a.goOnline(), true
+		}
+		if a.client == nil {
+			return nil, true
+		}
+		return func() tea.Msg { return RefreshRequestMsg{Kind: "reconnect"} }, true
 	case "m":
 		a.exitNavMode()
 		a.toggleMemberPanel()
@@ -2087,13 +2114,6 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.pinnedBar.Toggle()
 			return a, nil
 
-		case "ctrl+shift+r":
-			// Phase 17c Step 6: nuclear refresh — force full
-			// reconnect handshake. Emits RefreshRequestMsg so the
-			// central handler drives both the client.Close and the
-			// keypress-ack indicator consistently.
-			return a, func() tea.Msg { return RefreshRequestMsg{Kind: "reconnect"} }
-
 		case "i":
 			// Info-panel shortcut scoped to the messages pane so normal
 			// typing in the input field is unaffected.
@@ -3129,7 +3149,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case RefreshRequestMsg:
 		// Phase 17c Step 6: central handler for refresh-key bindings
-		// (info panel `r`, device manager `r`, global Ctrl+Shift+R).
+		// (info panel `r`, device manager `r`, nav `Ctrl+g r`).
 		// Dispatches the right verb for each kind + fires the
 		// keypress-ack indicator.
 		if a.client == nil {
@@ -3524,6 +3544,11 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			a.input.SetReplyContext(msg.Msg.ID, from+": "+preview, msg.Msg.Room, msg.Msg.Group, msg.Msg.DM)
 			a.focus = FocusInput
+			// Select the message being replied to so the pane shows it:
+			// a no-op from the pane (already selected); it matters when
+			// the action comes from the thread view, which closed itself
+			// just before, or from the mouse context menu.
+			a.messages.ScrollToMessage(msg.Msg.ID)
 		case "delete":
 			if a.client != nil && (msg.Msg.FromID == a.client.UserID() || a.client.IsAdmin()) {
 				a.client.SendDelete(msg.Msg.ID, msg.Msg.Room, msg.Msg.Group, msg.Msg.DM)
@@ -3751,10 +3776,21 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				userID = a.client.UserID()
 			}
 			a.emojiPicker.Show(msg.Msg, userID)
+			// As for "reply": the reacted-to message becomes the pane's
+			// selection so the reaction is on the highlighted row when
+			// the picker closes (thread view / context menu origins).
+			a.messages.ScrollToMessage(msg.Msg.ID)
 		case "unreact":
 			a.sendUnreactForMessage(msg.Msg, msg.Data)
 		case "thread":
-			a.threadPanel.Show(msg.Data, a.messages.messages)
+			// Data is the root to show; Msg is the message to land on —
+			// from the pane the one `t` was pressed on (or the capped row
+			// hiding it), from the view the new root or, via "..", the
+			// row you came from.
+			a.threadPanel.SetRetired(a.messages.retired)
+			if a.threadPanel.Show(msg.Data, a.messages.messages) {
+				a.threadPanel.Select(msg.Msg.ID)
+			}
 		}
 		return a, nil
 
@@ -3830,6 +3866,8 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// presence-dot-self-leak-fix.md.
 			a.sidebar.SetSelfUserID(uid)
 			a.messages.SetSelfUserID(uid)
+			a.threadPanel.SetSelfUserID(uid)
+			a.pinnedBar.SetSelfUserID(uid)
 		}
 
 		// Populate sidebar and messages
@@ -4529,6 +4567,7 @@ func (a *App) handleConnectError(err error) tea.Cmd {
 func (a *App) wireClientResolvers() {
 	a.messages.resolveName = a.client.DisplayName
 	a.pinnedBar.SetResolveName(a.client.DisplayName)
+	a.threadPanel.SetResolveName(a.client.DisplayName)
 	a.messages.resolveRoomName = a.client.DisplayRoomName
 	a.messages.resolveGroupName = a.client.DisplayGroupName
 	a.messages.resolveDMName = a.client.DisplayDMName
@@ -4668,6 +4707,8 @@ func (a *App) hydrateOfflineUI() {
 	}
 	a.sidebar.SetSelfUserID(a.client.UserID())
 	a.messages.SetSelfUserID(a.client.UserID())
+	a.threadPanel.SetSelfUserID(a.client.UserID())
+	a.pinnedBar.SetSelfUserID(a.client.UserID())
 
 	// Initial context, mirroring connectedWithClient.
 	if len(ids) > 0 {
@@ -7320,6 +7361,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			a.client.SendQueue().Ack(m.CorrID)
 		}
 		a.messages.AddRoomMessage(m, a.client, a.replayingSyncBatch)
+		a.refreshThreadPanel()
 		if m.Room == a.messages.room {
 			if !a.replayingSyncBatch {
 				a.sendReadReceipt()
@@ -7368,6 +7410,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			a.client.SendQueue().Ack(m.CorrID)
 		}
 		a.messages.AddGroupMessage(m, a.client)
+		a.refreshThreadPanel()
 		if m.Group == a.messages.group {
 			if !a.replayingSyncBatch {
 				a.sendReadReceipt()
@@ -8230,6 +8273,8 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		if a.client != nil {
 			a.sidebar.SetSelfUserID(a.client.UserID())
 			a.messages.SetSelfUserID(a.client.UserID())
+			a.threadPanel.SetSelfUserID(a.client.UserID())
+			a.pinnedBar.SetSelfUserID(a.client.UserID())
 		}
 	case "dm_created":
 		var m protocol.DMCreated
@@ -8264,6 +8309,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 		// display-name resolution — see messages.go for the rationale.
 		if m.DM == a.messages.dm {
 			a.messages.AddDMMessage(m, a.client)
+			a.refreshThreadPanel()
 			a.refreshMessageContent()
 			if !a.replayingSyncBatch {
 				a.sendReadReceipt()
@@ -8304,6 +8350,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			// before OnMessage dispatch) so render state matches persisted state
 			// even if live decryption or in-memory merge paths drift.
 			a.messages.SyncReactionsForMessage(a.client, m.ID)
+			a.refreshThreadPanel()
 		}
 	case "reaction_removed":
 		var m protocol.ReactionRemoved
@@ -8313,6 +8360,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			if a.client == nil || a.client.VerifyUnreactAuthor(m) {
 				a.messages.RemoveReaction(m.ReactionID)
 				a.messages.SyncReactionsForMessage(a.client, m.ID)
+				a.refreshThreadPanel()
 			}
 		}
 	case "sync_batch":

@@ -408,7 +408,7 @@ func (m MemberPanelModel) View(width, height int) string {
 			// sidebar, member panel, and messages pane — a heavy
 			// purple-bg + white-fg highlight overpowered the
 			// colored presence dots and verified/retired markers.
-			line = selectedMsgStyle.Width(contentWidth).Render(line)
+			line = renderSelected(selectedMsgStyle, contentWidth, line)
 		}
 
 		b.WriteString(line + "\n")

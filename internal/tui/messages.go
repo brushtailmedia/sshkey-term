@@ -359,6 +359,60 @@ func NewMessages() MessagesModel {
 // the function does both: cursor + scroll, via the existing
 // ensureCursorVisible helper which respects multi-row messages and
 // the rowMap.
+// threadRootOf walks a message's reply chain up to the top-level message —
+// the thread's root — stopping at the last LOADED message when an ancestor
+// is not in the pane (older history not fetched yet). A visited set guards
+// a malformed loop. Used by `t`: from the pane the thread view always opens
+// on the whole thread, never on a branch.
+func (m *MessagesModel) threadRootOf(id string) string {
+	byID := make(map[string]*DisplayMessage, len(m.messages))
+	for i := range m.messages {
+		byID[m.messages[i].ID] = &m.messages[i]
+	}
+	visited := map[string]bool{id: true}
+	cur := id
+	for {
+		msg, ok := byID[cur]
+		if !ok || msg.ReplyTo == "" {
+			return cur
+		}
+		if _, loaded := byID[msg.ReplyTo]; !loaded || visited[msg.ReplyTo] {
+			return cur
+		}
+		visited[msg.ReplyTo] = true
+		cur = msg.ReplyTo
+	}
+}
+
+// threadReplyTotals counts, for every message, the replies under it — the
+// whole loaded subtree, which is what the thread view opens on, not just
+// the direct replies. Each reply credits every loaded ancestor; a visited
+// set per walk guards a malformed loop. O(N × depth), and depth is small.
+func threadReplyTotals(msgs []DisplayMessage) map[string]int {
+	parentOf := make(map[string]string, len(msgs))
+	for _, mm := range msgs {
+		if mm.ReplyTo != "" {
+			parentOf[mm.ID] = mm.ReplyTo
+		}
+	}
+	totals := make(map[string]int)
+	for _, mm := range msgs {
+		visited := map[string]bool{mm.ID: true}
+		for p := parentOf[mm.ID]; p != "" && !visited[p]; p = parentOf[p] {
+			visited[p] = true
+			totals[p]++
+		}
+	}
+	return totals
+}
+
+// replyCountMarker is the gray "· N replies" after a message's timestamp
+// (or trailing its body when the header is grouped away): the size of the
+// thread under it, the thread view's "· N more replies" idiom.
+func replyCountMarker(n int) string {
+	return timestampStyle.Render(fmt.Sprintf("  · %d %s", n, pluralize(n, "reply", "replies")))
+}
+
 func (m *MessagesModel) ScrollToMessage(msgID string) bool {
 	for i, msg := range m.messages {
 		if msg.ID == msgID {
@@ -479,15 +533,124 @@ func (m *MessagesModel) SetSelfUserID(id string) {
 	m.selfUserID = id
 }
 
-// usernameStyleFor picks the sender-header style for a message: green for
-// the local user's own messages, plain bold for everyone else. An empty
-// FromID (system rows, legacy rows) never matches, even while selfUserID is
-// still unset at startup.
-func (m *MessagesModel) usernameStyleFor(fromID string) lipgloss.Style {
-	if fromID != "" && fromID == m.selfUserID {
+// senderNameStyle is the one rule for rendering a sender's name anywhere in
+// the UI: bold, and the palette green when the sender is the local user.
+// Every surface that renders a sender name — the message pane, the thread
+// view, the pinned bar — calls this, so the rule has a single definition.
+// An empty fromID (system rows, legacy rows) never matches, even while
+// selfUserID is still unset at startup.
+func senderNameStyle(fromID, selfUserID string) lipgloss.Style {
+	if fromID != "" && fromID == selfUserID {
 		return ownUsernameStyle
 	}
 	return usernameStyle
+}
+
+// usernameStyleFor is the pane's view of senderNameStyle.
+func (m *MessagesModel) usernameStyleFor(fromID string) lipgloss.Style {
+	return senderNameStyle(fromID, m.selfUserID)
+}
+
+// maxInlineReactorNames bounds the gray name list shown after each reaction
+// chip on the selected message; past it the list ends in "+n". The thread
+// view shows every name, and the selected message carries a "t=thread" hint
+// whenever that view has something to show (see buildContent).
+const maxInlineReactorNames = 5
+
+// reactorNames returns the display names of the users who reacted to msg
+// with emoji: "you" first (when selfUserID reacted), then the others sorted
+// by display name so the list never jitters between renders. A user who
+// reacted from several devices appears once.
+func reactorNames(msg *DisplayMessage, emoji, selfUserID string, resolve func(string) string) []string {
+	if msg == nil || msg.ReactionsByUser == nil {
+		return nil
+	}
+	var names []string
+	self := false
+	for user, byEmoji := range msg.ReactionsByUser {
+		if len(byEmoji[emoji]) == 0 {
+			continue
+		}
+		if user != "" && user == selfUserID {
+			self = true
+			continue
+		}
+		name := user
+		if resolve != nil {
+			if r := resolve(user); r != "" {
+				name = r
+			}
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if self {
+		names = append([]string{"you"}, names...)
+	}
+	return names
+}
+
+// reactionChipStyle is the accent purple for every chip; the count goes bold
+// when the local user reacted with that emoji, so the emoji you can toggle
+// off is visible at a glance without adding a new color to the pane.
+func reactionChipStyle(msg *DisplayMessage, emoji, selfUserID string) lipgloss.Style {
+	if selfUserID != "" && msg != nil && msg.UserHasReacted(selfUserID, emoji) {
+		return reactionStyle.Bold(true)
+	}
+	return reactionStyle
+}
+
+// reactionParts renders one part per emoji (sorted): the chip "emoji count"
+// in the accent style and, when withNames is set, the reactor names in the
+// metadata gray right after it. maxNames > 0 truncates each list to that
+// many names plus "+n"; 0 means unlimited (the thread view). The second
+// result reports whether any list was truncated.
+//
+// Hierarchy rule (owner, 2026-10-23): anything that appears only because a
+// row is selected renders in the metadata gray — the same tier as the
+// attachment hints — so the body stays dominant and the chips stay scannable.
+func reactionParts(msg *DisplayMessage, selfUserID string, resolve func(string) string, withNames bool, maxNames int) ([]string, bool) {
+	counts := msg.DisplayReactions()
+	if len(counts) == 0 {
+		return nil, false
+	}
+	emojis := make([]string, 0, len(counts))
+	for e := range counts {
+		emojis = append(emojis, e)
+	}
+	sort.Strings(emojis)
+
+	parts := make([]string, 0, len(emojis))
+	truncated := false
+	for _, emoji := range emojis {
+		part := reactionChipStyle(msg, emoji, selfUserID).Render(fmt.Sprintf("%s %d", emoji, counts[emoji]))
+		if withNames {
+			names := reactorNames(msg, emoji, selfUserID, resolve)
+			if maxNames > 0 && len(names) > maxNames {
+				extra := len(names) - maxNames
+				names = append(names[:maxNames:maxNames], fmt.Sprintf("+%d", extra))
+				truncated = true
+			}
+			if len(names) > 0 {
+				part += " " + timestampStyle.Render(strings.Join(names, ", "))
+			}
+		}
+		parts = append(parts, part)
+	}
+	return parts, truncated
+}
+
+// renderReactions renders a message's reaction line for the pane: chips
+// only on unselected rows; chips plus gray reactor names (truncated past
+// maxInlineReactorNames) on the selected row. The thread-view hint is not
+// part of this line — buildContent appends one "t=thread" per selected
+// message block, for reactions, replies and roots alike.
+func (m *MessagesModel) renderReactions(msg *DisplayMessage, selected bool) string {
+	parts, _ := reactionParts(msg, m.selfUserID, m.resolveName, selected, maxInlineReactorNames)
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "  ")
 }
 
 func (m *MessagesModel) SetRetired(users map[string]string) {
@@ -1823,12 +1986,10 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 		}
 	case "t": // open thread view
 		if sel := m.SelectedMessage(); sel != nil {
-			// Use the message itself as the root if it has replies,
-			// or jump to the root if this is a reply.
-			rootID := sel.ID
-			if sel.ReplyTo != "" {
-				rootID = sel.ReplyTo
-			}
+			// Always the WHOLE thread: walk up to the top-level message.
+			// The App lands the view's cursor on sel; digging into a
+			// branch is the thread view's own `t`.
+			rootID := m.threadRootOf(sel.ID)
 			return m, func() tea.Msg {
 				return MessageAction{Action: "thread", Msg: *sel, Data: rootID}
 			}
@@ -1986,6 +2147,11 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 	unreadShown := false
 	prevSender := ""
 	prevTS := int64(0)
+	// Replies under each message (the whole loaded subtree), for the
+	// "· N replies" marker and the thread-view hint on the selected
+	// message. One pass; the render below is already O(N).
+	replyTotals := threadReplyTotals(m.messages)
+
 	for i := 0; i < len(m.messages); i++ {
 		msg := m.messages[i]
 
@@ -2012,7 +2178,7 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 				// as a normal message so a run of system rows never
 				// looks like the keypress did nothing. Applied before
 				// lineRows so the rowMap matches what is drawn.
-				line = selectedMsgStyle.Width(width - 2).Render(line)
+				line = renderSelected(selectedMsgStyle, width-2, line)
 			}
 			lineRows = strings.Count(line, "\n") + 1
 			b.WriteString(line)
@@ -2028,12 +2194,17 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 				tombstone = "message removed by " + deleterName
 			}
 			line := systemMsgStyle.Render(" ── " + tombstone + " ──")
+			// A deleted message keeps its thread; say so, or the
+			// conversation under it is lost from view.
+			if n := replyTotals[msg.ID]; n > 0 {
+				line += replyCountMarker(n)
+			}
 			if i == m.cursor {
 				// Same as the system-row case: a deleted message is
 				// still a row the cursor walks through, and consecutive
 				// deletions were invisible to navigate. The actions stay
 				// gated on !Deleted; only the highlight changes.
-				line = selectedMsgStyle.Width(width - 2).Render(line)
+				line = renderSelected(selectedMsgStyle, width-2, line)
 			}
 			lineRows = strings.Count(line, "\n") + 1
 			b.WriteString(line)
@@ -2108,6 +2279,11 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 				if msg.EditedAt > 0 {
 					header += " " + helpDescStyle.Render("(edited)")
 				}
+				// "· N replies": the thread under this message, so a
+				// reader sees at a glance that there is one to open.
+				if n := replyTotals[msg.ID]; n > 0 {
+					header += replyCountMarker(n)
+				}
 				line = " " + header + "\n" + body
 			} else {
 				// Consecutive-message grouping: header is hidden, but
@@ -2118,6 +2294,11 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 					line = body + " " + helpDescStyle.Render("(edited)")
 				} else {
 					line = body
+				}
+				// Header hidden: the reply count trails the body, as the
+				// edited marker does.
+				if n := replyTotals[msg.ID]; n > 0 {
+					line += replyCountMarker(n)
 				}
 			}
 
@@ -2173,23 +2354,27 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 				}
 			}
 
-			if counts := msg.DisplayReactions(); len(counts) > 0 {
-				// Sort emojis deterministically so reactions don't jitter
-				// between renders.
-				emojis := make([]string, 0, len(counts))
-				for e := range counts {
-					emojis = append(emojis, e)
-				}
-				sort.Strings(emojis)
-				var reactions []string
-				for _, emoji := range emojis {
-					reactions = append(reactions, reactionStyle.Render(fmt.Sprintf("%s %d", emoji, counts[emoji])))
-				}
-				line += "\n   " + strings.Join(reactions, "  ")
+			// Reaction chips; on the selected row each chip is followed by
+			// the reactor names in the metadata gray (hint tier). See
+			// renderReactions for the hierarchy rule.
+			r := m.renderReactions(&msg, i == m.cursor)
+			if r != "" {
+				line += "\n   " + r
+			}
+
+			// Thread-view hint, once per selected message, at the end of
+			// its block (so it follows the reactions line when there is
+			// one, else the attachment or reply line), whenever the thread
+			// view has something to show: the message has reactions (the
+			// view lists every reactor), it is a reply, or it has replies.
+			// Same metadata gray as the attachment hints — selection-only
+			// detail never competes with the body.
+			if i == m.cursor && (r != "" || msg.ReplyTo != "" || replyTotals[msg.ID] > 0) {
+				line += timestampStyle.Render("  t=thread")
 			}
 
 			if i == m.cursor {
-				line = selectedMsgStyle.Width(width - 2).Render(line)
+				line = renderSelected(selectedMsgStyle, width-2, line)
 			}
 
 			lineRows = strings.Count(line, "\n") + 1

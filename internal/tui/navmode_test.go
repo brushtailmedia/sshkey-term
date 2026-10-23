@@ -24,7 +24,6 @@ func newNavModeAppHarness(t *testing.T) App {
 	a.settings = NewSettings()
 	a.statusBar = NewStatusBar()
 	a.navModePopupDelay = 2 * time.Second
-	a.navPopupEnabled = true
 	a.configDir = t.TempDir()
 	a.addServer = NewAddServerWithConfigDir(a.configDir, nil)
 	a.appConfig = &config.Config{
@@ -403,20 +402,51 @@ func TestNavMode_PopupReveal(t *testing.T) {
 		}
 	})
 
-	t.Run("disabled kill switch never reveals", func(t *testing.T) {
+	// The kill switch (nav_mode_popup = false) was removed with the
+	// keybindings file on 2026-10-23; the popup is always on.
+}
+
+// Ctrl+g r is "reconnect": from Online it bounces the session — the same
+// RefreshRequestMsg the old, unreachable Ctrl+Shift+R emitted; while
+// Connecting it is inert. Either way nav mode exits.
+func TestNavMode_ReconnectKey(t *testing.T) {
+	t.Run("online bounces the session", func(t *testing.T) {
 		a := newNavModeAppHarness(t)
-		a.navPopupEnabled = false
-		a.navModePopupDelay = 0 // would reveal instantly if enabled
-		model, cmd := a.Update(navCtrlG())
-		updated := model.(App)
-		if !updated.navMode {
-			t.Fatal("Ctrl+g should still enter nav mode with the popup disabled")
+		a.connState = ConnStateOnline
+		a.navMode = true
+		cmd, handled := a.handleNavModeKey(navRune('r'))
+		if !handled || cmd == nil {
+			t.Fatalf("handled=%v cmd=%v; want a reconnect command", handled, cmd != nil)
 		}
-		if updated.navPopupVisible {
-			t.Fatal("kill switch off → popup must never show")
+		if a.navMode {
+			t.Fatal("r must exit nav mode")
 		}
-		if cmd != nil {
-			t.Fatal("kill switch off → no reveal tick")
+		if msg, ok := cmd().(RefreshRequestMsg); !ok || msg.Kind != "reconnect" {
+			t.Fatalf("cmd yielded %T; want RefreshRequestMsg{Kind: reconnect}", cmd())
+		}
+	})
+	t.Run("connecting is inert", func(t *testing.T) {
+		a := newNavModeAppHarness(t)
+		a.connState = ConnStateConnecting
+		a.navMode = true
+		cmd, handled := a.handleNavModeKey(navRune('r'))
+		if !handled || cmd != nil {
+			t.Fatalf("handled=%v cmd=%v; want handled with no command", handled, cmd != nil)
+		}
+		if a.navMode {
+			t.Fatal("r must exit nav mode")
+		}
+	})
+	t.Run("offline connects, as o does", func(t *testing.T) {
+		a := newNavModeAppHarness(t)
+		a.connState = ConnStateOffline
+		a.navMode = true
+		cmd, handled := a.handleNavModeKey(navRune('r')) // the connect cmd is not run here
+		if !handled || cmd == nil {
+			t.Fatalf("handled=%v cmd=%v; want the connect command", handled, cmd != nil)
+		}
+		if a.connState != ConnStateConnecting {
+			t.Fatalf("connState = %v, want Connecting", a.connState)
 		}
 	})
 }

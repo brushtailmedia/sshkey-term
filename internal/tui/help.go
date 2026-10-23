@@ -166,7 +166,7 @@ func (h HelpModel) renderContent(width int) string {
 		{"s", "save attachment"},
 		{"d", "delete (own only)"},
 		{"g", "go to parent (reply)"},
-		{"t", "thread view"},
+		{"t", "thread view (replies + who reacted)"},
 		{"c", "copy text"},
 		{"Enter", "context menu"},
 	}
@@ -176,7 +176,7 @@ func (h HelpModel) renderContent(width int) string {
 	}
 	inputRows := []helpRow{
 		{"Enter", "send message"},
-		{"Alt/Option+Enter", "newline"},
+		{"Ctrl+j (or Alt+Enter)", "newline"},
 		{"Tab", "autocomplete"},
 		{"Esc", "cancel / back"},
 		{"/", "command mode"},

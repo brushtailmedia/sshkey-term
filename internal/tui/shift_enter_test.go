@@ -21,18 +21,26 @@ func TestInput_InsertComposeNewlineAndValueForSend(t *testing.T) {
 	}
 }
 
-func TestInput_CtrlJDoesNotInsertNewlineMarker(t *testing.T) {
+// Ctrl+J (the line-feed byte) is the alias of Alt+Enter: a distinct key
+// on every terminal, independent of the macOS "Option as Meta" setting.
+// It inserts the draft marker and never sends. (Until 2026-10-23 this test
+// asserted the opposite — Ctrl+J was a no-op; the owner asked for the
+// alias because Shift+Enter cannot be distinguished from Enter.)
+func TestInput_CtrlJInsertsNewlineMarker(t *testing.T) {
 	i := NewInput()
-	i.textInput.SetValue("abc")
-	i.textInput.SetCursor(3)
+	i.textInput.SetValue("ab")
+	i.textInput.SetCursor(1)
 
-	i, _ = i.Update(tea.KeyMsg{Type: tea.KeyCtrlJ}, nil, "general", "", "")
+	i, cmd := i.Update(tea.KeyMsg{Type: tea.KeyCtrlJ}, nil, "general", "", "")
 
-	if got := i.Value(); got != "abc" {
-		t.Fatalf("ctrl+j should not mutate input, got %q", got)
+	if got := i.Value(); got != "a"+composeNewlineMarker+"b" {
+		t.Fatalf("input value = %q, want newline marker inserted", got)
 	}
-	if got := i.ValueForSend(); got != "abc" {
-		t.Fatalf("ctrl+j should not create send newline, got %q", got)
+	if got := i.ValueForSend(); got != "a\nb" {
+		t.Fatalf("ValueForSend = %q, want real newline", got)
+	}
+	if cmd != nil {
+		t.Fatalf("ctrl+j must not send")
 	}
 }
 

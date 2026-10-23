@@ -468,7 +468,7 @@ func (s SettingsModel) View(width, height int) string {
 			if rowWidth < 1 {
 				rowWidth = 1
 			}
-			line = selectedMsgStyle.Width(rowWidth).Render(line)
+			line = renderSelected(selectedMsgStyle, rowWidth, line)
 		}
 
 		b.WriteString(line + "\n")

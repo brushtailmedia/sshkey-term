@@ -70,13 +70,32 @@ func TestThreadPanel_EscCloses(t *testing.T) {
 	}
 }
 
-func TestThreadPanel_TKeyToggles(t *testing.T) {
+func TestThreadPanel_QCloses(t *testing.T) {
 	var tp ThreadPanelModel
 	tp.Show("msg_1", makeMessages())
 
-	tp, _ = tp.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	tp, _ = tp.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	if tp.IsVisible() {
-		t.Error("t should close")
+		t.Error("q should close the thread view")
+	}
+	if tp.View(60, 20) != "" { // closed panel renders nothing
+		t.Error("closed panel must render empty")
+	}
+}
+
+// `t` no longer closes the view: inside it, `t` opens the thread the
+// highlighted row points to, and the root row points nowhere.
+func TestThreadPanel_TDoesNotClose(t *testing.T) {
+	var tp ThreadPanelModel
+	tp.Show("msg_1", makeMessages())
+
+	var cmd tea.Cmd
+	tp, cmd = tp.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	if !tp.IsVisible() {
+		t.Error("t on the root must not close the thread view")
+	}
+	if cmd != nil {
+		t.Error("t on the root (no parent) must not emit an action")
 	}
 }
 
@@ -131,6 +150,9 @@ func TestThreadPanel_ReplyEmitsAction(t *testing.T) {
 	}
 	if action.Msg.ID != "msg_1" {
 		t.Errorf("reply target = %q, want msg_1", action.Msg.ID)
+	}
+	if tp.IsVisible() {
+		t.Error("r must close the thread view so the input's reply line is in front")
 	}
 }
 
