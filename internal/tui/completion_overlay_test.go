@@ -9,8 +9,14 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // narrowApp is a live session with three members known to the completer
@@ -72,6 +78,80 @@ func TestCompletion_PopupIsAnOverlayAboveTheInput(t *testing.T) {
 	frame := strings.Join(lines, "\n")
 	if strings.Contains(frame, "╰╰") || strings.Contains(frame, "╯╯") {
 		t.Fatalf("the popup's border meets the pane's:\n%s", frame)
+	}
+}
+
+// The popup never reaches the sidebar column, where the image preview
+// lives: its width is capped to the pane (a row too long is cut with an
+// ellipsis, never wrapped), its rows start inside the pane, and the
+// sidebar's rows — kitty placement included — are byte-for-byte what they
+// were before it opened. Unlike the modals, it does not clear the preview.
+func TestCompletion_PopupStaysInThePaneAndKeepsTheImagePreview(t *testing.T) {
+	withRastermProtocol(t, rastermKitty)
+	a := narrowApp(t, "")
+	a.width, a.height = 90, 24
+
+	// A cached image on the selected message, with its render already in
+	// the cache so the preview embeds a kitty placement synchronously.
+	dir := t.TempDir()
+	a.messages.SetFilesDir(dir)
+	if err := os.WriteFile(filepath.Join(dir, "file_pic"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.messages.messages = []DisplayMessage{{ID: "m1", From: "Alice", FromID: "usr_alice", Body: "look", TS: 1,
+		Attachments: []DisplayAttachment{{FileID: "file_pic", Name: "pic.png", Mime: "image/png", IsImage: true}}}}
+	a.messages.cursor = 0
+	path := a.messages.SelectedImagePath()
+	if path == "" {
+		t.Fatal("precondition: the selected message has a cached image")
+	}
+	w, r := a.sidebarPreviewDims()
+	placement := "\x1b_Ga=T,f=100,i=7;QUJD\x1b\\"
+	putCachedInlineImage(imageRenderCacheKey{path: path, maxCols: w, maxRows: r, truecolor: useTrueColor(), rasterm: true}, 0, 0, placement)
+
+	// One update so the preview is set, then the frame without the popup.
+	model, _ := a.Update(tea.WindowSizeMsg{Width: 90, Height: 24})
+	a = model.(App)
+	before := a.View()
+	if !strings.Contains(before, "\x1b_Ga=T,") {
+		t.Fatal("precondition: the frame carries the preview's kitty placement")
+	}
+
+	// A member name far wider than the pane forces the width cap.
+	a.input.SetMembers([]MemberEntry{{UserID: "usr_long", DisplayName: strings.Repeat("Longname", 30)}})
+	got := typeInto(t, a, "@")
+	if !got.input.CompletionOpen() {
+		t.Fatal("precondition: the popup is open")
+	}
+	after := got.View()
+
+	if !strings.Contains(after, "\x1b_Ga=T,") || strings.HasPrefix(after, "\x1b_Ga=d,") {
+		t.Fatal("the popup must leave the preview's placement in place and must not clear the image layer")
+	}
+	layout := computeLayout(90, 24, false)
+	popup := got.input.CompletionView(layout.MessagesWidth - 2)
+	if lipgloss.Width(popup) > layout.MessagesWidth-2 {
+		t.Fatalf("popup width %d exceeds the pane cap %d", lipgloss.Width(popup), layout.MessagesWidth-2)
+	}
+	if lipgloss.Height(popup) != 3 {
+		t.Fatalf("popup height %d; want one row plus the border — a long row is cut, not wrapped:\n%s", lipgloss.Height(popup), stripANSI(popup))
+	}
+	beforeLines, afterLines := strings.Split(before, "\n"), strings.Split(after, "\n")
+	if len(beforeLines) != len(afterLines) {
+		t.Fatalf("frame grew from %d to %d lines", len(beforeLines), len(afterLines))
+	}
+	for i := range afterLines {
+		if ansi.Cut(beforeLines[i], 0, layout.MessagesX0) != ansi.Cut(afterLines[i], 0, layout.MessagesX0) {
+			t.Fatalf("row %d: the sidebar column changed under the popup:\n%q\n%q", i, beforeLines[i], afterLines[i])
+		}
+	}
+	row := lineIndex(afterLines, "LongnameLongname")
+	if row < 0 {
+		t.Fatal("the popup row with the long name is not in the frame")
+	}
+	plainRow := stripANSI(afterLines[row])
+	if col := ansi.StringWidth(plainRow[:strings.Index(plainRow, "LongnameLongname")]); col <= layout.MessagesX0 {
+		t.Fatalf("the popup starts at column %d, inside the sidebar (pane starts at %d)", col, layout.MessagesX0)
 	}
 }
 

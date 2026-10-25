@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // listRow is one row of a popup list: a label and an optional description
@@ -40,12 +41,26 @@ func renderListBox(rows []listRow, cursor, width, maxRows int) string {
 		}
 	}
 	visible := rows[start:end]
+	// inner is the room for a row inside a capped box: the border takes
+	// two cells and the padding two more. A row longer than that is cut
+	// with an ellipsis rather than wrapped — a wrapped row would break the
+	// one-row-per-item window and the selection band.
+	inner := 0
+	if width > 0 {
+		inner = width - 4
+		if inner < 1 {
+			inner = 1
+		}
+	}
 	plain := make([]string, len(visible))
 	maxWidth := 0
 	for i, r := range visible {
 		plain[i] = "  " + r.label
 		if r.desc != "" {
 			plain[i] += "  " + r.desc
+		}
+		if inner > 0 {
+			plain[i] = ansi.Truncate(plain[i], inner, "…")
 		}
 		if w := lipgloss.Width(plain[i]); w > maxWidth {
 			maxWidth = w
@@ -59,6 +74,9 @@ func renderListBox(rows []listRow, cursor, width, maxRows int) string {
 		line := "  " + r.label
 		if r.desc != "" {
 			line += "  " + completionDescStyle.Render(r.desc)
+		}
+		if inner > 0 {
+			line = ansi.Truncate(line, inner, "…")
 		}
 		line += strings.Repeat(" ", maxWidth-lipgloss.Width(plain[i]))
 		if start+i == cursor {
