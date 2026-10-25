@@ -29,6 +29,15 @@ import (
 //     We Wait() on the subprocess so it actually finishes draining
 //     stdin before we return; the previous Start()-and-forget
 //     pattern raced and could leave pbcopy with a partial buffer.
+//
+// remoteSession reports whether the app runs at the far end of an SSH
+// connection, where the user's clipboard and browser are on the other
+// machine: the clipboard is still reachable through OSC 52, the browser is
+// not, so "open link" copies instead.
+func remoteSession() bool {
+	return os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_TTY") != ""
+}
+
 func CopyToClipboard(text string) {
 	encoded := base64.StdEncoding.EncodeToString([]byte(text))
 
@@ -59,7 +68,7 @@ func CopyToClipboard(text string) {
 	// Local platform fallback. Skipped over SSH (SSH_CONNECTION set)
 	// because pbcopy/xclip on the remote host writes to the wrong
 	// pasteboard and just wastes a fork.
-	if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_TTY") != "" {
+	if remoteSession() {
 		return
 	}
 

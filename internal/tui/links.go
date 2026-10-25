@@ -15,10 +15,52 @@ var (
 			Underline(true)
 )
 
+// linkSpans finds the URLs in text as [start, end) byte spans, with the
+// punctuation that follows a URL in prose — ")", ".", ",", ";", ":", "!",
+// "?", quotes — trimmed off the end, so "(see https://x.y/z)." yields
+// https://x.y/z. A ")" is kept when the URL itself opened the paren
+// (Wikipedia-style "Foo_(bar)"). Shared by the highlighter and the
+// actions, so what is underlined is exactly what opens or copies.
+func linkSpans(text string) [][2]int {
+	var spans [][2]int
+	for _, m := range urlRegex.FindAllStringIndex(text, -1) {
+		start, end := m[0], m[1]
+		for end > start {
+			c := text[end-1]
+			if c == ')' && strings.Count(text[start:end], "(") >= strings.Count(text[start:end], ")") {
+				break
+			}
+			if strings.IndexByte(".,;:!?)'\"", c) < 0 {
+				break
+			}
+			end--
+		}
+		if end > start {
+			spans = append(spans, [2]int{start, end})
+		}
+	}
+	return spans
+}
+
+// extractLinks returns the distinct URLs in text, in order, trimmed as
+// linkSpans trims them.
+func extractLinks(text string) []string {
+	var links []string
+	seen := map[string]bool{}
+	for _, s := range linkSpans(text) {
+		u := text[s[0]:s[1]]
+		if !seen[u] {
+			seen[u] = true
+			links = append(links, u)
+		}
+	}
+	return links
+}
+
 // highlightLinks detects URLs in text and renders them with link styling.
 // On terminals that support OSC 8, links are clickable.
 func highlightLinks(text string) string {
-	matches := urlRegex.FindAllStringIndex(text, -1)
+	matches := linkSpans(text)
 	if len(matches) == 0 {
 		return text
 	}

@@ -91,6 +91,14 @@ func (c *ContextMenuModel) Show(msg DisplayMessage, x, y int, opts ContextMenuOp
 		c.items = append(c.items, ContextMenuItem{Label: label, Action: "thread"})
 	}
 
+	// Links: open in the browser / copy to the clipboard. With several
+	// links in the message the App offers a picker; the menu only says
+	// the action exists.
+	if len(extractLinks(msg.Body)) > 0 {
+		c.items = append(c.items, ContextMenuItem{Label: "Open link", Action: "open_link"})
+		c.items = append(c.items, ContextMenuItem{Label: "Copy link", Action: "copy_link"})
+	}
+
 	if opts.IsRoom {
 		isPinned := false
 		for _, id := range opts.PinnedIDs {

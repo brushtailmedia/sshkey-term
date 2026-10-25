@@ -162,12 +162,13 @@ func (h HelpModel) renderContent(width int) string {
 		{"e", "react/remove emoji"},
 		{"u", "unpin selected (rooms)"},
 		{"p", "preview image / pin (rooms)"},
-		{"o", "open attachment"},
+		{"o", "open attachment, or the link"},
 		{"s", "save attachment"},
+		{"C / Y", "copy link"},
 		{"d", "delete (own only)"},
 		{"g", "go to parent (reply)"},
 		{"t", "thread view (replies + who reacted)"},
-		{"c", "copy text"},
+		{"c / y", "copy text"},
 		{"Enter", "context menu"},
 	}
 	memberRows := []helpRow{

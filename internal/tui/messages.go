@@ -386,6 +386,17 @@ func (m *MessagesModel) threadRootOf(id string) string {
 	}
 }
 
+// Attachment placeholder glyphs, shared by the pane and the thread view.
+// The picture frame (U+1F5BC) is text-presentation by default, so width
+// libraries count it as ONE cell while terminals draw it from the emoji
+// font as TWO — every line carrying it came out one cell too wide (visible
+// as a shifted right border in the thread view). The VS16 selector forces
+// emoji presentation, which both sides count as two cells.
+const (
+	imagePlaceholderGlyph = "🖼️"
+	filePlaceholderGlyph  = "📎"
+)
+
 // threadReplyTotals counts, for every message, the replies under it — the
 // whole loaded subtree, which is what the thread view opens on, not just
 // the direct replies. Each reply credits every loaded ancestor; a visited
@@ -2014,16 +2025,29 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 				}
 			}
 		}
-	case "c": // copy
+	case "c", "y": // copy message text (y: vim muscle memory; same action)
 		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "copy", Msg: *sel}
 			}
 		}
-	case "o": // open attachment
-		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted && len(sel.Attachments) > 0 {
+	case "C", "Y": // copy the link in the message (the App picks when several)
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted && len(extractLinks(sel.Body)) > 0 {
 			return m, func() tea.Msg {
-				return MessageAction{Action: "open_attachment", Msg: *sel}
+				return MessageAction{Action: "copy_link", Msg: *sel}
+			}
+		}
+	case "o": // open: the attachment when there is one, else the link
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
+			if len(sel.Attachments) > 0 {
+				return m, func() tea.Msg {
+					return MessageAction{Action: "open_attachment", Msg: *sel}
+				}
+			}
+			if len(extractLinks(sel.Body)) > 0 {
+				return m, func() tea.Msg {
+					return MessageAction{Action: "open_link", Msg: *sel}
+				}
 			}
 		}
 	case "s": // save attachment
@@ -2083,29 +2107,31 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 // decision so the room title is always visible regardless of scroll
 // position. Returns the rendered string and the line count (always
 // 2 now: title line + blank separator).
-func (m MessagesModel) renderHeader(width int) (string, int) {
-	var b strings.Builder
-
-	title := m.room
-	if title != "" && m.resolveRoomName != nil {
-		title = m.resolveRoomName(title)
-	}
-	if title == "" && m.group != "" {
+// ConversationTitle is the pane's title for the active context — the
+// resolved room, group or DM-partner name — with its kind ("room",
+// "group", "dm"), or ("", "") when nothing is selected or the name resolves
+// to nothing. The pane's header and the thread view's header both use it,
+// so the two can never name the conversation differently.
+func (m MessagesModel) ConversationTitle() (title, kind string) {
+	switch {
+	case m.room != "":
+		kind = "room"
+		title = m.room
+		if m.resolveRoomName != nil {
+			title = m.resolveRoomName(title)
+		}
+	case m.group != "":
+		kind = "group"
+		title = m.group
 		if m.resolveGroupName != nil {
 			if resolved := strings.TrimSpace(m.resolveGroupName(m.group)); resolved != "" {
 				title = resolved
-			} else {
-				title = m.group
 			}
-		} else {
-			title = m.group
 		}
-	}
-	if title == "" && m.dm != "" {
+	case m.dm != "":
+		kind = "dm"
 		if m.resolveDMName != nil {
-			if resolved := strings.TrimSpace(m.resolveDMName(m.dm)); resolved != "" {
-				title = resolved
-			}
+			title = strings.TrimSpace(m.resolveDMName(m.dm))
 		}
 		if title == "" {
 			if m.resolveName != nil {
@@ -2115,6 +2141,16 @@ func (m MessagesModel) renderHeader(width int) (string, int) {
 			}
 		}
 	}
+	if title == "" {
+		return "", ""
+	}
+	return title, kind
+}
+
+func (m MessagesModel) renderHeader(width int) (string, int) {
+	var b strings.Builder
+
+	title, _ := m.ConversationTitle()
 	if title == "" {
 		title = "no room selected"
 	}
@@ -2399,9 +2435,9 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 			// that future change site.
 			for _, att := range msg.Attachments {
 				if att.IsImage {
-					line += "\n " + fmt.Sprintf("🖼 (%s)", formatSize(att.Size))
+					line += "\n " + fmt.Sprintf("%s (%s)", imagePlaceholderGlyph, formatSize(att.Size))
 				} else {
-					line += "\n " + fmt.Sprintf("📎 (%s)", formatSize(att.Size))
+					line += "\n " + fmt.Sprintf("%s (%s)", filePlaceholderGlyph, formatSize(att.Size))
 				}
 				if i == m.cursor {
 					hint := "  o=open  s=save"
@@ -2433,6 +2469,15 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 			// view lists every reactor), it is a reply, or it has replies.
 			// Same metadata gray as the attachment hints — selection-only
 			// detail never competes with the body.
+			// Link hints, one key each (the aliases live in the docs): `o`
+			// opens the link when there is no attachment for `o` to open;
+			// `C` copies it. Same selection-only gray tier.
+			if i == m.cursor && len(extractLinks(msg.Body)) > 0 {
+				if len(msg.Attachments) == 0 {
+					line += timestampStyle.Render("  o=open link")
+				}
+				line += timestampStyle.Render("  C=copy link")
+			}
 			if i == m.cursor && (r != "" || msg.ReplyTo != "" || replyTotals[msg.ID] > 0) {
 				line += timestampStyle.Render("  t=thread")
 			}

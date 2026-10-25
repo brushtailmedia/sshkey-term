@@ -2035,6 +2035,10 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Thread panel intercepts keys when visible
 		if a.threadPanel.IsVisible() {
 			var cmd tea.Cmd
+			// The view's window logic needs its size at key time (row
+			// heights need the width) — the emoji picker's SetViewport
+			// pattern. It is drawn full-screen.
+			a.threadPanel.SetSize(a.width, a.height)
 			a.threadPanel, cmd = a.threadPanel.Update(msg)
 			if !a.threadPanel.IsVisible() {
 				a.focus = FocusMessages
@@ -2643,6 +2647,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if idx, err := strconv.Atoi(msg.SelectedID); err == nil {
 				cmd = a.switchServerByIndex(idx)
 			}
+		case "open_link", "copy_link":
+			// A link chosen from a message with several (the ID is the URL).
+			a.actOnLink(msg.Request.Verb, msg.SelectedID)
 		case "/whois":
 			a.whoisReadout(msg.SelectedID)
 		case "/verify":
@@ -3611,8 +3618,26 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.sendUnpin(msg.Msg.ID)
 			}
 		case "copy":
-			CopyToClipboard(msg.Msg.Body)
+			copyText(msg.Msg.Body)
 			a.statusBar.SetError("Copied to clipboard")
+		case "open_link", "copy_link":
+			// One link acts at once; several go to the shared picker (the
+			// same widget /whois and /setstatus use), whose selection comes
+			// back as PickerSelectedMsg with this verb. The pane and the
+			// thread view only say which action; the App resolves the
+			// links, the SSH fallback and the clipboard.
+			links := extractLinks(msg.Msg.Body)
+			switch {
+			case len(links) == 0:
+			case len(links) == 1:
+				a.actOnLink(msg.Action, links[0])
+			default:
+				items := make([]PickerItem, 0, len(links))
+				for _, u := range links {
+					items = append(items, PickerItem{ID: u, Primary: u})
+				}
+				a.picker.Show(PickerRequest{Verb: msg.Action, ShowFilter: true}, items)
+			}
 		case "open_attachment":
 			// Goroutine-driven download then external open. Capture
 			// reference-typed locals by value so the goroutine never
@@ -3847,6 +3872,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				root = a.messages.threadRootOf(msg.Msg.ID)
 			}
 			a.threadPanel.SetRetired(a.messages.retired)
+			a.threadPanel.SetConversation(a.threadConversationLabel())
 			if a.threadPanel.Show(root, a.messages.messages) {
 				a.threadPanel.Select(msg.Msg.ID)
 			}
@@ -4973,6 +4999,50 @@ func (a *App) tryEnterEditMode() bool {
 	return false
 }
 
+// copyText and openURL are the clipboard and browser seams, package
+// variables so tests can observe them instead of writing OSC 52 to stdout
+// or launching a browser.
+var (
+	copyText = CopyToClipboard
+	openURL  = client.OpenURL
+)
+
+// actOnLink opens or copies one URL. Opening over SSH cannot reach the
+// user's browser (it is on the other machine), so it copies instead — OSC
+// 52 does reach the local clipboard — and says so; the OSC 8 hyperlink
+// the pane already emits remains the click path there.
+func (a *App) actOnLink(action, link string) {
+	switch {
+	case action == "copy_link":
+		copyText(link)
+		a.statusBar.SetError("Copied link to clipboard")
+	case remoteSession():
+		copyText(link)
+		a.statusBar.SetError("Remote session: link copied — open it locally")
+	default:
+		if err := openURL(link); err != nil {
+			a.statusBar.SetError("Could not open link: " + err.Error())
+			return
+		}
+		a.statusBar.SetError("Opening " + link)
+	}
+}
+
+// threadConversationLabel names the active conversation for the thread
+// view's header, using the pane's own title: "in general" for a room or
+// group, "with Bob" for a DM, "" when there is no context.
+func (a *App) threadConversationLabel() string {
+	title, kind := a.messages.ConversationTitle()
+	switch {
+	case title == "":
+		return ""
+	case kind == "dm":
+		return "with " + title
+	default:
+		return "in " + title
+	}
+}
+
 // mostRecentOwnMessageID returns the ID of the user's most recent
 // non-deleted, non-system message in the current context — the ONE message
 // the server will accept an edit for (it answers edit_not_most_recent for
@@ -5179,6 +5249,7 @@ func (a *App) syncLocalIdentityUI() {
 	name := a.client.DisplayName(userID)
 	a.messages.currentUser = name
 	a.messages.currentUserID = userID
+	a.threadPanel.SetCurrentUser(name) // @mention highlighting in thread bodies, as in the pane
 	a.statusBar.SetUser(name, a.client.IsAdmin())
 }
 

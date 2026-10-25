@@ -46,16 +46,50 @@ const maxThreadDepth = 3
 // arrow of its own (it is a reply to what `..` stands for) and its subtree
 // steps in from there, so arrows never line up across levels. The cap
 // counts from the view's root, not from `..`.
+//
+// Scrolling follows the pane: the window position (top) is independent of
+// the cursor. Up/down move the cursor and pull the window only at its
+// edges; PageUp/PageDown scroll the window a screen without moving the
+// cursor; Home scrolls to the top; End puts the cursor on the last row at
+// the bottom. Bodies wrap to the width left after the indent, with the
+// indent on every line, exactly as the pane wraps.
 type ThreadPanelModel struct {
 	visible     bool
-	rootID      string              // message ID of the thread root
-	messages    []DisplayMessage    // the root's subtree, depth-first, root first, cut at maxThreadDepth
-	depths      []int               // depths[i] is messages[i]'s depth below the root (0 = root)
-	hidden      []int               // hidden[i] is how many descendants of messages[i] the cap cut
-	hiddenTotal int                 // sum of hidden; the header counts them as replies
-	cursor      int                 // ROW index: 0 is the ".." row when hasParent, else the root
+	rootID      string           // message ID of the thread root
+	messages    []DisplayMessage // the root's subtree, depth-first, root first, cut at maxThreadDepth
+	depths      []int            // depths[i] is messages[i]'s depth below the root (0 = root)
+	hidden      []int            // hidden[i] is how many descendants of messages[i] the cap cut
+	hiddenTotal int              // sum of hidden; the header counts them as replies
+	cursor      int              // ROW index: 0 is the ".." row when hasParent, else the root
+
+	// top is the first visible row — the window position, independent of
+	// the cursor and persisted across renders, as the pane's viewport
+	// offset is. Keys move it only when the cursor would leave the window,
+	// or on the page/Home/End keys; the renderer never stores it.
+	top int
+	// followCursor tells the renderer to pull the window to the cursor
+	// (Show, Select and the cursor keys set it; the renderer cannot store
+	// the result). The page keys and Home clear it: they scroll the window
+	// deliberately and the cursor may leave it — the pane's rule.
+	followCursor bool
+	// width/height are the last size the App handed us (SetSize) so the
+	// key handler can lay rows out: the window needs row heights, and
+	// heights need the width. Zero until the first key.
+	width, height int
+
+	// conversation names where the thread lives, for the header — "in
+	// general", "with Bob" — because the view is full-screen and hides the
+	// pane's title. Set by the App when it opens the view; "" leaves the
+	// header as "Thread (N replies)".
+	conversation string
+	// notice is a one-key confirmation shown in place of the footer —
+	// "copied link" — because the status bar is hidden behind the
+	// full-screen view. Cleared by the next key.
+	notice string
+
 	resolveName func(string) string // user ID → display name, for reactor lists (set by App)
 	selfUserID  string              // the local user's ID; own name green, own reactions bold, listed as "you" (set by App)
+	currentUser string              // the viewer's display name, for @mention highlighting (set by App, as the pane's)
 	retired     map[string]bool     // retired senders get the pane's "[retired]" marker (shared map, set by App at Show/Refresh)
 
 	replyCounts map[string]int    // direct-reply count per message ID, from the full list at Show/Refresh
@@ -92,6 +126,26 @@ func (t *ThreadPanelModel) SetResolveName(resolve func(string) string) {
 // sites as the sidebar's and the message pane's setters.
 func (t *ThreadPanelModel) SetSelfUserID(id string) {
 	t.selfUserID = id
+}
+
+// SetCurrentUser records the viewer's display name so @mentions of them
+// highlight in bodies as they do in the pane. Set wherever the pane's is.
+func (t *ThreadPanelModel) SetCurrentUser(name string) {
+	t.currentUser = name
+}
+
+// SetConversation names the conversation the thread lives in, as the
+// header shows it after "Thread": "in general" for a room or group, "with
+// Bob" for a DM. The App sets it when it opens the view.
+func (t *ThreadPanelModel) SetConversation(label string) {
+	t.conversation = label
+}
+
+// SetSize records the terminal size the view is drawn at, so the key
+// handler can lay rows out and keep the window right. The App calls it
+// before routing a key here (the emoji picker's SetViewport pattern).
+func (t *ThreadPanelModel) SetSize(width, height int) {
+	t.width, t.height = width, height
 }
 
 func (t *ThreadPanelModel) IsVisible() bool {
@@ -201,6 +255,8 @@ func (t *ThreadPanelModel) Show(rootID string, allMessages []DisplayMessage) boo
 	t.replyCounts = counts
 	t.parentOf = parentOf
 	t.cursor = t.rowOffset() // start on the root, not on ".."
+	t.top = 0
+	t.followCursor = true
 	t.visible = true
 	return true
 }
@@ -210,7 +266,8 @@ func (t *ThreadPanelModel) Show(rootID string, allMessages []DisplayMessage) boo
 // a row — the capped row whose count covers it — so one `t` there reaches
 // it. An id outside this tree leaves the cursor alone. Called after Show:
 // from the pane, to land on the message `t` was pressed on; after a
-// drill-down, on the new root; after `..`, on the row you came from.
+// drill-down or `..`, on the new root. The window follows on the next
+// render (the renderer keeps the cursor visible without storing anything).
 func (t *ThreadPanelModel) Select(id string) {
 	visited := map[string]bool{}
 	for id != "" && !visited[id] {
@@ -218,6 +275,7 @@ func (t *ThreadPanelModel) Select(id string) {
 		for i := range t.messages {
 			if t.messages[i].ID == id {
 				t.cursor = i + t.rowOffset()
+				t.followCursor = true
 				return
 			}
 		}
@@ -260,18 +318,31 @@ func moreRepliesStub(depth, n int) string {
 
 // Refresh re-collects the open thread from the current message list so a
 // reaction or reply that arrives while the panel is up shows without
-// closing and reopening it. Keeps the cursor where it was, bounded. No-op
-// when the panel is hidden.
+// closing and reopening it. The cursor stays on the same MESSAGE (by ID —
+// a reply arriving above it shifts every row below by one, and a row index
+// would land on a different message), or on ".." if it was there; the
+// window position is kept, bounded. No-op when the panel is hidden.
 func (t *ThreadPanelModel) Refresh(allMessages []DisplayMessage) {
 	if !t.visible {
 		return
 	}
-	cursor := t.cursor
+	onParent := t.hasParent && t.cursor == 0
+	id := ""
+	if idx, ok := t.msgAt(t.cursor); ok {
+		id = t.messages[idx].ID
+	}
+	top := t.top
 	t.Show(t.rootID, allMessages)
-	if cursor < t.rowCount() {
-		t.cursor = cursor
-	} else if n := t.rowCount(); n > 0 {
-		t.cursor = n - 1
+	if n := t.rowCount(); top < n {
+		t.top = top
+	} else if n > 0 {
+		t.top = n - 1
+	}
+	switch {
+	case onParent && t.hasParent:
+		t.cursor = 0
+	case id != "":
+		t.Select(id)
 	}
 }
 
@@ -317,18 +388,86 @@ func (t ThreadPanelModel) openHighlighted() (ThreadPanelModel, tea.Cmd) {
 }
 
 func (t ThreadPanelModel) Update(msg tea.KeyMsg) (ThreadPanelModel, tea.Cmd) {
+	t.notice = "" // any key clears the last confirmation
 	switch msg.String() {
 	case "esc", "q":
 		t.Hide()
 		return t, nil
+	case "c", "y":
+		// Copy the highlighted message's text (y: vim muscle memory). The
+		// App does the copying; the footer confirms, since the status bar
+		// is hidden behind the view.
+		idx, ok := t.msgAt(t.cursor)
+		if !ok || t.messages[idx].Deleted {
+			return t, nil
+		}
+		target := t.messages[idx]
+		t.notice = "copied message text"
+		return t, func() tea.Msg {
+			return MessageAction{Action: "copy", Msg: target}
+		}
+	case "C", "Y", "o":
+		// Links: C/Y copies, o opens — the attachment first when there is
+		// one, as in the pane. One link acts in place with a footer
+		// notice; several need the App's picker, an overlay this
+		// full-screen view would hide, so the view closes first (as `e`
+		// does). Over SSH the browser is on the other machine: the App
+		// copies instead, and the notice says so.
+		idx, ok := t.msgAt(t.cursor)
+		if !ok || t.messages[idx].Deleted {
+			return t, nil
+		}
+		target := t.messages[idx]
+		if msg.String() == "o" && len(target.Attachments) > 0 {
+			t.notice = "opening attachment"
+			return t, func() tea.Msg {
+				return MessageAction{Action: "open_attachment", Msg: target}
+			}
+		}
+		links := extractLinks(target.Body)
+		if len(links) == 0 {
+			return t, nil
+		}
+		action := "copy_link"
+		if msg.String() == "o" {
+			action = "open_link"
+		}
+		if len(links) > 1 {
+			t.Hide()
+		} else {
+			t.notice = linkNotice(action, links[0])
+		}
+		return t, func() tea.Msg {
+			return MessageAction{Action: action, Msg: target}
+		}
 	case "up", "k":
 		if t.cursor > 0 {
 			t.cursor--
 		}
+		t.keepCursorVisible()
 	case "down", "j":
 		if t.cursor < t.rowCount()-1 {
 			t.cursor++
 		}
+		t.keepCursorVisible()
+	case "pageup", "pgup":
+		// Pure window scroll, cursor unchanged — the pane's rule. The
+		// cursor may leave the window; the next cursor key pulls it back.
+		t.pageUp()
+	case "pagedown", "pgdown":
+		t.pageDown()
+	case "home":
+		// Pure scroll to the top, cursor unchanged (the pane also probes
+		// for older history here; a thread has nothing to load).
+		t.top = 0
+		t.followCursor = false
+	case "end":
+		// "Back to the latest": cursor on the last row, window at the
+		// bottom — as the pane's End.
+		if n := t.rowCount(); n > 0 {
+			t.cursor = n - 1
+		}
+		t.keepCursorVisible()
 	case "t":
 		// `t` opens: the parent thread on "..", a reply's own thread when
 		// it has replies.
@@ -376,11 +515,18 @@ func (t ThreadPanelModel) Update(msg tea.KeyMsg) (ThreadPanelModel, tea.Cmd) {
 	return t, nil
 }
 
-func (t ThreadPanelModel) View(width, height int) string {
-	if !t.visible || len(t.messages) == 0 {
-		return ""
-	}
+// threadLayout is the one computation the key handler (window position)
+// and the renderer (what to draw) both need: every row rendered at a size,
+// with its height, plus the body-row budget.
+type threadLayout struct {
+	contentWidth, contentHeight int
+	footer                      string
+	bodyRows                    int
+	entries                     []string
+	rows                        []int
+}
 
+func (t ThreadPanelModel) layout(width, height int) threadLayout {
 	// The panel is drawn full-screen at (width × height). lipgloss's Width
 	// and Height size the CONTENT box; the rounded border adds one column
 	// on each side and one row top and bottom. Content is width-2 ×
@@ -405,9 +551,9 @@ func (t ThreadPanelModel) View(width, height int) string {
 		bodyRows = 1
 	}
 
-	// Render every row first so the window below can budget by ROWS, not
-	// by row count — an entry can span several rows (header, body, one
-	// line per reaction emoji).
+	// Render every row so the window can budget by ROWS, not by row count
+	// — an entry can span several rows (header, wrapped body, one line per
+	// attachment and per reaction emoji, the stub).
 	n := t.rowCount()
 	entries := make([]string, n)
 	rows := make([]int, n)
@@ -417,47 +563,200 @@ func (t ThreadPanelModel) View(width, height int) string {
 		entries[row] = e
 		rows[row] = strings.Count(e, "\n") + 1
 	}
+	return threadLayout{contentWidth: contentWidth, contentHeight: contentHeight, footer: footer, bodyRows: bodyRows, entries: entries, rows: rows}
+}
 
-	// Window: drop rows from the top until the cursor's row fits, then take
-	// whole rows while the budget allows. A single row taller than the
-	// budget is cut to the budget so the frame still fits.
-	cursor := t.cursor
-	if cursor < 0 || cursor >= n {
-		cursor = 0
+// windowStart returns where the window must start to show the cursor,
+// moving top the least: up to the cursor's row when it is above the
+// window; down until the cursor's last line is the window's last line
+// when it is below; a row taller than the budget pins its first line at
+// the top. Inside the window, top comes back unchanged — the pane's rule:
+// the cursor travels within the window and only pulls it at the edges.
+func windowStart(top, cursor int, rows []int, bodyRows int) int {
+	n := len(rows)
+	if n == 0 {
+		return 0
 	}
-	start := 0
-	for used := sumRows(rows[start : cursor+1]); used > bodyRows && start < cursor; used = sumRows(rows[start : cursor+1]) {
-		start++
+	top = clampInt(top, 0, n-1)
+	cursor = clampInt(cursor, 0, n-1)
+	if cursor < top {
+		return cursor
+	}
+	if rows[cursor] > bodyRows {
+		return cursor
+	}
+	for sumRows(rows[top:cursor+1]) > bodyRows {
+		top++
+	}
+	return top
+}
+
+// lastVisibleRow is the last row that fits entirely in a window starting
+// at start; at least start itself, even when it is taller than the budget.
+func lastVisibleRow(start int, rows []int, bodyRows int) int {
+	used := 0
+	last := start
+	for i := start; i < len(rows); i++ {
+		if used+rows[i] > bodyRows {
+			break
+		}
+		used += rows[i]
+		last = i
+	}
+	return last
+}
+
+// bottomStart is the earliest start at which the window still shows the
+// last row — where a scroll to the bottom stops, as the pane's viewport
+// stops with its last line at the bottom.
+func bottomStart(rows []int, bodyRows int) int {
+	n := len(rows)
+	if n == 0 {
+		return 0
+	}
+	start := n - 1
+	used := rows[start]
+	for start > 0 && used+rows[start-1] <= bodyRows {
+		start--
+		used += rows[start]
+	}
+	return start
+}
+
+// keepCursorVisible persists the window position the renderer would use,
+// so that the cursor's later moves within it scroll nothing. Without a size
+// yet (no key has reached us) it does nothing — the renderer still shows
+// the cursor on its own.
+func (t *ThreadPanelModel) keepCursorVisible() {
+	t.followCursor = true
+	if t.width <= 0 || t.height <= 0 {
+		return
+	}
+	l := t.layout(t.width, t.height)
+	t.top = windowStart(t.top, t.cursor, l.rows, l.bodyRows)
+}
+
+// drawnTop is the window position as the renderer shows it: the persisted
+// top, pulled to the cursor only while followCursor is set. The page keys
+// start from here, so paging twice pages twice — normalising through
+// keepCursorVisible would drag the window back to the cursor first.
+func (t ThreadPanelModel) drawnTop(l threadLayout) int {
+	n := len(l.rows)
+	if n == 0 {
+		return 0
+	}
+	top := clampInt(t.top, 0, n-1)
+	if t.followCursor {
+		top = windowStart(top, t.cursor, l.rows, l.bodyRows)
+	}
+	return top
+}
+
+// pageDown moves the window one screen down: the new top is the first row
+// not fully visible now, stopping where the last row is at the bottom.
+func (t *ThreadPanelModel) pageDown() {
+	if t.width <= 0 || t.height <= 0 {
+		return
+	}
+	l := t.layout(t.width, t.height)
+	if len(l.rows) == 0 {
+		return
+	}
+	t.top = t.drawnTop(l)
+	next := lastVisibleRow(t.top, l.rows, l.bodyRows) + 1
+	if bottom := bottomStart(l.rows, l.bodyRows); next > bottom {
+		next = bottom
+	}
+	if next > t.top {
+		t.top = next
+	}
+	t.followCursor = false
+}
+
+// pageUp moves the window one screen up: the new top is the earliest row
+// such that the rows from it up to the current top fill one screen.
+func (t *ThreadPanelModel) pageUp() {
+	if t.width <= 0 || t.height <= 0 {
+		return
+	}
+	l := t.layout(t.width, t.height)
+	if len(l.rows) == 0 {
+		return
+	}
+	t.top = t.drawnTop(l)
+	t.followCursor = false
+	if t.top == 0 {
+		return
+	}
+	top := t.top
+	used := 0
+	for top > 0 && used+l.rows[top-1] <= l.bodyRows {
+		top--
+		used += l.rows[top]
+	}
+	if top == t.top {
+		top-- // the row above alone is taller than a screen: still move
+	}
+	t.top = top
+	t.followCursor = false
+}
+
+func (t ThreadPanelModel) View(width, height int) string {
+	if !t.visible || len(t.messages) == 0 {
+		return ""
+	}
+	l := t.layout(width, height)
+	n := len(l.rows)
+	cursor := clampInt(t.cursor, 0, n-1)
+	// The window as persisted by the keys. While followCursor is set
+	// (Show, Select, the cursor keys) it is pulled to the cursor here —
+	// not stored, View is a value receiver — so the cursor is on screen
+	// right after Show+Select or a resize. After a page key or Home the
+	// window stays where it was put and the cursor may be off screen, as
+	// in the pane.
+	start := clampInt(t.top, 0, n-1)
+	if t.followCursor {
+		start = windowStart(t.top, cursor, l.rows, l.bodyRows)
 	}
 
 	var b strings.Builder
 	replyCount := len(t.messages) - 1 + t.hiddenTotal // the whole subtree, shown and hidden
-	header := fmt.Sprintf(" Thread (%d %s)", replyCount, pluralize(replyCount, "reply", "replies"))
+	header := " Thread"
+	if t.conversation != "" {
+		header += " " + t.conversation
+	}
+	header += fmt.Sprintf(" (%d %s)", replyCount, pluralize(replyCount, "reply", "replies"))
 	b.WriteString(searchHeaderStyle.Render(header))
 	b.WriteString("\n\n")
 
+	// Take whole rows while the budget allows. A single row taller than the
+	// budget is cut to the budget so the frame still fits.
 	used := 0
 	for row := start; row < n; row++ {
-		e := entries[row]
-		r := rows[row]
-		if used+r > bodyRows {
+		e := l.entries[row]
+		r := l.rows[row]
+		if used+r > l.bodyRows {
 			if row != start {
 				break
 			}
 			lines := strings.Split(e, "\n")
-			e = strings.Join(lines[:bodyRows], "\n")
-			r = bodyRows
+			e = strings.Join(lines[:l.bodyRows], "\n")
+			r = l.bodyRows
 		}
 		b.WriteString(e + "\n")
 		used += r
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpDescStyle.Render(footer))
+	if t.notice != "" {
+		b.WriteString(helpDescStyle.Render(" " + t.notice))
+	} else {
+		b.WriteString(helpDescStyle.Render(l.footer))
+	}
 
 	return threadPanelStyle.
-		Width(contentWidth).
-		Height(contentHeight).
+		Width(l.contentWidth).
+		Height(l.contentHeight).
 		MaxWidth(width).
 		MaxHeight(height).
 		Render(b.String())
@@ -470,6 +769,25 @@ func sumRows(rows []int) int {
 		n += r
 	}
 	return n
+}
+
+// wrapBody renders a message body for the view the way the pane renders
+// its own: mentions and links highlighted, then wrapped to the width left
+// after the indent — measured in cells, never bytes, so a rune is never
+// split and a long token (a URL) breaks rather than overflowing — with the
+// indent on every line, including the lines of a multi-line body.
+func wrapBody(body, indent string, width int, currentUser string) string {
+	w := width - lipgloss.Width(indent)
+	if w < 8 {
+		w = 8 // at absurd widths the frame clamp cuts; never wrap to nothing
+	}
+	styled := highlightLinks(highlightMentions(body, currentUser))
+	wrapped := lipgloss.NewStyle().Width(w).Render(styled)
+	lines := strings.Split(wrapped, "\n")
+	for i, l := range lines {
+		lines[i] = indent + strings.TrimRight(l, " ")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderRow renders one selectable row of the view: the ".." parent row,
@@ -498,13 +816,13 @@ func (t ThreadPanelModel) renderRow(row, contentWidth int) string {
 		arrow = indent + helpDescStyle.Render("↳")
 	}
 
-	var line string
+	var parts []string
 	if msg.Deleted {
 		tombstone := "message deleted"
 		if msg.DeletedBy != "" && msg.DeletedBy != msg.FromID {
 			tombstone = "message removed by " + msg.DeletedBy
 		}
-		line = arrow + systemMsgStyle.Render(" ── "+tombstone+" ──")
+		parts = append(parts, arrow+systemMsgStyle.Render(" ── "+tombstone+" ──"))
 	} else {
 		ts := time.Unix(msg.TS, 0).Format("3:04 PM")
 		// Same sender-name rule as the pane: your own replies read green
@@ -514,27 +832,38 @@ func (t ThreadPanelModel) renderRow(row, contentWidth int) string {
 			from += " " + helpDescStyle.Render("[retired]")
 		}
 		header := arrow + " " + from + "  " + timestampStyle.Render(ts)
-		line = header + "\n"
+		if msg.EditedAt > 0 {
+			header += " " + helpDescStyle.Render("(edited)")
+		}
+		parts = append(parts, header)
 
-		// Body and reaction rows align under the name: one column in at
-		// depth 0, two past the arrow below it.
+		// Body, attachments and reaction rows align under the name: one
+		// column in at depth 0, two past the arrow below it. The band is
+		// two columns narrower than the content, so the body wraps to that.
 		bodyIndent := " "
 		if depth > 0 {
 			bodyIndent = indent + "  "
 		}
-		body := bodyIndent + msg.Body
-		if limit := contentWidth - 2; limit > len(bodyIndent)+3 && len(body) > limit {
-			body = body[:limit-3] + "..."
+		if msg.Body != "" {
+			parts = append(parts, wrapBody(msg.Body, bodyIndent, contentWidth-2, t.currentUser))
 		}
-		line += body
-
+		// Attachments as the pane shows them: a glyph and the size (the
+		// file name is the body on uploads from this client). Opening and
+		// saving live in the pane — Enter goes there.
+		for _, att := range msg.Attachments {
+			glyph := filePlaceholderGlyph
+			if att.IsImage {
+				glyph = imagePlaceholderGlyph
+			}
+			parts = append(parts, bodyIndent+fmt.Sprintf("%s (%s)", glyph, formatSize(att.Size)))
+		}
 		// Reactions in full: this is the detail view, so every reactor is
 		// listed — chips in the accent purple, names in the metadata gray,
 		// one emoji per line, never truncated (the pane truncates and
 		// points here with "t=thread").
-		if parts, _ := reactionParts(&msg, t.selfUserID, t.resolveName, true, 0); len(parts) > 0 {
-			for _, p := range parts {
-				line += "\n" + bodyIndent + "  " + p
+		if rparts, _ := reactionParts(&msg, t.selfUserID, t.resolveName, true, 0); len(rparts) > 0 {
+			for _, p := range rparts {
+				parts = append(parts, bodyIndent+"  "+p)
 			}
 		}
 	}
@@ -545,8 +874,9 @@ func (t ThreadPanelModel) renderRow(row, contentWidth int) string {
 	// visible get nothing — the children are right there. A deleted row at
 	// the cap keeps its stub, so the conversation beneath it is not lost.
 	if c := t.hidden[idx]; c > 0 {
-		line += "\n" + moreRepliesStub(depth+1, c)
+		parts = append(parts, moreRepliesStub(depth+1, c))
 	}
+	line := strings.Join(parts, "\n")
 
 	if row == t.cursor {
 		if idx != 0 && t.replyCounts[msg.ID] > 0 {
@@ -579,6 +909,23 @@ func (t ThreadPanelModel) renderParentRow(row, contentWidth int) string {
 		line = renderSelected(selectedMsgStyle, contentWidth-2, line)
 	}
 	return line
+}
+
+// linkNotice is the footer confirmation for a link action on one link:
+// what happened, and to which link (shortened to its host and path start).
+func linkNotice(action, link string) string {
+	short := strings.TrimPrefix(strings.TrimPrefix(link, "https://"), "http://")
+	if lipgloss.Width(short) > 40 {
+		short = short[:37] + "..."
+	}
+	switch {
+	case action == "open_link" && remoteSession():
+		return "remote session: link copied, open it locally"
+	case action == "open_link":
+		return "opening " + short
+	default:
+		return "copied link " + short
+	}
 }
 
 func pluralize(n int, singular, plural string) string {
