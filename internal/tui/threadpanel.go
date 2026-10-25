@@ -89,6 +89,7 @@ type ThreadPanelModel struct {
 
 	resolveName func(string) string // user ID → display name, for reactor lists (set by App)
 	selfUserID  string              // the local user's ID; own name green, own reactions bold, listed as "you" (set by App)
+	editableID  string              // the one message the user may edit right now, or "" (set by App, as the pane's); drives the a=edit hint and the a key
 	currentUser string              // the viewer's display name, for @mention highlighting (set by App, as the pane's)
 	retired     map[string]bool     // retired senders get the pane's "[retired]" marker (shared map, set by App at Show/Refresh)
 
@@ -126,6 +127,12 @@ func (t *ThreadPanelModel) SetResolveName(resolve func(string) string) {
 // sites as the sidebar's and the message pane's setters.
 func (t *ThreadPanelModel) SetSelfUserID(id string) {
 	t.selfUserID = id
+}
+
+// SetEditableMessageID mirrors the pane's setter: the one message the user
+// may edit right now, or "", for the `a=edit` row hint and the `a` key.
+func (t *ThreadPanelModel) SetEditableMessageID(id string) {
+	t.editableID = id
 }
 
 // SetCurrentUser records the viewer's display name so @mentions of them
@@ -312,8 +319,13 @@ func countDescendants(id string, children map[string][]int, all []DisplayMessage
 // read as that row's count, or as "one more after this".) The selection
 // hint lands on this line, so it reads as "press t to see these".
 func moreRepliesStub(depth, n int) string {
+	// "↳ N more replies ↓": the ↳ says a reply lives here, the trailing ↓
+	// says the thread continues below the cap — the same glyph the pickers
+	// use for "more below the fold", in the same arrow gray. A passive cue:
+	// the t=thread hint shows only while the row is highlighted.
 	return indentFor(depth) + helpDescStyle.Render("↳") + " " +
-		timestampStyle.Render(fmt.Sprintf("%d more %s", n, pluralize(n, "reply", "replies")))
+		timestampStyle.Render(fmt.Sprintf("%d more %s", n, pluralize(n, "reply", "replies"))) +
+		" " + helpDescStyle.Render("↓")
 }
 
 // Refresh re-collects the open thread from the current message list so a
@@ -510,6 +522,19 @@ func (t ThreadPanelModel) Update(msg tea.KeyMsg) (ThreadPanelModel, tea.Cmd) {
 		t.Hide()
 		return t, func() tea.Msg {
 			return MessageAction{Action: action, Msg: target}
+		}
+	case "a":
+		// Edit the highlighted message when it is the one the server will
+		// accept an edit for (the App sets it, as for the pane). Closes
+		// first, as r and e do, so the input's edit line is in front.
+		idx, ok := t.msgAt(t.cursor)
+		if !ok || t.messages[idx].Deleted || t.messages[idx].ID == "" || t.messages[idx].ID != t.editableID {
+			return t, nil
+		}
+		target := t.messages[idx]
+		t.Hide()
+		return t, func() tea.Msg {
+			return MessageAction{Action: "edit", Msg: target}
 		}
 	}
 	return t, nil
@@ -879,6 +904,11 @@ func (t ThreadPanelModel) renderRow(row, contentWidth int) string {
 	line := strings.Join(parts, "\n")
 
 	if row == t.cursor {
+		// `a=edit` on the one editable message, first in the chain as in
+		// the pane.
+		if msg.ID != "" && msg.ID == t.editableID {
+			line += timestampStyle.Render("  a=edit")
+		}
 		if idx != 0 && t.replyCounts[msg.ID] > 0 {
 			// Same hint tier as the pane: only on the highlighted row, at
 			// the end of its block. The hint follows what `t` does — it

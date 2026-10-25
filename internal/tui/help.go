@@ -141,7 +141,8 @@ func (h HelpModel) renderContent(width int) string {
 	_ = width
 
 	navRows := []helpRow{
-		{"tab", "toggle sidebar focus"},
+		{"Tab / Shift+Tab", "cycle focus forwards / back"},
+		{"←/→ h/l", "focus the panel left / right"},
 		{"Ctrl+g", "navigation prefix"},
 	}
 	// Ctrl+g continuations are generated from the single navBindings source
@@ -154,11 +155,12 @@ func (h HelpModel) renderContent(width int) string {
 		helpRow{"Ctrl+p", "pinned messages"},
 		helpRow{"Ctrl+q", "quit (confirm)"},
 		helpRow{"Alt/Option+↑/↓", "prev/next room"},
-		helpRow{"↑/↓ j/k", "navigate"},
+		helpRow{"↑/↓ j/k", "navigate (↓ past the last message: input)"},
 		helpRow{"pgup/pgdn", "scroll history"},
 	)
 	msgRows := []helpRow{
 		{"r", "reply to selected"},
+		{"a", "edit (alter) your latest message"},
 		{"e", "react/remove emoji"},
 		{"u", "unpin selected (rooms)"},
 		{"p", "preview image / pin (rooms)"},
@@ -179,6 +181,7 @@ func (h HelpModel) renderContent(width int) string {
 		{"Enter", "send message"},
 		{"Ctrl+j (or Alt+Enter)", "newline"},
 		{"Tab", "autocomplete"},
+		{"↑", "up to the messages (draft kept)"},
 		{"Esc", "cancel / back"},
 		{"/", "command mode"},
 	}

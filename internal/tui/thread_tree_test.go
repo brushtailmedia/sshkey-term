@@ -77,9 +77,9 @@ func TestThreadTree_CapHidesAndCounts(t *testing.T) {
 	if l := lineContaining(view, "Dave"); strings.Contains(l, "more") {
 		t.Errorf("the count must not sit on the capped row's header: %q", l)
 	}
-	stub := "│" + strings.Repeat(replyIndent, 4) + "↳ 2 more replies"
+	stub := "│" + strings.Repeat(replyIndent, 4) + "↳ 2 more replies ↓"
 	if l := lineContaining(view, "more repl"); !strings.Contains(l, stub) {
-		t.Errorf("stub = %q, want it at child depth: %q", l, stub)
+		t.Errorf("stub = %q, want it at child depth, ending in the ↓ cue: %q", l, stub)
 	}
 	for _, name := range []string{"Bob", "Carol"} {
 		if l := lineContaining(view, name); strings.Contains(l, "more") {

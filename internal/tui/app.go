@@ -327,6 +327,57 @@ const (
 	FocusMembers
 )
 
+// setFocus moves keyboard focus and keeps the member panel's own focused
+// flag in step, so a focus change made here cannot leave the panel drawn
+// as focused when it is not.
+func (a *App) setFocus(f Focus) {
+	a.focus = f
+	a.memberPanel.SetFocused(f == FocusMembers)
+}
+
+// moveFocus moves focus one panel to the right (or left) across the layout
+// sidebar | messages (input below) | members, and reports whether it did.
+// Edges and a closed member panel move nothing. From the input only an
+// empty draft moves: with text, left and right are cursor keys — the same
+// "an empty input repurposes a navigation key" rule Up uses for edit-last.
+// focus-consistency.md clause 5.
+func (a *App) moveFocus(right bool) bool {
+	switch a.focus {
+	case FocusSidebar:
+		if right {
+			a.setFocus(FocusMessages)
+			return true
+		}
+	case FocusMessages:
+		if !right {
+			a.setFocus(FocusSidebar)
+			return true
+		}
+		if a.memberPanel.IsVisible() {
+			a.setFocus(FocusMembers)
+			return true
+		}
+	case FocusMembers:
+		if !right {
+			a.setFocus(FocusMessages)
+			return true
+		}
+	case FocusInput:
+		if !a.input.IsEmpty() {
+			return false
+		}
+		if !right {
+			a.setFocus(FocusSidebar)
+			return true
+		}
+		if a.memberPanel.IsVisible() {
+			a.setFocus(FocusMembers)
+			return true
+		}
+	}
+	return false
+}
+
 // New creates the app model.
 func New(cfg client.Config, appCfg *config.Config, configDir string, serverIdx int) App {
 	a := App{
@@ -1487,10 +1538,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// scroll logic. View is value-receiver, so render-time size writes do
 	// not persist between events.
 	a.syncMessageViewportState()
+	a.syncEditableMessage()
 
 	model, cmd := a.updateInner(msg)
 	if app, ok := model.(App); ok {
 		app.syncMessageViewportState()
+		app.syncEditableMessage()
 		app.sidebar.SetPreviewImagePath(app.computePreviewPath())
 		// Async preview render: dispatch a tea.Cmd if the desired
 		// render key changed and the cache doesn't already have it.
@@ -2171,23 +2224,75 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 
 		case "tab":
+			// Tab completes when it can, else cycles. With the composer
+			// focused and the cursor at the end of a /command or @name word
+			// (or the popup already open), the key is the input's: it opens
+			// or accepts the completion popup through the routing below.
+			// Before this guard the cycle ran first and the popup was
+			// unreachable.
+			if a.focus == FocusInput && a.input.CanComplete() {
+				break
+			}
 			// Cycle focus: input -> sidebar -> messages -> members (if visible) -> input
 			switch a.focus {
 			case FocusInput:
-				a.focus = FocusSidebar
+				a.setFocus(FocusSidebar)
 			case FocusSidebar:
-				a.focus = FocusMessages
+				a.setFocus(FocusMessages)
 			case FocusMessages:
 				if a.memberPanel.IsVisible() {
-					a.focus = FocusMembers
+					a.setFocus(FocusMembers)
 				} else {
-					a.focus = FocusInput
+					a.setFocus(FocusInput)
 				}
 			case FocusMembers:
-				a.focus = FocusInput
+				a.setFocus(FocusInput)
 			}
-			a.memberPanel.SetFocused(a.focus == FocusMembers)
 			return a, nil
+
+		case "shift+tab":
+			// The same cycle backwards.
+			switch a.focus {
+			case FocusInput:
+				if a.memberPanel.IsVisible() {
+					a.setFocus(FocusMembers)
+				} else {
+					a.setFocus(FocusMessages)
+				}
+			case FocusMembers:
+				a.setFocus(FocusMessages)
+			case FocusMessages:
+				a.setFocus(FocusSidebar)
+			case FocusSidebar:
+				a.setFocus(FocusInput)
+			}
+			return a, nil
+
+		case "left", "right":
+			// Spatial focus (focus-consistency.md clause 5): the arrow moves
+			// focus to the panel in that direction. From the input only an
+			// empty draft moves; with text these are cursor keys, and the
+			// key falls through to the input below.
+			if a.moveFocus(msg.String() == "right") {
+				return a, nil
+			}
+
+		case "h", "l":
+			// The j/k-navigation aliases for left/right. Never in the
+			// input, where they are letters.
+			if a.focus != FocusInput && a.moveFocus(msg.String() == "l") {
+				return a, nil
+			}
+
+		case "down", "j":
+			// The pane's bottom edge: Down (or j) on the last message
+			// drops into the input, the panel below it. Anywhere else the
+			// key reaches the focused panel as before; in the input, j is
+			// a letter. (Up at the top stays "load older history".)
+			if a.focus == FocusMessages && a.messages.OnLastMessage() {
+				a.setFocus(FocusInput)
+				return a, nil
+			}
 
 		case "esc":
 			// Esc behavior, in priority order:
@@ -2275,25 +2380,23 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return a, nil
 				}
 			}
-			// Phase 15 edit mode entry: Up-arrow on an empty input in
-			// an active (not left, not retired) context populates the
-			// input with the user's most recent editable message body
-			// and flips the input into edit mode. On Enter we dispatch
-			// an edit envelope instead of a send. Esc cancels.
-			//
-			// Gated by:
-			//   - input is empty (don't hijack normal editor cursor nav)
-			//   - input is not already in edit mode
-			//   - context is not archived (IsLeft || IsRoomRetired)
-			//   - no DM-with-retired-partner banner
-			//   - the user has at least one non-deleted message in the
-			//     current context
-			if msg.String() == "up" && a.input.IsEmpty() && !a.input.IsEditing() &&
-				!a.messages.IsLeft() && !a.messages.IsRoomRetired() && a.client != nil {
-				if a.tryEnterEditMode() {
-					return a, nil
-				}
-				// Otherwise fall through to normal up-arrow handling.
+			// The pane's bottom edge, from below (focus-consistency.md
+			// clause 5): Up moves focus to the message pane, the panel
+			// above the input — draft or no draft, since the composer is a
+			// single line and Up has no editing meaning in it (the draft
+			// and its cursor stay; Down from the last message or Esc come
+			// back to them). The one exception is an open completion
+			// popup, whose previous-suggestion key Up is. With nothing
+			// selected the pane cursor snaps to the last message, as the
+			// pane's own Down does; a selected message keeps the cursor, so
+			// Down then Up is a round trip. Editing your latest message is
+			// `a` in the pane, or the context menu's Edit — it used to be
+			// this key (Phase 15), which is Slack's convention, not a
+			// terminal's.
+			if msg.String() == "up" && !a.input.CompletionOpen() {
+				a.setFocus(FocusMessages)
+				a.messages.SelectLastIfNone()
+				return a, nil
 			}
 			// Phase 15 edit mode Esc handling: if we're in edit mode and
 			// the user presses Esc, clear the buffer and exit edit mode
@@ -3569,10 +3672,11 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.Action {
 		case "edit":
-			// From the context menu, on the one message the server will
-			// accept an edit for (canEditMessage): the same entry as the
-			// Up-arrow path, plus focus to the input since the menu was
-			// opened from the pane. Enter sends the edit, Esc cancels.
+			// From the context menu's Edit item, or `a` in the pane or the
+			// thread view, on the one message the server will accept an
+			// edit for (editableMessageID): the body into the composer,
+			// the pane scrolled to it, focus on the input. Enter sends the
+			// edit, Esc cancels.
 			a.input.EnterEditMode(msg.Msg.ID, msg.Msg.Body)
 			a.messages.ScrollToMessage(msg.Msg.ID)
 			a.focus = FocusInput
@@ -4959,46 +5063,6 @@ func (a *App) refreshMessageContent() {
 	a.messages.RefreshContent(contentWidth)
 }
 
-// tryEnterEditMode scans backwards through the loaded messages for
-// the user's most recent non-deleted message in the current context.
-// If found, populates the input buffer with that message's body and
-// flips the input into edit mode, tracking the message ID so the
-// subsequent Enter dispatches an edit envelope instead of a normal
-// send. Phase 15. Returns true if edit mode was entered (handled the
-// key press) or false if no editable message exists (key falls
-// through to normal up-arrow handling).
-//
-// The scan uses the in-memory message list, not the store helper, so
-// it respects whatever the user is currently viewing — if they've
-// scrolled back through history and the local list has older rows,
-// the "most recent" is still the highest TS row in the visible list.
-//
-// Side effect: scrolls the messages pane so the message being edited
-// is visible, matching the affordance of "you can see what you're
-// editing." The user pressed Up from the input bar — they expect
-// the input to populate AND the messages pane to surface the target.
-// Without the scroll, edit mode could activate against a message
-// that's currently scrolled off-screen and the user has no visual
-// confirmation of which message is being edited (the input just
-// fills with text). Focus stays on the input — only the cursor and
-// viewport position move.
-func (a *App) tryEnterEditMode() bool {
-	id := a.mostRecentOwnMessageID()
-	if id == "" {
-		return false
-	}
-	for i := range a.messages.messages {
-		if a.messages.messages[i].ID == id {
-			// Populate the input AND scroll the messages pane to show
-			// the target, so the user sees what they are editing.
-			a.input.EnterEditMode(id, a.messages.messages[i].Body)
-			a.messages.ScrollToMessage(id)
-			return true
-		}
-	}
-	return false
-}
-
 // copyText and openURL are the clipboard and browser seams, package
 // variables so tests can observe them instead of writing OSC 52 to stdout
 // or launching a browser.
@@ -5047,8 +5111,8 @@ func (a *App) threadConversationLabel() string {
 // non-deleted, non-system message in the current context — the ONE message
 // the server will accept an edit for (it answers edit_not_most_recent for
 // any other) — or "" when there is none. The scan uses the in-memory list,
-// most recent first, so it respects what the user is viewing. Shared by the
-// Up-arrow edit entry and the context menu's Edit item, so the two agree.
+// most recent first, so it respects what the user is viewing. Read only
+// through editableMessageID, so every edit entry agrees.
 func (a *App) mostRecentOwnMessageID() string {
 	if a.client == nil {
 		return ""
@@ -5067,19 +5131,36 @@ func (a *App) mostRecentOwnMessageID() string {
 	return ""
 }
 
-// canEditMessage reports whether the context menu should offer Edit for a
-// message: the Up-arrow path's gates (an active, not archived context; no
-// retired-partner banner) plus "this is the one message the server will
-// accept an edit for". The room epoch window is server-side only; its
-// error is surfaced when the edit is sent, as it is for the Up path.
-func (a *App) canEditMessage(msg DisplayMessage) bool {
+// editableMessageID is the ONE message the user may edit right now, or "":
+// the context must be active (not left, not retired, no retired-partner
+// banner) and it is their most recent own message. The pane's `a=edit`
+// hint and key, the thread view's, and the context menu's Edit item all
+// read this one predicate, so they cannot disagree. The room epoch window
+// stays a server rule; its error surfaces when the edit is sent.
+func (a *App) editableMessageID() string {
 	if a.messages.IsLeft() || a.messages.IsRoomRetired() {
-		return false
+		return ""
 	}
 	if retired, _ := a.currentDMRetiredPartner(); retired {
-		return false
+		return ""
 	}
-	return msg.ID != "" && msg.ID == a.mostRecentOwnMessageID()
+	return a.mostRecentOwnMessageID()
+}
+
+// canEditMessage reports whether the context menu should offer Edit for a
+// message: it is the one editableMessageID names.
+func (a *App) canEditMessage(msg DisplayMessage) bool {
+	return msg.ID != "" && msg.ID == a.editableMessageID()
+}
+
+// syncEditableMessage hands the pane and the thread view the editable
+// message's ID so their `a=edit` hint and `a` key see what the menu sees.
+// Run before a message is handled (a key must see the current list) and
+// after it (the View that follows must too).
+func (a *App) syncEditableMessage() {
+	id := a.editableMessageID()
+	a.messages.SetEditableMessageID(id)
+	a.threadPanel.SetEditableMessageID(id)
 }
 
 // dispatchEdit sends the appropriate edit verb for the current

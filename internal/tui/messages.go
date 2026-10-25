@@ -191,6 +191,7 @@ type MessagesModel struct {
 	resolveGroupName func(string) string  // group nanoid → display name (set by App)
 	resolveDMName    func(string) string  // dm nanoid → other user's display name (set by App)
 	selfUserID       string               // the local user's ID; own messages get ownUsernameStyle (set by App via SetSelfUserID)
+	editableID       string               // the one message the user may edit right now, or "" (set by App via SetEditableMessageID); drives the a=edit hint and the a key
 	loadingHistory   bool                 // a history request is in flight (the "Loading" concept)
 	remoteState      HistoryRemoteState   // server truth: does older history exist? (replaces the overloaded hasMore)
 	hintVisible      bool                 // whether the top "press up to load more" hint should render
@@ -563,6 +564,24 @@ func (m *MessagesModel) ensureCursorVisible() {
 // starts agree.
 func (m *MessagesModel) SetSelfUserID(id string) {
 	m.selfUserID = id
+}
+
+// SetEditableMessageID records the one message the user may edit right now
+// — the App computes it: an active context and their most recent own
+// message, the only one the server accepts an edit for — or "". It drives
+// the `a=edit` hint on that message when selected, and the `a` key.
+func (m *MessagesModel) SetEditableMessageID(id string) {
+	m.editableID = id
+}
+
+// SelectLastIfNone puts the cursor on the last message when nothing is
+// selected — the snap the pane's own Down does from -1 — for a focus move
+// into the pane from the input below it. A selected message is kept.
+func (m *MessagesModel) SelectLastIfNone() {
+	if m.cursor == -1 && len(m.messages) > 0 {
+		m.cursor = len(m.messages) - 1
+		m.ensureCursorVisible()
+	}
 }
 
 // senderNameStyle is the one rule for rendering a sender's name anywhere in
@@ -1892,6 +1911,18 @@ func (m *MessagesModel) SelectedMessage() *DisplayMessage {
 	return nil
 }
 
+// OnLastMessage reports whether Down has nowhere left to go in the pane:
+// the cursor sits on the last message, or there are no messages. A cursor
+// of -1 (nothing selected) is not "on the last message" — the first Down
+// snaps to it, as the Down handler does. The App uses this for the
+// pane's bottom edge, where Down drops into the input.
+func (m *MessagesModel) OnLastMessage() bool {
+	if len(m.messages) == 0 {
+		return true
+	}
+	return m.cursor >= len(m.messages)-1
+}
+
 // MessageAction is returned when the user performs an action on a selected message.
 type MessageAction struct {
 	Action string // "reply", "delete", "pin", "unpin", "copy", "react", "unreact", ...
@@ -1988,6 +2019,12 @@ func (m MessagesModel) Update(msg tea.KeyMsg) (MessagesModel, tea.Cmd) {
 		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted {
 			return m, func() tea.Msg {
 				return MessageAction{Action: "reply", Msg: *sel}
+			}
+		}
+	case "a": // alter: edit the one message the server will accept an edit for
+		if sel := m.SelectedMessage(); sel != nil && !sel.Deleted && sel.ID != "" && sel.ID == m.editableID {
+			return m, func() tea.Msg {
+				return MessageAction{Action: "edit", Msg: *sel}
 			}
 		}
 	case "d": // delete
@@ -2469,6 +2506,13 @@ func (m MessagesModel) buildContent(width int) (string, []int) {
 			// view lists every reactor), it is a reply, or it has replies.
 			// Same metadata gray as the attachment hints — selection-only
 			// detail never competes with the body.
+			// `a=edit` on the one message the user may edit (the App sets
+			// it, from the same predicate as the menu's Edit item). First in
+			// the chain: it is about the message itself; the link and thread
+			// hints are about its content. Same selection-only gray tier.
+			if i == m.cursor && msg.ID != "" && msg.ID == m.editableID {
+				line += timestampStyle.Render("  a=edit")
+			}
 			// Link hints, one key each (the aliases live in the docs): `o`
 			// opens the link when there is no attachment for `o` to open;
 			// `C` copies it. Same selection-only gray tier.

@@ -154,8 +154,26 @@ func withSelfUser(id string) testAppOption {
 }
 
 // selectContext selects a conversation in the pane and syncs the pane's
-// reachability from the connection state.
+// reachability from the connection state. A room is also listed in the
+// sidebar with the sidebar's selection on it: a live session keeps the
+// two in step, and a key routed to the sidebar compares them — a sidebar
+// that lists nothing would read as a switch to no conversation.
 func selectContext(a *App, room, group, dm string) {
+	if room != "" {
+		idx := -1
+		for i, r := range a.sidebar.rooms {
+			if r == room {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			a.sidebar.SetRooms(append(a.sidebar.rooms, room))
+			idx = len(a.sidebar.rooms) - 1
+		}
+		a.sidebar.cursor = idx
+		a.sidebar.updateSelection()
+	}
 	a.messages.SetContext(room, group, dm)
 	a.syncPaneReachability()
 }

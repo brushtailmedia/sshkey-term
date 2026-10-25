@@ -423,18 +423,48 @@ func (i InputModel) ValueForSend() string {
 	return strings.ReplaceAll(i.textInput.Value(), composeNewlineMarker, "\n")
 }
 
-// IsEmpty reports whether the input buffer contains any text. Used by
-// the app-layer Up-arrow handler to decide whether to enter edit mode
-// (only triggers on an empty buffer so normal cursor-up behavior in a
-// text editor isn't hijacked).
+// IsEmpty reports whether the input buffer contains any text. The App's
+// Left/Right focus rule reads it: with text those are cursor keys, so only
+// an empty draft lets them leave the input (focus-consistency.md clause 5).
 func (i InputModel) IsEmpty() bool {
 	return i.textInput.Value() == ""
 }
 
+// CompletionOpen reports whether the @-mention / slash-command popup is up.
+// While it is, Up and Down are its previous/next keys; the App's "Up goes
+// up to the pane" rule stands aside for it.
+func (i InputModel) CompletionOpen() bool {
+	return i.completion != nil && i.completion.visible
+}
+
+// CanComplete reports whether Tab is the input's key right now: the popup
+// is open (Tab accepts the highlighted suggestion), or the cursor sits at
+// the end of a /command word at the start of the draft or an @name word
+// anywhere — the two things the completer offers. A bare "/" or "@" counts
+// too: the popup needs two characters, so Tab then does nothing, but it
+// must not jump focus away from a command being typed. Anywhere else the
+// App's Tab cycles focus ("Tab completes when it can, else cycles").
+func (i InputModel) CanComplete() bool {
+	if i.CompletionOpen() {
+		return true
+	}
+	text, pos := i.textInput.Value(), i.textInput.Position()
+	if pos <= 0 || pos > len(text) {
+		return false
+	}
+	start := pos
+	for start > 0 && text[start-1] != ' ' {
+		start--
+	}
+	word := text[start:pos]
+	return strings.HasPrefix(word, "@") || (start == 0 && strings.HasPrefix(word, "/"))
+}
+
 // EnterEditMode populates the input buffer with the given message body
-// and marks the input as editing the given message ID. Called by the
-// app-layer Up-arrow handler after finding the user's most recent
-// editable message in the current context (Phase 15).
+// and marks the input as editing the given message ID. Called by the App's
+// edit action — `a` in the pane or the thread view, or the context menu's
+// Edit — on the one message the server will accept an edit for (Phase 15
+// bound this to Up on an empty input; Up is navigation now).
 func (i *InputModel) EnterEditMode(msgID, body string) {
 	i.editMode = true
 	i.editTarget = msgID

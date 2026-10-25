@@ -22,112 +22,120 @@ func newEditAppHarness(t *testing.T) (App, *store.Store) {
 	return a, a.client.Store()
 }
 
-func TestApp_UpArrowEntersEditModeOnEmpty(t *testing.T) {
-	a, _ := newEditAppHarness(t)
+// editFixture is a room where alice (the local user) posted first and last
+// with bob in between: msg_3 is the one message the server will accept an
+// edit for.
+func editFixture(a *App) {
 	a.messages.SetContext("room_edit", "", "")
 	a.messages.messages = []DisplayMessage{
 		{ID: "msg_1", FromID: "usr_alice", Body: "first", TS: 1},
 		{ID: "msg_2", FromID: "usr_bob", Body: "second", TS: 2},
 		{ID: "msg_3", FromID: "usr_alice", Body: "latest from me", TS: 3},
 	}
+}
 
-	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyUp})
-	updated := model.(App)
+// `a` on the editable message enters edit mode with its body in the
+// composer, the pane scrolled to it and focus on the input.
+func TestApp_AKeyEditsTheEditableMessage(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	editFixture(&a)
+	a.setFocus(FocusMessages)
+	a.messages.cursor = 2 // msg_3
 
-	if !updated.input.IsEditing() {
-		t.Fatal("expected edit mode to be entered")
-	}
-	if updated.input.EditTarget() != "msg_3" {
-		t.Fatalf("edit target = %q, want msg_3", updated.input.EditTarget())
+	model, cmd := a.Update(keyRune('a'))
+	updated := deliver(t, model.(App), cmd) // the pane answers with the edit action
+	if !updated.input.IsEditing() || updated.input.EditTarget() != "msg_3" {
+		t.Fatalf("editing=%v target=%q; want edit mode on msg_3", updated.input.IsEditing(), updated.input.EditTarget())
 	}
 	if updated.input.Value() != "latest from me" {
-		t.Fatalf("input value = %q, want latest message body", updated.input.Value())
+		t.Fatalf("input value = %q, want the message body", updated.input.Value())
+	}
+	if updated.focus != FocusInput || updated.messages.cursor != 2 {
+		t.Fatalf("focus %v, cursor %d; want the input with the pane cursor on msg_3", updated.focus, updated.messages.cursor)
 	}
 }
 
-func TestApp_UpArrowJumpsMessagesCursorToEditTarget(t *testing.T) {
-	// When edit mode is entered via Up-arrow, the messages pane
-	// cursor must land on the target message so the user has visual
-	// confirmation of which message they're editing — otherwise the
-	// input populates silently and the target may be scrolled off-
-	// screen entirely.
-	a, _ := newEditAppHarness(t)
-	a.messages.SetContext("room_edit", "", "")
-	a.messages.messages = []DisplayMessage{
-		{ID: "msg_1", FromID: "usr_alice", Body: "first", TS: 1},
-		{ID: "msg_2", FromID: "usr_bob", Body: "second", TS: 2},
-		{ID: "msg_3", FromID: "usr_alice", Body: "latest from me", TS: 3},
+// `a` on any other message — alice's older one, bob's — does nothing.
+func TestApp_AKeyIgnoresOtherMessages(t *testing.T) {
+	for _, cursor := range []int{0, 1} {
+		a, _ := newEditAppHarness(t)
+		editFixture(&a)
+		a.setFocus(FocusMessages)
+		a.messages.cursor = cursor
+
+		model, cmd := a.Update(keyRune('a'))
+		got := deliver(t, model.(App), cmd)
+		if got.input.IsEditing() || got.focus != FocusMessages {
+			t.Fatalf("a on message %d: editing=%v focus=%v; want nothing to happen", cursor, got.input.IsEditing(), got.focus)
+		}
 	}
-	// Pre-position the cursor somewhere unrelated (msg_2) so the
-	// assertion that it MOVED isn't satisfied by the initial-zero
-	// default.
-	a.messages.cursor = 1
+}
+
+// Up on an empty input no longer edits: it is a focus move to the pane
+// (focus_arrows_test.go has the cursor rules); the draft stays empty.
+func TestApp_UpOnEmptyInputDoesNotEnterEditMode(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	editFixture(&a)
 
 	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyUp})
 	updated := model.(App)
-
-	if !updated.input.IsEditing() {
-		t.Fatal("precondition: expected edit mode to be entered")
+	if updated.input.IsEditing() || updated.input.Value() != "" {
+		t.Fatalf("editing=%v value=%q; Up must not enter edit mode", updated.input.IsEditing(), updated.input.Value())
 	}
-	if updated.messages.cursor != 2 {
-		t.Errorf("messages.cursor = %d, want 2 (index of msg_3)", updated.messages.cursor)
+	if updated.focus != FocusMessages {
+		t.Fatalf("focus = %v, want the message pane", updated.focus)
 	}
 }
 
-func TestApp_UpArrowNoopWhenInputHasContent(t *testing.T) {
+// With a draft in progress Up still goes up to the pane — the composer is a
+// single line, so Up has no editing meaning — and the draft, its cursor and
+// the non-edit state all survive the trip.
+func TestApp_UpWithDraftGoesToPaneAndKeepsTheDraft(t *testing.T) {
 	a, _ := newEditAppHarness(t)
-	// Keep this case focused on the Up-arrow edit gate itself. With a non-empty
-	// buffer, focus-input flow falls through to InputModel.Update, which can
-	// emit typing indicators via c.SendTyping. A nil client avoids transport
-	// setup noise and keeps the assertion targeted.
-	a.client = nil
-	a.messages.SetContext("room_edit", "", "")
-	a.messages.messages = []DisplayMessage{
-		{ID: "msg_1", FromID: "usr_alice", Body: "first", TS: 1},
-	}
+	editFixture(&a)
 	a.input.textInput.SetValue("draft in progress")
-	a.input.textInput.SetCursor(len("draft in progress"))
+	a.input.textInput.SetCursor(5)
 
 	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyUp})
 	updated := model.(App)
-
-	if updated.input.IsEditing() {
-		t.Fatal("up-arrow with non-empty input should not enter edit mode")
+	if updated.focus != FocusMessages || updated.input.IsEditing() {
+		t.Fatalf("focus %v editing %v; want the pane, not editing", updated.focus, updated.input.IsEditing())
 	}
-	if got := updated.input.Value(); got != "draft in progress" {
-		t.Fatalf("input value = %q, want preserved draft", got)
+	if got := updated.input.Value(); got != "draft in progress" || updated.input.textInput.Position() != 5 {
+		t.Fatalf("draft %q at %d; want the draft and its cursor preserved", got, updated.input.textInput.Position())
 	}
 }
 
-func TestApp_UpArrowNoopOnLeftRoom(t *testing.T) {
-	a, _ := newEditAppHarness(t)
-	a.messages.SetContext("room_left", "", "")
-	a.messages.SetLeft(true)
-	a.messages.messages = []DisplayMessage{
-		{ID: "msg_1", FromID: "usr_alice", Body: "first", TS: 1},
-	}
+// Edit is unavailable in a left or retired room: no editable message, so
+// `a` does nothing there — while Up, now navigation, still reaches the pane.
+func TestApp_EditUnavailableInLeftOrRetiredRoom(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(m *MessagesModel)
+	}{
+		{"left", func(m *MessagesModel) { m.SetLeft(true) }},
+		{"retired", func(m *MessagesModel) { m.SetRoomRetired(true) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := newEditAppHarness(t)
+			editFixture(&a)
+			tc.setup(&a.messages)
+			if a.editableMessageID() != "" {
+				t.Fatalf("editable = %q, want none in a %s room", a.editableMessageID(), tc.name)
+			}
 
-	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyUp})
-	updated := model.(App)
-
-	if updated.input.IsEditing() {
-		t.Fatal("up-arrow in archived context should not enter edit mode")
-	}
-}
-
-func TestApp_UpArrowNoopOnRetiredRoom(t *testing.T) {
-	a, _ := newEditAppHarness(t)
-	a.messages.SetContext("room_retired", "", "")
-	a.messages.SetRoomRetired(true)
-	a.messages.messages = []DisplayMessage{
-		{ID: "msg_1", FromID: "usr_alice", Body: "first", TS: 1},
-	}
-
-	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyUp})
-	updated := model.(App)
-
-	if updated.input.IsEditing() {
-		t.Fatal("up-arrow in retired room should not enter edit mode")
+			model, _ := a.Update(tea.KeyMsg{Type: tea.KeyUp})
+			got := model.(App)
+			if got.focus != FocusMessages || got.input.IsEditing() {
+				t.Fatalf("Up: focus %v editing %v; want the pane, not editing", got.focus, got.input.IsEditing())
+			}
+			got.messages.cursor = 2
+			model, cmd := got.Update(keyRune('a'))
+			got = deliver(t, model.(App), cmd)
+			if got.input.IsEditing() || got.focus != FocusMessages {
+				t.Fatalf("a: editing %v focus %v; want nothing to happen", got.input.IsEditing(), got.focus)
+			}
+		})
 	}
 }
 

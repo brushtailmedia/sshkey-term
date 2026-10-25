@@ -14,7 +14,7 @@
 |---|---|---|
 | `Enter` | `Enter` | Send message |
 | `Esc` | `Esc` | Close panel / cancel / back to input |
-| `Tab` | `Tab` | Cycle focus: Input → Sidebar → Messages → Members → Input |
+| `Tab` / `Shift+Tab` | `Tab` / `Shift+Tab` | Cycle focus forwards / backwards: Input → Sidebar → Messages → Members → Input. In the input, `Tab` completes when it can: at the end of a `/command` or `@name` word it opens the completion popup (or accepts the highlighted suggestion); anywhere else in the draft it cycles |
 | `Ctrl+g` | `Ctrl+g` | Enter navigation prefix mode |
 | `Ctrl+P` | `Ctrl+P` | Toggle pinned messages |
 | `Ctrl+Q` | `Ctrl+Q` | Quit (confirmation dialog) |
@@ -48,8 +48,10 @@ After `Ctrl+g`, a which-key popup lists these continuations once you pause (300 
 
 | Key | macOS | Action |
 |---|---|---|
-| `↑/↓` | `↑/↓` | Navigate sidebar / scroll messages (context-dependent) |
-| `j/k` | `j/k` | Move down / up (j/k navigation, when not in the input) |
+| `↑/↓` | `↑/↓` | Navigate sidebar / scroll messages (context-dependent). `↓` on the last message moves focus to the input |
+| `j/k` | `j/k` | Move down / up (j/k navigation, when not in the input). `j` on the last message moves focus to the input |
+| `←/→` | `←/→` | Move focus to the panel in that direction: Sidebar ↔ Messages ↔ Members (when open). From the input only when the draft is empty; with text they move the cursor |
+| `h/l` | `h/l` | Same as `←/→` when not in the input (j/k navigation) |
 | `PgUp` | `Fn+↑` | Scroll message history up (triggers lazy scroll-back from server) |
 | `Alt+↑/↓` | `Opt+↑/↓` | Switch to previous/next room or DM |
 | `Enter` | `Enter` | Confirm sidebar selection (when FocusSidebar) |
@@ -59,6 +61,7 @@ After `Ctrl+g`, a which-key popup lists these continuations once you pause (300 
 | Key | Action |
 |---|---|
 | `r` | Reply to selected message |
+| `a` | Edit ("alter") your most recent message in the conversation — the only one the server accepts an edit for. That message shows an `a=edit` hint when selected; on any other message the key does nothing. The body goes into the input in edit mode: `Enter` sends the edit, `Esc` cancels. Also in the thread view, and as Edit in the context menu |
 | `e` | Open emoji reaction picker |
 | `u` | Remove your reaction from selected message |
 | `p` | Pin/unpin selected message (rooms only) |
@@ -66,7 +69,7 @@ After `Ctrl+g`, a which-key popup lists these continuations once you pause (300 
 | `c` or `y` | Copy message text to clipboard (`y`: the vim/terminal copy-mode habit; same action) |
 | `C` or `Y` | Copy the link in the message to the clipboard; with several links a picker lists them (`Enter` chooses, `q` closes) |
 | `g` | Jump to parent message (on a reply) |
-| `t` | Open the thread view on the whole thread the selected message belongs to (it walks up to the top-level message; the cursor lands on the selected message), as a tree three levels deep with who reacted with what; deeper replies are hidden behind a gray `↳ N more replies` stub drawn beneath the row at the cap, where the first hidden reply would sit. Inside it: `t` re-opens the view rooted at the highlighted reply (any reply that has replies — the hidden ones become visible); `Enter` closes the view and goes to the highlighted message in the pane; on the `..` row at the top of a nested view both `t` and `Enter` open the parent thread; `r` replies to the highlighted message and `e` opens the emoji picker on it, both closing the view first so the input (or the picker) is in front; `↑`/`↓` or `k`/`j` move the highlight and pull the window only at its edges, `PgUp`/`PgDn` scroll a screen without moving it, `Home` scrolls to the top, `End` jumps to the last row; `c`/`y` copy the highlighted message's text, `C`/`Y` copy its link and `o` opens its attachment or link (the footer confirms, since the status bar is behind the view; several links close the view for the picker); `Esc` or `q` closes |
+| `t` | Open the thread view on the whole thread the selected message belongs to (it walks up to the top-level message; the cursor lands on the selected message), as a tree three levels deep with who reacted with what; deeper replies are hidden behind a gray `↳ N more replies ↓` stub drawn beneath the row at the cap, where the first hidden reply would sit (the trailing `↓` says the thread continues below the cap). Inside it: `t` re-opens the view rooted at the highlighted reply (any reply that has replies — the hidden ones become visible); `Enter` closes the view and goes to the highlighted message in the pane; on the `..` row at the top of a nested view both `t` and `Enter` open the parent thread; `r` replies to the highlighted message, `e` opens the emoji picker on it and `a` edits it when it is your latest message (its row shows `a=edit`), all closing the view first so the input (or the picker) is in front; `↑`/`↓` or `k`/`j` move the highlight and pull the window only at its edges, `PgUp`/`PgDn` scroll a screen without moving it, `Home` scrolls to the top, `End` jumps to the last row; `c`/`y` copy the highlighted message's text, `C`/`Y` copy its link and `o` opens its attachment or link (the footer confirms, since the status bar is behind the view; several links close the view for the picker); `Esc` or `q` closes |
 | `o` | Open: the attachment in the system viewer when the message has one, otherwise the link in the default browser (several links → a picker). Over SSH the browser is on your own machine, so `o` copies the link instead and says so; links are also OSC 8 hyperlinks, which most terminals open on `Cmd`/`Ctrl`+click |
 | `s` | Save attachment to disk |
 | `Enter` | Open the context menu for the selected message (Reply; Edit on your most recent message in the conversation — the only one the server accepts an edit for; React; remove a reaction; Thread when the message has replies, is a reply or has reactions; Pin/Unpin; Open/Save attachment; Delete; Copy). `j`/`k` move, `Enter` chooses, `q` or `Esc` closes |
@@ -109,8 +112,8 @@ When a sole admin runs `/leave` or `/delete` on a group with other members, the 
 |---|---|---|
 | `Enter` | `Enter` | Send message (or execute slash command). If the input is in edit mode, dispatches the appropriate edit verb instead. |
 | `Ctrl+J` (preferred) or `Alt+Enter` | `Ctrl+J` (preferred) or `Option+Enter` | Insert a newline in the draft (multi-line message). **Prefer `Ctrl+J`**: it is a single byte that every terminal sends unchanged. `Alt+Enter` needs Option set to send Esc on macOS, is taken for fullscreen by some terminals (Windows Terminal, WezTerm), and on a slow link can arrive as Esc followed by Enter. Shift+Enter cannot be used: a terminal sends the same byte for it as for Enter. |
-| `Tab` | `Tab` | Accept top tab-completion suggestion |
-| `Up` | `Up` | **Phase 15**: on an empty input in an active (not left, not retired) context, enters edit mode with the user's most recent non-deleted message pre-populated. Enter dispatches the edit; Esc cancels. Only fires when the input is empty — normal cursor navigation in multi-line mode is unaffected. |
+| `Tab` | `Tab` | Complete when it can, else cycle focus: with the cursor at the end of a `/command` word (first word) or an `@name` word, opens the completion popup; with the popup open, accepts the highlighted suggestion (`↑`/`↓` move through it, `Esc` closes it). A bare `/` or `@` keeps `Tab` in the input too (the popup needs two characters). Anywhere else in the draft, `Tab` cycles focus |
+| `Up` | `Up` | Moves focus up to the message pane, draft or no draft — the composer is a single line, so `Up` has nothing to do in it; the draft and its cursor stay, and `↓` from the last message (or `Esc`) brings you back to them, e.g. to copy text from another message mid-draft. The pane cursor snaps to the last message when none is selected and is kept otherwise, so `↓` then `↑` is a round trip. The one exception: while the `@`/`/` completion popup is open, `Up` is its previous suggestion. Editing your latest message is `a` in the pane (or Edit in the context menu); it used to be this key. |
 | `Esc` | `Esc` | **Phase 15**: if in edit mode, clears the buffer and exits edit mode without dispatching. Otherwise moves focus to the sidebar. |
 | `Ctrl+a` | `Ctrl+a` | Move cursor to start of line (inherited textinput/readline behavior) |
 | `Ctrl+u` | `Ctrl+u` | Delete from cursor to start of line (inherited textinput/readline behavior) |
