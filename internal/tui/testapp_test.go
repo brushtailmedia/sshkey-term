@@ -150,6 +150,7 @@ func withSelfUser(id string) testAppOption {
 		a.messages.SetSelfUserID(id)
 		a.threadPanel.SetSelfUserID(id)
 		a.pinnedBar.SetSelfUserID(id)
+		a.input.SetSelfUserID(id)
 	})
 }
 

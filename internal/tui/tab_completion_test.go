@@ -48,13 +48,16 @@ func TestTab_CyclesFocusWhenNothingToComplete(t *testing.T) {
 	}
 }
 
-// A bare prefix, or a word with no match, keeps Tab in the input: it may
-// open nothing, but it must not jump away from a command being typed.
-func TestTab_StaysInInputOnABarePrefixOrNoMatch(t *testing.T) {
-	for _, draft := range []string{"/", "@", "@zz"} {
-		got := pressFocusKey(t, tabApp(t, draft), "tab")
-		if got.focus != FocusInput || got.input.CompletionOpen() || got.input.Value() != draft {
-			t.Fatalf("Tab with draft %q: focus %v, popup %v, draft %q; want the input unchanged", draft, got.focus, got.input.CompletionOpen(), got.input.Value())
+// A bare prefix lists everything on Tab; a word nothing matches opens
+// nothing; neither jumps focus away from the word being typed.
+func TestTab_BarePrefixListsEverythingNoMatchStays(t *testing.T) {
+	for _, tc := range []struct {
+		draft string
+		open  bool
+	}{{"/", true}, {"@", true}, {"@zz", false}} {
+		got := pressFocusKey(t, tabApp(t, tc.draft), "tab")
+		if got.focus != FocusInput || got.input.CompletionOpen() != tc.open || got.input.Value() != tc.draft {
+			t.Fatalf("Tab with draft %q: focus %v, popup %v, draft %q; want the input kept and popup=%v", tc.draft, got.focus, got.input.CompletionOpen(), got.input.Value(), tc.open)
 		}
 	}
 }

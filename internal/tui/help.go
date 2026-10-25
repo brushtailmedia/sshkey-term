@@ -180,7 +180,8 @@ func (h HelpModel) renderContent(width int) string {
 	inputRows := []helpRow{
 		{"Enter", "send message"},
 		{"Ctrl+j (or Alt+Enter)", "newline"},
-		{"Tab", "autocomplete"},
+		{"/ or @", "completion popup as you type"},
+		{"Tab / →", "accept completion"},
 		{"↑", "up to the messages (draft kept)"},
 		{"Esc", "cancel / back"},
 		{"/", "command mode"},

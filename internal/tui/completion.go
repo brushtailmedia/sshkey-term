@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -72,7 +73,7 @@ func Complete(input string, cursorPos int, members []MemberEntry) *CompletionMod
 	}
 	word := input[start:cursorPos]
 
-	if len(word) < 2 {
+	if len(word) == 0 {
 		return nil
 	}
 
@@ -108,7 +109,7 @@ func CompleteWithContext(input string, cursorPos int, groupMembers []MemberEntry
 		start--
 	}
 	word := input[start:cursorPos]
-	if len(word) < 2 {
+	if len(word) == 0 {
 		return nil
 	}
 
@@ -221,9 +222,6 @@ func completeMentions(prefix string, members []MemberEntry) *CompletionModel {
 	if len(items) == 0 {
 		return nil
 	}
-	if len(items) > 5 {
-		items = items[:5]
-	}
 
 	return &CompletionModel{items: items, visible: true, prefix: prefix}
 }
@@ -280,9 +278,9 @@ func completeCommands(prefix string) *CompletionModel {
 	if len(items) == 0 {
 		return nil
 	}
-	if len(items) > 5 {
-		items = items[:5]
-	}
+	// Alphabetical: a bare "/" shows the whole list as a menu, and a menu
+	// reads by name, not by the table's feature grouping.
+	sort.Slice(items, func(a, b int) bool { return items[a].Display < items[b].Display })
 
 	return &CompletionModel{items: items, visible: true, prefix: prefix}
 }
@@ -314,24 +312,25 @@ func (c *CompletionModel) Prev() {
 	}
 }
 
-// View renders the completion popup.
-func (c *CompletionModel) View(width int) string {
+// View renders the completion popup through the one popup-list renderer the
+// context menu and the member menu also use (listbox.go): natural width,
+// capped at maxWidth when that is positive.
+func (c *CompletionModel) View(maxWidth int) string {
 	if c == nil || !c.visible || len(c.items) == 0 {
 		return ""
 	}
-
-	var lines []string
+	rows := make([]listRow, len(c.items))
 	for i, item := range c.items {
-		line := item.Display
-		if item.Description != "" {
-			line += "  " + completionDescStyle.Render(item.Description)
-		}
-
-		if i == c.cursor {
-			line = completionSelectedStyle.Render(line)
-		}
-		lines = append(lines, "  "+line)
+		rows[i] = listRow{label: item.Display, desc: item.Description}
 	}
-
-	return completionStyle.Width(width - 4).Render(strings.Join(lines, "\n"))
+	box := renderListBox(rows, c.cursor, 0, completionMaxRows)
+	if maxWidth > 0 && lipgloss.Width(box) > maxWidth {
+		box = renderListBox(rows, c.cursor, maxWidth, completionMaxRows)
+	}
+	return box
 }
+
+// completionMaxRows is the popup's visible window: a bare "/" lists every
+// command and a bare "@" every member, so the list scrolls behind the
+// "↑ N more" / "↓ N more" markers instead of growing without bound.
+const completionMaxRows = 8

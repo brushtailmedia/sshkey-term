@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -173,19 +172,15 @@ func (c ContextMenuModel) Update(msg tea.KeyMsg) (ContextMenuModel, tea.Cmd) {
 	return c, nil
 }
 
+// View draws the menu through the one popup-list renderer the member menu
+// and the completion popup also use (listbox.go).
 func (c ContextMenuModel) View() string {
 	if !c.visible {
 		return ""
 	}
-
-	var b strings.Builder
+	rows := make([]listRow, len(c.items))
 	for i, item := range c.items {
-		line := "  " + item.Label
-		if i == c.cursor {
-			line = completionSelectedStyle.Render(line)
-		}
-		b.WriteString(line + "\n")
+		rows[i] = listRow{label: item.Label}
 	}
-
-	return dialogStyle.Render(b.String())
+	return renderListBox(rows, c.cursor, 0, 0)
 }

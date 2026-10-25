@@ -2295,6 +2295,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "esc":
+			// A completion popup owns Esc: it closes and the draft stays
+			// (focus-consistency.md clause 4). The input handles it through
+			// the routing below; before this guard the global Esc ran first
+			// and wiped the whole draft.
+			if a.focus == FocusInput && a.input.CompletionOpen() {
+				break
+			}
 			// Esc behavior, in priority order:
 			//
 			//   1. If a reply is active (regardless of which panel
@@ -2401,7 +2408,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Phase 15 edit mode Esc handling: if we're in edit mode and
 			// the user presses Esc, clear the buffer and exit edit mode
 			// without dispatching anything.
-			if msg.String() == "esc" && a.input.IsEditing() {
+			if msg.String() == "esc" && a.input.IsEditing() && !a.input.CompletionOpen() {
 				a.input.ExitEditMode()
 				a.input.ClearInput()
 				return a, nil
@@ -4057,6 +4064,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.messages.SetSelfUserID(uid)
 			a.threadPanel.SetSelfUserID(uid)
 			a.pinnedBar.SetSelfUserID(uid)
+			a.input.SetSelfUserID(uid)
 		}
 
 		// Populate sidebar and messages
@@ -4899,6 +4907,7 @@ func (a *App) hydrateOfflineUI() {
 	a.messages.SetSelfUserID(a.client.UserID())
 	a.threadPanel.SetSelfUserID(a.client.UserID())
 	a.pinnedBar.SetSelfUserID(a.client.UserID())
+	a.input.SetSelfUserID(a.client.UserID())
 
 	// Initial context, mirroring connectedWithClient.
 	if len(ids) > 0 {
@@ -8515,6 +8524,7 @@ func (a *App) handleServerMessage(msg ServerMsg) tea.Cmd {
 			a.messages.SetSelfUserID(a.client.UserID())
 			a.threadPanel.SetSelfUserID(a.client.UserID())
 			a.pinnedBar.SetSelfUserID(a.client.UserID())
+			a.input.SetSelfUserID(a.client.UserID())
 		}
 	case "dm_created":
 		var m protocol.DMCreated
@@ -9408,6 +9418,24 @@ func (a App) viewBody() string {
 	}
 	if a.passphrase.IsVisible() {
 		return a.passphrase.View(a.width)
+	}
+
+	// Completion popup — a menu you type through, so it is the input's
+	// state, drawn here as a true overlay anchored just above the input box
+	// (the emoji picker's placement) and never shifting the layout: it used
+	// to render inside the input and grow the frame past the terminal.
+	// Painted before the which-key hint so that can still sit on top.
+	if a.focus == FocusInput && a.input.CompletionOpen() {
+		popup := a.input.CompletionView(layout.MessagesWidth - 2)
+		col := layout.MessagesX0 + 1
+		// One row above the pane's bottom border, so the popup floats inside
+		// the pane and the two borders never meet (anchored on the border
+		// row, the corners doubled up).
+		row := layout.InputY0 - 1 - lipgloss.Height(popup)
+		if row < 1 {
+			row = 1
+		}
+		screen = overlay(screen, popup, col, row, a.width, a.height)
 	}
 
 	// which-key popup — a non-focus-stealing hint, painted last so it only

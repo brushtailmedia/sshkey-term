@@ -39,7 +39,15 @@ type InputModel struct {
 	lastTypingSent time.Time        // throttle typing indicators
 	typingDisabled bool             // /typing off — suppress sending typing indicators (set by App from config; local UX only, server authorizes relay independently)
 	completion     *CompletionModel // active completion popup
-	members        []MemberEntry    // current room/group members for @completion
+	// completionDismissed: Esc closed the popup for the word being typed;
+	// typing on does not reopen it until the word ends (a space, or the
+	// prefix deleted). Tab still opens it.
+	completionDismissed bool
+	// selfUserID is the local user: never offered by @-completion and never
+	// a mention target — you cannot @ yourself. Set from the same sites as
+	// the other models' SetSelfUserID.
+	selfUserID string
+	members    []MemberEntry // current room/group members for @completion
 	// Phase 14: non-member pool for /add target completion. Populated
 	// alongside members from the client's profile cache, filtered to
 	// users NOT in the current group. Empty in non-group contexts.
@@ -206,21 +214,36 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 	}
 
 	// Handle completion popup if active
+	// edited: this key changes the text, so the popup is reconsidered
+	// after the text widget has applied it (see the end of Update).
+	edited := msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace || msg.Type == tea.KeyBackspace
+	narrow := false // an open popup is re-filtered after the text updates
 	if i.completion != nil && i.completion.visible {
 		switch msg.String() {
-		case "tab", "enter":
-			// Accept completion
+		case "tab", "right", "enter":
+			// Accept the highlighted suggestion: replace the prefix with it.
+			// Right accepts like Tab (the cursor is at the end of the word
+			// while the popup is up, so Right has nowhere else to go).
 			sel := i.completion.Selected()
 			text := i.textInput.Value()
-			// Replace the prefix with the completion
 			pos := strings.LastIndex(text, i.completion.prefix)
+			newText := text
 			if pos >= 0 {
-				newText := text[:pos] + sel.Text
+				newText = text[:pos] + sel.Text
+			}
+			// Enter accepts only when that changes the text. If the
+			// suggestion is already what was typed (a trailing space
+			// aside), Enter sends: the popup opens on its own as a command
+			// is typed, and a known command must not need Enter twice. The
+			// popup closes and the key falls through to the send path.
+			if msg.String() == "enter" && strings.TrimRight(newText, " ") == strings.TrimRight(text, " ") {
+				i.completion = nil
+			} else {
 				i.textInput.SetValue(newText)
 				i.textInput.SetCursor(len(newText))
+				i.completion = nil
+				return i, nil
 			}
-			i.completion = nil
-			return i, nil
 		case "up":
 			i.completion.Prev()
 			return i, nil
@@ -228,11 +251,20 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 			i.completion.Next()
 			return i, nil
 		case "esc":
+			// Closed for this word: typing on does not reopen it (Tab does).
 			i.completion = nil
+			i.completionDismissed = true
 			return i, nil
 		}
-		// Any other key dismisses completion and falls through
-		i.completion = nil
+		// Typing narrows the popup and Backspace widens it: the key goes
+		// to the text widget below and the popup is rebuilt from the new
+		// word (closing when nothing matches — a space ends the word).
+		// Any other key dismisses the popup and falls through.
+		if edited {
+			narrow = true
+		} else {
+			i.completion = nil
+		}
 	}
 
 	switch msg.String() {
@@ -245,29 +277,10 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 		}
 		return i, nil
 	case "tab":
-		// Trigger completion. Phase 14: use CompleteWithContext so
-		// admin-verb @-arguments filter to the right data source
-		// (current group members for /kick, /promote, /demote,
-		// /transfer, /role; non-members for /add).
-		text := i.textInput.Value()
-		pos := i.textInput.Position()
-		// V8 typing-time hint: in a read-only room (retired/left) completion
-		// is limited to the allow-list, built directly so all four always
-		// appear (no dependency on completeCommands' 5-item cap) and member/
-		// @-mention completion is suppressed. The runtime gate
-		// (commandAllowedInReadOnlyRoom) is the correctness backstop; this is
-		// discoverability.
-		readOnlyRoom := false
-		if room != "" && c != nil {
-			if st := c.Store(); st != nil {
-				readOnlyRoom = st.IsRoomRetired(room) || st.IsRoomLeft(room)
-			}
-		}
-		if readOnlyRoom {
-			i.completion = completeReadOnlyRoomCommands(text, pos)
-		} else {
-			i.completion = CompleteWithContext(text, pos, i.members, i.nonMembers)
-		}
+		// Open the completion popup for the word at the cursor (the App
+		// routes Tab here only when CanComplete says the word is a
+		// /command or an @name — "Tab completes when it can, else cycles").
+		i.refreshCompletion(c, room)
 		return i, nil
 	case "alt+enter", "ctrl+j":
 		// Insert a draft-only newline marker. We keep the input widget
@@ -345,6 +358,20 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 
 	var cmd tea.Cmd
 	i.textInput, cmd = i.textInput.Update(msg)
+	if edited {
+		switch {
+		case !i.completableWord():
+			// The word ended (a space) or lost its prefix: no popup, and
+			// an Esc dismissal is spent.
+			i.completion = nil
+			i.completionDismissed = false
+		case narrow || !i.completionDismissed:
+			// Re-filter an open popup, or open one for the /command or
+			// @name being typed — from its first character — unless Esc
+			// dismissed it for this word.
+			i.refreshCompletion(c, room)
+		}
+	}
 	return i, cmd
 }
 
@@ -440,14 +467,17 @@ func (i InputModel) CompletionOpen() bool {
 // CanComplete reports whether Tab is the input's key right now: the popup
 // is open (Tab accepts the highlighted suggestion), or the cursor sits at
 // the end of a /command word at the start of the draft or an @name word
-// anywhere — the two things the completer offers. A bare "/" or "@" counts
-// too: the popup needs two characters, so Tab then does nothing, but it
-// must not jump focus away from a command being typed. Anywhere else the
-// App's Tab cycles focus ("Tab completes when it can, else cycles").
+// anywhere — the two things the completer offers, a bare "/" or "@"
+// included (they list everything). Anywhere else the App's Tab cycles
+// focus ("Tab completes when it can, else cycles").
 func (i InputModel) CanComplete() bool {
-	if i.CompletionOpen() {
-		return true
-	}
+	return i.CompletionOpen() || i.completableWord()
+}
+
+// completableWord reports whether the word under the cursor is one the
+// completer offers: a /command as the first word, or an @name anywhere
+// (so an e-mail address, one word that does not start with "@", is not).
+func (i InputModel) completableWord() bool {
 	text, pos := i.textInput.Value(), i.textInput.Position()
 	if pos <= 0 || pos > len(text) {
 		return false
@@ -458,6 +488,41 @@ func (i InputModel) CanComplete() bool {
 	}
 	word := text[start:pos]
 	return strings.HasPrefix(word, "@") || (start == 0 && strings.HasPrefix(word, "/"))
+}
+
+// CompletionView renders the popup for the App to overlay just above the
+// input box, or "" when it is closed. maxWidth caps the box.
+func (i InputModel) CompletionView(maxWidth int) string {
+	if !i.CompletionOpen() {
+		return ""
+	}
+	return i.completion.View(maxWidth)
+}
+
+// refreshCompletion rebuilds the popup from the word at the cursor — Tab
+// opens it; typing or Backspace while it is open narrows or widens it — and
+// closes it (nil) when nothing matches. Phase 14: CompleteWithContext so
+// admin-verb @-arguments filter to the right data source (current group
+// members for /kick, /promote, /demote, /transfer, /role; non-members for
+// /add). V8 typing-time hint: in a read-only room (retired/left) completion
+// is limited to the allow-list, built directly so all four always appear
+// (no dependency on completeCommands' 5-item cap) and member/@-mention
+// completion is suppressed. The runtime gate (commandAllowedInReadOnlyRoom)
+// is the correctness backstop; this is discoverability.
+func (i *InputModel) refreshCompletion(c *client.Client, room string) {
+	text := i.textInput.Value()
+	pos := i.textInput.Position()
+	readOnlyRoom := false
+	if room != "" && c != nil {
+		if st := c.Store(); st != nil {
+			readOnlyRoom = st.IsRoomRetired(room) || st.IsRoomLeft(room)
+		}
+	}
+	if readOnlyRoom {
+		i.completion = completeReadOnlyRoomCommands(text, pos)
+	} else {
+		i.completion = CompleteWithContext(text, pos, i.mentionable(i.members), i.mentionable(i.nonMembers))
+	}
 }
 
 // EnterEditMode populates the input buffer with the given message body
@@ -762,6 +827,26 @@ func (i *InputModel) SetMembers(members []MemberEntry) {
 	i.members = members
 }
 
+// SetSelfUserID records the local user, who is never offered by
+// @-completion and never extracted as a mention: you cannot @ yourself.
+func (i *InputModel) SetSelfUserID(id string) {
+	i.selfUserID = id
+}
+
+// mentionable is list without the local user.
+func (i InputModel) mentionable(list []MemberEntry) []MemberEntry {
+	if i.selfUserID == "" {
+		return list
+	}
+	out := make([]MemberEntry, 0, len(list))
+	for _, m := range list {
+		if m.UserID != i.selfUserID {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // SetNonMembers updates the non-member pool used by /add completion.
 // Should be called alongside SetMembers when the active context is a
 // group — list of all users the client knows about MINUS those in
@@ -776,7 +861,7 @@ func (i *InputModel) SetNonMembers(nonMembers []MemberEntry) {
 func (i *InputModel) ExtractMentions(body string) []string {
 	var mentions []string
 	seen := make(map[string]bool)
-	for _, m := range i.members {
+	for _, m := range i.mentionable(i.members) {
 		if seen[m.UserID] {
 			continue
 		}
@@ -885,14 +970,9 @@ func (i InputModel) BannerView(width int) string {
 func (i InputModel) View(width int, focused bool) string {
 	var b strings.Builder
 
-	// Completion popup (above input). Stays inside the input.View
-	// output because it's a transient overlay that shows above the
-	// input box only while completing — it doesn't share the
-	// banner's "fixed slot" semantics.
-	if i.completion != nil && i.completion.visible {
-		b.WriteString(i.completion.View(width))
-		b.WriteString("\n")
-	}
+	// The completion popup is NOT drawn here: it is the App's overlay,
+	// anchored just above this box (CompletionView), so the input stays
+	// three rows and the frame never grows by the popup's height.
 
 	// Note: textinput.Width is configured by the App via
 	// InputModel.SetTextInputWidth on tea.WindowSizeMsg — NOT here.
@@ -918,9 +998,9 @@ func (i InputModel) View(width int, focused bool) string {
 		style = inputFocusedStyle
 	}
 
-	// Note: no .Height() on the style. The completion popup, reply
-	// preview, and edit-mode indicator legitimately stack above the
-	// textinput when active, so inner height is variable. The
+	// Note: no .Height() on the style. The reply preview and edit-mode
+	// indicator legitimately stack above the textinput when active, so
+	// inner height is variable (the completion popup is an App overlay). The
 	// textinput.Width clamp above is what stops legit-long-text from
 	// wrapping into multiple rows; that's the root of the user's
 	// "input pushes into the sidebar" report.

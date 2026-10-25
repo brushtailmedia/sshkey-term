@@ -235,8 +235,10 @@ func TestTabCompletion(t *testing.T) {
 		t.Error("/? not found")
 	}
 
+	// A bare @ lists every member (the popup opens from the first character
+	// and narrows as the name is typed; 2026-10-26).
 	comp = Complete("@", 1, members)
-	if comp != nil {
-		t.Error("should not complete single @")
+	if comp == nil || len(comp.items) != len(members) {
+		t.Errorf("a bare @ must list every member, got %v", comp)
 	}
 }
