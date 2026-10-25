@@ -34,7 +34,7 @@ func TestApp_IncrementUnread_SkipsInaccessibleRoomEpoch(t *testing.T) {
 		Type: "message", ID: "m1", From: "alice",
 		Room: "room_x", Epoch: 7, TS: 1,
 	})
-	a.handleServerMessage(ServerMsg{Type: "message", Raw: raw})
+	a.handleServerMessage(a.serverMsg("message", raw))
 
 	if got := a.sidebar.unread["room_x"]; got != 0 {
 		t.Fatalf("inaccessible-epoch room message must not increment unread: unread[room_x] = %d, want 0", got)
@@ -55,7 +55,7 @@ func TestApp_IncrementUnread_AccessibleRoomEpochStillCounts(t *testing.T) {
 		Type: "message", ID: "m1", From: "alice",
 		Room: "room_x", Epoch: 7, TS: 1,
 	})
-	a.handleServerMessage(ServerMsg{Type: "message", Raw: raw})
+	a.handleServerMessage(a.serverMsg("message", raw))
 
 	if got := a.sidebar.unread["room_x"]; got != 1 {
 		t.Fatalf("accessible-epoch room message must increment unread: unread[room_x] = %d, want 1", got)
@@ -74,7 +74,7 @@ func TestApp_IncrementUnread_DMUnchanged(t *testing.T) {
 	raw := mustJSONRaw(t, protocol.DM{
 		Type: "dm", ID: "m1", From: "alice", DM: "dm_x", TS: 1,
 	})
-	a.handleServerMessage(ServerMsg{Type: "dm", Raw: raw})
+	a.handleServerMessage(a.serverMsg("dm", raw))
 
 	if got := a.sidebar.unread["dm_x"]; got != 1 {
 		t.Fatalf("DM path must still increment unread (not gated): unread[dm_x] = %d, want 1", got)
@@ -96,7 +96,7 @@ func TestApp_IncrementUnread_SkipsGroupMessageWithoutWrappedKey(t *testing.T) {
 		Group: "group_x", TS: 1,
 		WrappedKeys: map[string]string{"someone_else": "wk"},
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_message", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_message", raw))
 
 	if got := a.sidebar.unread["group_x"]; got != 0 {
 		t.Fatalf("group message with no wrapped key for self must not increment unread: unread[group_x] = %d, want 0", got)
@@ -120,7 +120,7 @@ func TestApp_IncrementUnread_GroupMessageWithWrappedKeyStillCounts(t *testing.T)
 		Group: "group_x", TS: 1,
 		WrappedKeys: map[string]string{"me": "wk"},
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_message", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_message", raw))
 
 	if got := a.sidebar.unread["group_x"]; got != 1 {
 		t.Fatalf("group message with wrapped key for self must increment unread: unread[group_x] = %d, want 1", got)

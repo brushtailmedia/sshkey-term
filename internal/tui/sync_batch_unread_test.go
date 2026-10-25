@@ -58,13 +58,13 @@ func TestSyncBatchReplayDoesNotIncrementUnread(t *testing.T) {
 			a := minimalAppForServerMsg(t)
 
 			unreadRaw := mustJSONRaw(t, tt.unreadMsg)
-			a.handleServerMessage(ServerMsg{Type: "unread", Raw: unreadRaw})
+			a.handleServerMessage(a.serverMsg("unread", unreadRaw))
 
 			batchRaw := mustJSONRaw(t, protocol.SyncBatch{
 				Type:     "sync_batch",
 				Messages: []json.RawMessage{tt.messageRaw},
 			})
-			a.handleServerMessage(ServerMsg{Type: "sync_batch", Raw: batchRaw})
+			a.handleServerMessage(a.serverMsg("sync_batch", batchRaw))
 
 			if got := a.sidebar.unread[tt.key]; got != tt.unreadMsg.Count {
 				t.Fatalf("unread[%q] = %d, want %d", tt.key, got, tt.unreadMsg.Count)
@@ -103,7 +103,7 @@ func TestLiveMessageStillIncrementsUnreadAfterSyncReplay(t *testing.T) {
 			}),
 		},
 	})
-	a.handleServerMessage(ServerMsg{Type: "sync_batch", Raw: batchRaw})
+	a.handleServerMessage(a.serverMsg("sync_batch", batchRaw))
 	if got := a.sidebar.unread["room_support"]; got != 0 {
 		t.Fatalf("after sync replay unread = %d, want 0", got)
 	}
@@ -115,7 +115,7 @@ func TestLiveMessageStillIncrementsUnreadAfterSyncReplay(t *testing.T) {
 		Room: "room_support",
 		TS:   2,
 	})
-	a.handleServerMessage(ServerMsg{Type: "message", Raw: liveRaw})
+	a.handleServerMessage(a.serverMsg("message", liveRaw))
 
 	if got := a.sidebar.unread["room_support"]; got != 1 {
 		t.Fatalf("after live message unread = %d, want 1", got)

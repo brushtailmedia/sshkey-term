@@ -30,7 +30,7 @@ func TestHistoryResult_RendersDeletedTombstone(t *testing.T) {
 		HasMore:  false,
 		CorrID:   "corr_hist1",
 	})
-	a.handleServerMessage(ServerMsg{Type: "history_result", Raw: raw})
+	a.handleServerMessage(a.serverMsg("history_result", raw))
 
 	if got := len(a.messages.messages); got != 2 {
 		t.Fatalf("expected 2 history rows (live + tombstone), got %d", got)

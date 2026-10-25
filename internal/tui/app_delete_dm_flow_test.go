@@ -57,7 +57,7 @@ func TestApp_DeleteDMConfirmMsgSendsLeaveDMAndDMLeftClearsView(t *testing.T) {
 		Type: "dm_left",
 		DM:   "dm_ab",
 	})
-	updated.handleServerMessage(ServerMsg{Type: "dm_left", Raw: raw})
+	updated.handleServerMessage(updated.serverMsg("dm_left", raw))
 
 	if updated.messages.dm != "" || updated.messages.room != "" || updated.messages.group != "" {
 		t.Fatalf("expected message context cleared after dm_left, got room=%q group=%q dm=%q",

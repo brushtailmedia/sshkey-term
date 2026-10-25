@@ -26,19 +26,7 @@ import (
 // loaded with the viewport at its top and the cursor on the second message.
 func newOfflinePaneApp(t *testing.T) App {
 	t.Helper()
-	c := client.New(client.Config{DeviceID: "dev_test"})
-	client.SetUserIDForTesting(c, "usr_self")
-	a := App{
-		client:    c,
-		connState: ConnStateOffline,
-		width:     100,
-		height:    30,
-		messages:  NewMessages(),
-		input:     NewInput(),
-		statusBar: NewStatusBar(),
-		focus:     FocusMessages,
-	}
-	a.messages.SetContext("room_support", "", "")
+	a := newTestApp(t, withOffline(), withFocus(FocusMessages), withContext("room_support", "", ""))
 	seedMessages(&a.messages, 5)
 	_ = a.messages.View(80, 16, true)
 	if !a.messages.viewport.AtTop() {

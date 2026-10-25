@@ -2,7 +2,6 @@ package tui
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,31 +12,14 @@ import (
 	"github.com/brushtailmedia/sshkey-term/internal/store"
 )
 
+// newEditAppHarness is a LIVE session on a real store, as usr_alice: the
+// offline-browse gates (client.IsConnected + App.connState) must see it as
+// online or every server-bound action under test stops at "not connected".
+// Many files share it; it is the builder with two options.
 func newEditAppHarness(t *testing.T) (App, *store.Store) {
 	t.Helper()
-	st, err := store.OpenUnencrypted(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { st.Close() })
-
-	c := client.New(client.Config{DeviceID: "dev_test"})
-	client.SetStoreForTesting(c, st)
-	client.SetUserIDForTesting(c, "usr_alice")
-	// This harness models a LIVE session: the offline-browse gates
-	// (client.IsConnected + App.connState) must see it as online or every
-	// server-bound action under test stops at "not connected".
-	client.SetConnectedForTesting(c, true)
-
-	a := App{
-		client:    c,
-		connState: ConnStateOnline,
-		messages:  NewMessages(),
-		input:     NewInput(),
-		statusBar: NewStatusBar(),
-		focus:     FocusInput,
-	}
-	return a, st
+	a := newTestApp(t, withStore(), withSelfUser("usr_alice"))
+	return a, a.client.Store()
 }
 
 func TestApp_UpArrowEntersEditModeOnEmpty(t *testing.T) {
@@ -228,7 +210,7 @@ func TestApp_EditWindowExpiredExitsEditMode(t *testing.T) {
 		Message: "window expired",
 	})
 
-	model, _ := a.Update(ServerMsg{Type: "error", Raw: raw})
+	model, _ := a.Update(a.serverMsg("error", raw))
 	updated := model.(App)
 
 	if updated.input.IsEditing() {

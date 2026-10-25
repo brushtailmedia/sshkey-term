@@ -43,19 +43,20 @@ func newRenameApp(t *testing.T) App {
 	return a
 }
 
-func profileMsg(user, name string) ServerMsg {
+// Payloads; the App stamps the frame (a.serverMsg).
+func profileRaw(user, name string) json.RawMessage {
 	raw, _ := json.Marshal(protocol.Profile{Type: "profile", User: user, DisplayName: name})
-	return ServerMsg{Type: "profile", Raw: raw}
+	return raw
 }
 
-func errorMsg(code, message string) ServerMsg {
+func errorRaw(code, message string) json.RawMessage {
 	raw, _ := json.Marshal(protocol.Error{Type: "error", Code: code, Message: message})
-	return ServerMsg{Type: "error", Raw: raw}
+	return raw
 }
 
-func correlatedErrorMsg(code, message, corrID string) ServerMsg {
+func correlatedErrorRaw(code, message, corrID string) json.RawMessage {
 	raw, _ := json.Marshal(protocol.Error{Type: "error", Code: code, Message: message, CorrID: corrID})
-	return ServerMsg{Type: "error", Raw: raw}
+	return raw
 }
 
 func settingsActionIndex(t *testing.T, s SettingsModel, action string) int {
@@ -119,7 +120,7 @@ func TestRename_ProfileEventConfirms(t *testing.T) {
 	a.renameInFlight = true
 	a.renameAttempted = "NewName"
 
-	a.handleServerMessage(profileMsg(renameSelf, "NewName"))
+	a.handleServerMessage(a.serverMsg("profile", profileRaw(renameSelf, "NewName")))
 
 	if a.renameInFlight || a.renameAttempted != "" {
 		t.Errorf("marker not cleared on confirm: inFlight=%v attempted=%q", a.renameInFlight, a.renameAttempted)
@@ -153,7 +154,7 @@ func TestRename_NonMatchingProfileDoesNotConfirm(t *testing.T) {
 			a.renameInFlight = true
 			a.renameAttempted = "NewName"
 
-			a.handleServerMessage(profileMsg(tc.user, tc.dn))
+			a.handleServerMessage(a.serverMsg("profile", profileRaw(tc.user, tc.dn)))
 
 			if !a.renameInFlight || a.renameAttempted != "NewName" {
 				t.Errorf("marker wrongly cleared by a non-matching profile event")
@@ -175,7 +176,7 @@ func TestRename_ErrorWhilePendingShowsInPanelAndReEdits(t *testing.T) {
 			a.renameInFlight = true
 			a.renameAttempted = "Taken"
 
-			a.handleServerMessage(errorMsg(code, "Display name is already in use"))
+			a.handleServerMessage(a.serverMsg("error", errorRaw(code, "Display name is already in use")))
 
 			if a.renameInFlight || a.renameAttempted != "" {
 				t.Errorf("marker not cleared on %s: inFlight=%v", code, a.renameInFlight)
@@ -213,7 +214,7 @@ func TestRename_CorrelatedErrorWhilePendingDoesNotClearRename(t *testing.T) {
 	a.renameAttempted = "NewName"
 	a.settings.SetDisplayNameRenamePending(true)
 
-	a.handleServerMessage(correlatedErrorMsg("rate_limited", "slow down", "corr_ABCDEFGHIJKLMNOPQRSTU"))
+	a.handleServerMessage(a.serverMsg("error", correlatedErrorRaw("rate_limited", "slow down", "corr_ABCDEFGHIJKLMNOPQRSTU")))
 
 	if !a.renameInFlight || a.renameAttempted != "NewName" {
 		t.Fatalf("correlated error cleared rename marker: inFlight=%v attempted=%q", a.renameInFlight, a.renameAttempted)
@@ -236,7 +237,7 @@ func TestRename_ErrorNoMarkerDoesNotTouchSettings(t *testing.T) {
 	a := newRenameApp(t)
 	// renameInFlight is false (no rename submitted).
 
-	a.handleServerMessage(errorMsg("username_taken", "Display name is already in use"))
+	a.handleServerMessage(a.serverMsg("error", errorRaw("username_taken", "Display name is already in use")))
 
 	if a.renameInFlight {
 		t.Error("an error with no rename in flight should not set the marker")

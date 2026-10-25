@@ -65,8 +65,8 @@ func TestGroupRename_NoDuplicateSystemMessage(t *testing.T) {
 	grRaw, _ := json.Marshal(protocol.GroupRenamed{
 		Type: "group_renamed", Group: "g_x", Name: "hello", RenamedBy: "usr_admin",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_event", Raw: geRaw})
-	a.handleServerMessage(ServerMsg{Type: "group_renamed", Raw: grRaw})
+	a.handleServerMessage(a.serverMsg("group_event", geRaw))
+	a.handleServerMessage(a.serverMsg("group_renamed", grRaw))
 
 	got := countSystemMessagesContaining(a, "renamed the group")
 	if got != 1 {
@@ -93,7 +93,7 @@ func TestGroupRename_LegacyEventStillUpdatesSidebar(t *testing.T) {
 	grRaw, _ := json.Marshal(protocol.GroupRenamed{
 		Type: "group_renamed", Group: "g_x", Name: "NewName", RenamedBy: "usr_admin",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_renamed", Raw: grRaw})
+	a.handleServerMessage(a.serverMsg("group_renamed", grRaw))
 
 	var got string
 	for _, g := range a.sidebar.groups {
@@ -122,8 +122,8 @@ func TestGroupRename_QuietGroupEventStillNoDuplicate(t *testing.T) {
 	grRaw, _ := json.Marshal(protocol.GroupRenamed{
 		Type: "group_renamed", Group: "g_x", Name: "hello", RenamedBy: "usr_admin",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_event", Raw: geRaw})
-	a.handleServerMessage(ServerMsg{Type: "group_renamed", Raw: grRaw})
+	a.handleServerMessage(a.serverMsg("group_event", geRaw))
+	a.handleServerMessage(a.serverMsg("group_renamed", grRaw))
 
 	if got := countSystemMessagesContaining(a, "renamed the group"); got != 0 {
 		t.Fatalf("Quiet rename produced %d system messages, want 0", got)

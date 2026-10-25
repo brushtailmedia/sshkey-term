@@ -39,7 +39,7 @@ func TestGroupLeftHandler_AdminReasonShowsRemovedStatus(t *testing.T) {
 		Group:  "group_kick",
 		Reason: "admin",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_left", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_left", raw))
 
 	if a.statusBar.errorMsg == "" {
 		t.Fatal("expected status bar to be set after group_left{admin}")
@@ -75,7 +75,7 @@ func TestGroupLeftHandler_EmptyReasonShowsLeftStatus(t *testing.T) {
 		Group:  "group_self",
 		Reason: "",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_left", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_left", raw))
 
 	if a.statusBar.errorMsg != "Left group" {
 		t.Errorf("self-leave should show 'Left group', got %q", a.statusBar.errorMsg)
@@ -96,7 +96,7 @@ func TestGroupLeftHandler_AdminReasonFallsBackToGroupID(t *testing.T) {
 		Group:  "group_unknown",
 		Reason: "admin",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_left", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_left", raw))
 
 	if !strings.Contains(a.statusBar.errorMsg, "group_unknown") {
 		t.Errorf("status bar should fall back to group ID, got %q",
@@ -126,7 +126,7 @@ func TestGroupEventHandler_AdminLeaveShowsRemovedSystemMessage(t *testing.T) {
 		User:   "bob",
 		Reason: "admin",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_event", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_event", raw))
 
 	// The handler should have added a system message
 	if len(a.messages.messages) != 1 {
@@ -161,7 +161,7 @@ func TestGroupEventHandler_RetirementLeaveShowsRetiredSystemMessage(t *testing.T
 		User:   "carol",
 		Reason: "retirement",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_event", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_event", raw))
 
 	if len(a.messages.messages) != 1 {
 		t.Fatalf("expected 1 system message, got %d", len(a.messages.messages))
@@ -189,7 +189,7 @@ func TestGroupEventHandler_EmptyReasonShowsLeftSystemMessage(t *testing.T) {
 		Event: "leave",
 		User:  "dave",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_event", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_event", raw))
 
 	if len(a.messages.messages) != 1 {
 		t.Fatalf("expected 1 system message, got %d", len(a.messages.messages))
@@ -219,7 +219,7 @@ func TestGroupEventHandler_NotActiveContextDoesNotAddMessage(t *testing.T) {
 		User:   "bob",
 		Reason: "admin",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_event", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_event", raw))
 
 	if len(a.messages.messages) != 0 {
 		t.Errorf("expected no system message in inactive context, got %d",

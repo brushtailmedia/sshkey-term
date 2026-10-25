@@ -148,7 +148,7 @@ func TestApp_ServerReaction_ReconcilesFromStore(t *testing.T) {
 		Signature:  "sig",
 	})
 
-	model, _ := a.Update(ServerMsg{Type: "reaction", Raw: raw})
+	model, _ := a.Update(a.serverMsg("reaction", raw))
 	updated := model.(App)
 
 	counts := updated.messages.messages[0].DisplayReactions()

@@ -45,7 +45,7 @@ func TestHistoryError_ActiveCorrelatedAbortsAndDrops(t *testing.T) {
 	c.SendQueue().MarkSending("corr_A")
 
 	raw := mustJSONRaw(t, protocol.Error{Type: "error", Code: "invalid_cursor", CorrID: "corr_A"})
-	a.handleServerMessage(ServerMsg{Type: "error", Raw: raw})
+	a.handleServerMessage(a.serverMsg("error", raw))
 
 	if a.messages.loadingHistory || a.messages.activeHistoryCorrID != "" {
 		t.Errorf("active history error must abort the load: loading=%v corr=%q",
@@ -71,7 +71,7 @@ func TestHistoryError_StaleCorrelatedDropsButKeepsActive(t *testing.T) {
 	c.SendQueue().MarkSending("corr_old")
 
 	raw := mustJSONRaw(t, protocol.Error{Type: "error", Code: "invalid_cursor", CorrID: "corr_old"})
-	a.handleServerMessage(ServerMsg{Type: "error", Raw: raw})
+	a.handleServerMessage(a.serverMsg("error", raw))
 
 	if c.SendQueue().Get("corr_old") != nil {
 		t.Error("stale history error must still drop its own queue entry")

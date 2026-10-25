@@ -94,7 +94,7 @@ func TestRoomEventTopicRendersInlineSystemMessage(t *testing.T) {
 		t.Fatalf("marshal room_event: %v", err)
 	}
 
-	a.handleServerMessage(ServerMsg{Type: "room_event", Raw: raw})
+	a.handleServerMessage(a.serverMsg("room_event", raw))
 
 	msgs := a.messages.messages
 	if len(msgs) == 0 {

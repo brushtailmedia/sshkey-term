@@ -41,7 +41,7 @@ func TestStatusBarIdentity_UpdatesFromProfileAfterConnectFallback(t *testing.T) 
 		t.Fatalf("marshal profile: %v", err)
 	}
 
-	model, _ := a.Update(ServerMsg{Type: "profile", Raw: raw})
+	model, _ := a.Update(a.serverMsg("profile", raw))
 	updated := model.(App)
 
 	if updated.statusBar.username != "chicks" {

@@ -186,7 +186,7 @@ func TestApp_MemberPanelMessageActionFocusesCreatedDM(t *testing.T) {
 		DM:      "dm_new",
 		Members: []string{"usr_alice", "usr_bob"},
 	})
-	updated.handleServerMessage(ServerMsg{Type: "dm_created", Raw: raw})
+	updated.handleServerMessage(updated.serverMsg("dm_created", raw))
 
 	if updated.messages.dm != "dm_new" {
 		t.Fatalf("active dm = %q, want dm_new", updated.messages.dm)
@@ -233,7 +233,7 @@ func TestApp_UserInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
 		DM:      "dm_new",
 		Members: []string{"usr_alice", "usr_bob"},
 	})
-	updated.handleServerMessage(ServerMsg{Type: "dm_created", Raw: raw})
+	updated.handleServerMessage(updated.serverMsg("dm_created", raw))
 
 	if updated.messages.dm != "dm_new" {
 		t.Fatalf("active dm = %q, want dm_new (identity-panel message should switch to the DM)", updated.messages.dm)
@@ -267,7 +267,7 @@ func TestApp_RoomInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
 		DM:      "dm_new",
 		Members: []string{"usr_alice", "usr_bob"},
 	})
-	updated.handleServerMessage(ServerMsg{Type: "dm_created", Raw: raw})
+	updated.handleServerMessage(updated.serverMsg("dm_created", raw))
 
 	if updated.messages.dm != "dm_new" {
 		t.Fatalf("active dm = %q, want dm_new", updated.messages.dm)
@@ -309,7 +309,7 @@ func TestApp_GroupInfoPanelMessageActionFocusesCreatedDM(t *testing.T) {
 		DM:      "dm_new",
 		Members: []string{"usr_alice", "usr_bob"},
 	})
-	updated.handleServerMessage(ServerMsg{Type: "dm_created", Raw: raw})
+	updated.handleServerMessage(updated.serverMsg("dm_created", raw))
 
 	if updated.messages.dm != "dm_new" {
 		t.Fatalf("active dm = %q, want dm_new", updated.messages.dm)
@@ -361,7 +361,7 @@ func TestApp_MemberPanelCreateGroupFocusesCreatedGroup(t *testing.T) {
 		Admins:  []string{"usr_alice"},
 		Name:    "Project",
 	})
-	updated.handleServerMessage(ServerMsg{Type: "group_created", Raw: raw})
+	updated.handleServerMessage(updated.serverMsg("group_created", raw))
 
 	if updated.messages.group != "group_new" {
 		t.Fatalf("active group = %q, want group_new", updated.messages.group)
@@ -393,7 +393,7 @@ func TestApp_DmCreatedDoesNotStealFocusWithoutPendingIntent(t *testing.T) {
 		DM:      "dm_incoming",
 		Members: []string{"usr_alice", "usr_bob"},
 	})
-	a.handleServerMessage(ServerMsg{Type: "dm_created", Raw: raw})
+	a.handleServerMessage(a.serverMsg("dm_created", raw))
 
 	if a.messages.room != "room_prev" {
 		t.Fatalf("room context changed unexpectedly to %q", a.messages.room)
@@ -421,7 +421,7 @@ func TestApp_GroupCreatedDoesNotStealFocusWithoutPendingIntent(t *testing.T) {
 		Admins:  []string{"usr_bob"},
 		Name:    "Incoming",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_created", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_created", raw))
 
 	if a.messages.room != "room_prev" {
 		t.Fatalf("room context changed unexpectedly to %q", a.messages.room)
@@ -564,7 +564,7 @@ func TestApp_PresenceMessageUpdatesOpenMemberPanelStatusInPlace(t *testing.T) {
 		Status:     "online",
 		StatusText: StatusAway,
 	})
-	a.handleServerMessage(ServerMsg{Type: "presence", Raw: raw})
+	a.handleServerMessage(a.serverMsg("presence", raw))
 
 	if a.memberPanel.members[1].Status != StatusAway {
 		t.Fatalf("member status = %q, want %q", a.memberPanel.members[1].Status, StatusAway)

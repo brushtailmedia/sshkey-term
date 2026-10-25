@@ -5,8 +5,6 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-
-	"github.com/brushtailmedia/sshkey-term/internal/client"
 )
 
 func emojiPickerRunes(s string) tea.KeyMsg {
@@ -403,7 +401,7 @@ func TestEmojiPicker_LeakedMouseEscapeDoesNotEnterSearch(t *testing.T) {
 }
 
 func TestAppEmojiPicker_RendersAsOverlayWithShell(t *testing.T) {
-	a := newEmojiOverlayTestApp()
+	a := newEmojiOverlayTestApp(t)
 	a.emojiPicker.Show(DisplayMessage{ID: "msg_1"}, "")
 
 	out := stripANSI(a.View())
@@ -416,7 +414,7 @@ func TestAppEmojiPicker_RendersAsOverlayWithShell(t *testing.T) {
 
 func TestAppEmojiPicker_ClearsKittyPreviewLayer(t *testing.T) {
 	withRastermProtocol(t, rastermKitty)
-	a := newEmojiOverlayTestApp()
+	a := newEmojiOverlayTestApp(t)
 	a.emojiPicker.Show(DisplayMessage{ID: "msg_1"}, "")
 
 	out := a.View()
@@ -428,23 +426,12 @@ func TestAppEmojiPicker_ClearsKittyPreviewLayer(t *testing.T) {
 	}
 }
 
-func newEmojiOverlayTestApp() App {
-	a := App{
-		connState:   ConnStateOnline,
-		client:      client.New(client.Config{}), // the shell renders only with a usable client (R16)
-		width:       100,
-		height:      30,
-		sidebar:     NewSidebar(),
-		messages:    NewMessages(),
-		input:       NewInput(),
-		statusBar:   NewStatusBar(),
-		emojiPicker: NewEmojiPicker(),
-		roomPins:    make(map[string][]string),
-		muted:       make(map[string]bool),
-	}
+// newEmojiOverlayTestApp is a live session in general with the sidebar
+// listing the room, so the shell around the picker renders (R16).
+func newEmojiOverlayTestApp(t *testing.T) App {
+	t.Helper()
+	a := newTestApp(t, withContext("general", "", ""))
 	a.sidebar.SetRooms([]string{"general"})
-	a.messages.SetContext("general", "", "")
-	a.statusBar.SetConnected(true)
 	return a
 }
 

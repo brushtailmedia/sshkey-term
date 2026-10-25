@@ -43,14 +43,14 @@ func TestPinnedBar_ScopedPerRoomOnSwitch(t *testing.T) {
 		Room:     "room_a",
 		Messages: []string{"msg_a1"},
 	})
-	a.handleServerMessage(ServerMsg{Type: "pins", Raw: rawA})
+	a.handleServerMessage(a.serverMsg("pins", rawA))
 
 	rawB, _ := json.Marshal(protocol.Pins{
 		Type:     "pins",
 		Room:     "room_b",
 		Messages: []string{"msg_b1"},
 	})
-	a.handleServerMessage(ServerMsg{Type: "pins", Raw: rawB})
+	a.handleServerMessage(a.serverMsg("pins", rawB))
 
 	// Active room_a should still show room_a pins.
 	if got := a.pinnedBar.PinIDs(); !reflect.DeepEqual(got, []string{"msg_a1"}) {
@@ -98,7 +98,7 @@ func TestPinnedBar_PinsPayloadUsesResolvedDisplayName(t *testing.T) {
 		t.Fatalf("marshal pins: %v", err)
 	}
 
-	a.handleServerMessage(ServerMsg{Type: "pins", Raw: rawPins})
+	a.handleServerMessage(a.serverMsg("pins", rawPins))
 	if !a.pinnedBar.HasPins() {
 		t.Fatal("expected pinned bar to have pins")
 	}

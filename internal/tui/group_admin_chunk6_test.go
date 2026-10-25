@@ -585,7 +585,7 @@ func TestGroupEventHandler_RemovedWithByFieldShowsSpecificAdmin(t *testing.T) {
 		By:     "alice",
 		Reason: "removed",
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_event", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_event", raw))
 
 	if len(a.messages.messages) != 1 {
 		t.Fatalf("expected 1 system message, got %d", len(a.messages.messages))
@@ -608,7 +608,7 @@ func TestGroupEventHandler_QuietSuppressesSystemMessage(t *testing.T) {
 		By:    "alice",
 		Quiet: true,
 	})
-	a.handleServerMessage(ServerMsg{Type: "group_event", Raw: raw})
+	a.handleServerMessage(a.serverMsg("group_event", raw))
 
 	if len(a.messages.messages) != 0 {
 		t.Errorf("quiet event should not render a system message, got %d", len(a.messages.messages))

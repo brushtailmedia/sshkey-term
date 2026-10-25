@@ -4,32 +4,13 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-
-	"github.com/brushtailmedia/sshkey-term/internal/client"
 )
 
 // newPaneThreadApp is a live-session App with the nested fixture loaded in
 // the pane, focus on the pane, and no overlay open.
 func newPaneThreadApp(t *testing.T) App {
 	t.Helper()
-	c := client.New(client.Config{DeviceID: "dev_test"})
-	client.SetUserIDForTesting(c, "usr_self")
-	client.SetConnectedForTesting(c, true)
-	a := App{
-		client:      c,
-		connState:   ConnStateOnline,
-		width:       100,
-		height:      30,
-		messages:    NewMessages(),
-		input:       NewInput(),
-		statusBar:   NewStatusBar(),
-		emojiPicker: NewEmojiPicker(),
-		focus:       FocusMessages,
-	}
-	a.messages.SetContext("general", "", "")
-	a.messages.messages = nestedMessages()
-	a.messages.cursor = 0 // pane on the root
-	return a
+	return newTestApp(t, withFocus(FocusMessages), withContext("general", "", ""), withMessages(nestedMessages()))
 }
 
 // newThreadActionApp is newPaneThreadApp with the thread view open on

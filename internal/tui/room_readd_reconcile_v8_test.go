@@ -75,10 +75,10 @@ func TestRoomListReAdd_ClearsStaleSidebarGrey(t *testing.T) {
 		t.Fatalf("simulate client-layer clear: %v", err)
 	}
 
-	a.handleServerMessage(ServerMsg{Type: "room_list", Raw: mustJSONRaw(t, protocol.RoomList{
+	a.handleServerMessage(a.serverMsg("room_list", mustJSONRaw(t, protocol.RoomList{
 		Type:  "room_list",
 		Rooms: []protocol.RoomInfo{{ID: "rm_a", Name: "Room A"}},
-	})})
+	})))
 
 	if a.sidebar.IsRoomLeft("rm_a") {
 		t.Error("re-added room: sidebar grey should be cleared (Gap A else)")
@@ -112,10 +112,10 @@ func TestRoomListReAdd_ReactivatesViewedRoomComposePane(t *testing.T) {
 		t.Fatalf("simulate client-layer clear: %v", err)
 	}
 
-	a.handleServerMessage(ServerMsg{Type: "room_list", Raw: mustJSONRaw(t, protocol.RoomList{
+	a.handleServerMessage(a.serverMsg("room_list", mustJSONRaw(t, protocol.RoomList{
 		Type:  "room_list",
 		Rooms: []protocol.RoomInfo{{ID: "rm_a", Name: "Room A"}},
-	})})
+	})))
 
 	if a.messages.IsLeft() {
 		t.Error("re-added room being viewed: messages pane should become writable (Gap B)")
@@ -137,10 +137,10 @@ func TestRoomList_StillLeftRoomStaysGreyed(t *testing.T) {
 
 	// A fresh room_list that does NOT contain rm_gone (server dropped it after
 	// the leave). It is merged back from GetLeftRooms and must stay greyed.
-	a.handleServerMessage(ServerMsg{Type: "room_list", Raw: mustJSONRaw(t, protocol.RoomList{
+	a.handleServerMessage(a.serverMsg("room_list", mustJSONRaw(t, protocol.RoomList{
 		Type:  "room_list",
 		Rooms: nil,
-	})})
+	})))
 
 	if !a.sidebar.IsRoomLeft("rm_gone") {
 		t.Error("still-left room (not in server list) must stay greyed")

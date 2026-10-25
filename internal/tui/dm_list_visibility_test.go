@@ -28,7 +28,7 @@ func TestDMListFiltersByHiddenNotLeftAt(t *testing.T) {
 		},
 	})
 
-	a.handleServerMessage(ServerMsg{Type: "dm_list", Raw: raw})
+	a.handleServerMessage(a.serverMsg("dm_list", raw))
 
 	if len(a.sidebar.dms) != 1 {
 		t.Fatalf("expected 1 visible DM, got %d", len(a.sidebar.dms))

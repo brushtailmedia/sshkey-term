@@ -23,7 +23,7 @@ func TestRoomEventJoin_NotRenderedAsSystemMessage(t *testing.T) {
 		User:  "usr_x",
 		By:    "os:0",
 	})
-	a.handleServerMessage(ServerMsg{Type: "room_event", Raw: raw})
+	a.handleServerMessage(a.serverMsg("room_event", raw))
 
 	if got := len(a.messages.messages) - before; got != 0 {
 		t.Errorf("room_event{join} should render no system message, got %d new", got)
@@ -42,7 +42,7 @@ func TestRoomEventLeave_StillRendersSystemMessage(t *testing.T) {
 		User:   "usr_x",
 		Reason: "removed",
 	})
-	a.handleServerMessage(ServerMsg{Type: "room_event", Raw: raw})
+	a.handleServerMessage(a.serverMsg("room_event", raw))
 
 	if got := len(a.messages.messages) - before; got != 1 {
 		t.Errorf("room_event{leave} should still render exactly one system message, got %d new", got)

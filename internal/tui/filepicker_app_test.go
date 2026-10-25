@@ -23,8 +23,6 @@ func newFilePickerApp(t *testing.T) (App, string) {
 	t.Setenv("HOME", root)
 	a, st := newEditAppHarness(t)
 	a.width, a.height = 100, 40
-	a.sidebar = NewSidebar()
-	a.memberPanel = NewMemberPanel()
 	a.messages.SetContext("room_x", "", "")
 	if err := st.UpsertRoom("room_x", "general", "", 2); err != nil {
 		t.Fatal(err)

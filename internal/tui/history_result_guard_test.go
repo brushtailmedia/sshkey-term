@@ -25,7 +25,7 @@ func TestHistoryResult_MatchingAppliesAndReleasesCorrID(t *testing.T) {
 		Type: "history_result", Room: "room_x",
 		Messages: []json.RawMessage{m1}, HasMore: true, CorrID: "corr_A",
 	})
-	a.handleServerMessage(ServerMsg{Type: "history_result", Raw: raw})
+	a.handleServerMessage(a.serverMsg("history_result", raw))
 
 	if len(a.messages.messages) != 1 {
 		t.Fatalf("matching result must be applied: got %d messages", len(a.messages.messages))
@@ -52,7 +52,7 @@ func TestHistoryResult_StaleCorrIDIgnored(t *testing.T) {
 		Type: "history_result", Room: "room_x",
 		Messages: []json.RawMessage{m}, HasMore: false, CorrID: "corr_old", // stale
 	})
-	a.handleServerMessage(ServerMsg{Type: "history_result", Raw: raw})
+	a.handleServerMessage(a.serverMsg("history_result", raw))
 
 	if len(a.messages.messages) != 0 {
 		t.Errorf("stale-corr_id result must not render into the pane: got %d messages", len(a.messages.messages))
@@ -78,7 +78,7 @@ func TestHistoryResult_WrongContextIgnored(t *testing.T) {
 		Type: "history_result", Room: "room_y", // different room
 		Messages: []json.RawMessage{m}, HasMore: false, CorrID: "corr_A",
 	})
-	a.handleServerMessage(ServerMsg{Type: "history_result", Raw: raw})
+	a.handleServerMessage(a.serverMsg("history_result", raw))
 
 	if len(a.messages.messages) != 0 {
 		t.Errorf("wrong-context result must not render into the active pane: got %d messages", len(a.messages.messages))

@@ -13,35 +13,28 @@ import (
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
+// newNavModeAppHarness is the edit harness (live session, real store,
+// usr_alice) built with two configured servers and Home selected, and a
+// nav popup too slow to fire mid-test.
 func newNavModeAppHarness(t *testing.T) App {
 	t.Helper()
-
-	a, _ := newEditAppHarness(t)
-	a.quickSwitch = NewQuickSwitch()
-	a.newConv = NewNewConv()
-	a.memberPanel = NewMemberPanel()
-	a.search = NewSearch()
-	a.settings = NewSettings()
-	a.statusBar = NewStatusBar()
-	a.navModePopupDelay = 2 * time.Second
-	a.configDir = t.TempDir()
-	a.addServer = NewAddServerWithConfigDir(a.configDir, nil)
-	a.appConfig = &config.Config{
+	configDir := t.TempDir()
+	appCfg := &config.Config{
 		Device: config.DeviceConfig{ID: "dev_nav_mode"},
 		Servers: []config.ServerConfig{
 			{Name: "Home", Host: "127.0.0.1", Port: 2222},
 			{Name: "Work", Host: "127.0.0.2", Port: 2223},
 		},
 	}
-	a.serverIdx = 0
-	a.cfg = client.Config{
+	cfg := client.Config{
 		Host:     "127.0.0.1",
 		Port:     2222,
 		KeyPath:  "~/.ssh/id_ed25519",
 		DeviceID: "dev_nav_mode",
-		DataDir:  filepath.Join(a.configDir, "127.0.0.1"),
+		DataDir:  filepath.Join(configDir, "127.0.0.1"),
 	}
-
+	a := newTestApp(t, withConfig(cfg, appCfg, configDir, 0), withStore(), withSelfUser("usr_alice"))
+	a.navModePopupDelay = 2 * time.Second
 	return a
 }
 

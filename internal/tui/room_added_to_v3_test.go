@@ -24,7 +24,7 @@ func TestRoomAddedToTUI_AddsToSidebarWithoutStealingFocus(t *testing.T) {
 		Members: []string{"usr_self", "usr_a"},
 		AddedBy: "os:1000",
 	})
-	a.handleServerMessage(ServerMsg{Type: "room_added_to", Raw: raw})
+	a.handleServerMessage(a.serverMsg("room_added_to", raw))
 
 	found := false
 	for _, r := range a.sidebar.rooms {
@@ -55,7 +55,7 @@ func TestRoomAddedToTUI_RealUserActorLabel(t *testing.T) {
 		Members: []string{"usr_self"},
 		AddedBy: "usr_admin",
 	})
-	a.handleServerMessage(ServerMsg{Type: "room_added_to", Raw: raw})
+	a.handleServerMessage(a.serverMsg("room_added_to", raw))
 
 	if !strings.Contains(a.statusBar.errorMsg, "Admin Alice added you to 'X'") {
 		t.Errorf("status toast = %q, want resolved display name", a.statusBar.errorMsg)
@@ -91,7 +91,7 @@ func TestRoomAddedToTUI_ReactivatesViewedReaddedRoom(t *testing.T) {
 		Members: []string{"usr_self", "usr_a"},
 		AddedBy: "os:1000",
 	})
-	a.handleServerMessage(ServerMsg{Type: "room_added_to", Raw: raw})
+	a.handleServerMessage(a.serverMsg("room_added_to", raw))
 
 	if a.sidebar.IsRoomLeft("rm_back") {
 		t.Error("sidebar grey should be cleared for the re-added room")
