@@ -68,7 +68,7 @@ After `Ctrl+g`, a which-key popup lists these continuations once you pause (300 
 | `t` | Open the thread view on the whole thread the selected message belongs to (it walks up to the top-level message; the cursor lands on the selected message), as a tree three levels deep with who reacted with what; deeper replies are hidden behind a gray `↳ N more replies` stub drawn beneath the row at the cap, where the first hidden reply would sit. Inside it: `t` re-opens the view rooted at the highlighted reply (any reply that has replies — the hidden ones become visible); `Enter` closes the view and goes to the highlighted message in the pane; on the `..` row at the top of a nested view both `t` and `Enter` open the parent thread; `r` replies to the highlighted message and `e` opens the emoji picker on it, both closing the view first so the input (or the picker) is in front; `Esc` or `q` closes |
 | `o` | Open attachment in system viewer |
 | `s` | Save attachment to disk |
-| `Enter` | Open context menu for selected message |
+| `Enter` | Open the context menu for the selected message (Reply; Edit on your most recent message in the conversation — the only one the server accepts an edit for; React; remove a reaction; Thread when the message has replies, is a reply or has reactions; Pin/Unpin; Open/Save attachment; Delete; Copy). `j`/`k` move, `Enter` chooses, `q` or `Esc` closes |
 
 ### Member Panel Admin Shortcuts (when a member is selected in group context)
 

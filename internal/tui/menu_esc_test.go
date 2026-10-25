@@ -18,8 +18,7 @@ func TestApp_EscDismissesContextMenu(t *testing.T) {
 	a.contextMenu.Show(
 		DisplayMessage{ID: "m1", FromID: "u1", From: "alice", Body: "hi"},
 		5, 5,
-		false, false, false,
-		nil, nil,
+		ContextMenuOptions{},
 	)
 	if !a.contextMenu.IsVisible() {
 		t.Fatal("precondition: contextMenu should be visible after Show")
@@ -82,8 +81,7 @@ func TestApp_CtrlCQuitsThroughContextMenu(t *testing.T) {
 	a.contextMenu.Show(
 		DisplayMessage{ID: "m1", FromID: "u1", From: "alice", Body: "hi"},
 		5, 5,
-		false, false, false,
-		nil, nil,
+		ContextMenuOptions{},
 	)
 
 	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
@@ -104,8 +102,7 @@ func TestApp_NonEscRoutesToContextMenuUpdate(t *testing.T) {
 	a.contextMenu.Show(
 		DisplayMessage{ID: "m1", FromID: "u1", From: "alice", Body: "hi"},
 		5, 5,
-		false, false, false,
-		nil, nil,
+		ContextMenuOptions{},
 	)
 	cursorBefore := a.contextMenu.cursor
 

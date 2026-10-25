@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,11 +27,33 @@ func NewContextMenu() ContextMenuModel {
 	return ContextMenuModel{}
 }
 
-// Show displays the context menu for the given message. myReactionEmojis is
-// the set of emojis the current user has already reacted with on this
-// message — each one gets a "Remove reaction: <emoji>" menu item, which on
-// activation sends unreact for that specific emoji.
-func (c *ContextMenuModel) Show(msg DisplayMessage, x, y int, isOwnMessage, isAdmin, isRoom bool, pinnedIDs []string, myReactionEmojis []string) {
+// ContextMenuOptions is what the menu needs to know about the message and
+// the viewer to decide which items to offer.
+type ContextMenuOptions struct {
+	IsOwnMessage bool
+	IsAdmin      bool
+	IsRoom       bool
+	PinnedIDs    []string
+	// MyReactionEmojis is the set of emojis the current user has already
+	// reacted with on this message — each one gets a "Remove reaction:
+	// <emoji>" item, which on activation sends unreact for that specific
+	// emoji (explicit per-emoji removal rather than toggle-via-re-picking;
+	// see PROTOCOL.md Reactions section).
+	MyReactionEmojis []string
+	// ThreadAvailable: the thread view has something to show for this
+	// message — it has replies, is a reply, or has reactions (the pane's
+	// t=thread rule). ThreadReplies is the count under it, for the label.
+	ThreadAvailable bool
+	ThreadReplies   int
+	// CanEdit: this is the ONE message the server will accept an edit for
+	// — the viewer's most recent non-deleted message in an active
+	// conversation (edit_not_most_recent otherwise). The App decides.
+	CanEdit bool
+}
+
+// Show displays the context menu for the given message at screen position
+// (x, y), offering the items opts allows.
+func (c *ContextMenuModel) Show(msg DisplayMessage, x, y int, opts ContextMenuOptions) {
 	c.visible = true
 	c.msg = msg
 	c.cursor = 0
@@ -39,12 +62,15 @@ func (c *ContextMenuModel) Show(msg DisplayMessage, x, y int, isOwnMessage, isAd
 
 	c.items = nil
 	c.items = append(c.items, ContextMenuItem{Label: "Reply", Action: "reply"})
+	// Edit sits with Reply: both go to the composer. Offered only on the
+	// one eligible message, so the menu never lists an edit the server
+	// would refuse. (The Up-arrow shortcut on an empty input is the fast
+	// path; this is the discoverable one.)
+	if opts.CanEdit {
+		c.items = append(c.items, ContextMenuItem{Label: "Edit", Action: "edit"})
+	}
 	c.items = append(c.items, ContextMenuItem{Label: "React", Action: "react"})
-
-	// One "Remove reaction: <emoji>" item per emoji the current user has
-	// reacted with. Explicit per-emoji removal rather than toggle-via-
-	// re-picking (see PROTOCOL.md Reactions section).
-	for _, emoji := range myReactionEmojis {
+	for _, emoji := range opts.MyReactionEmojis {
 		c.items = append(c.items, ContextMenuItem{
 			Label:  "Remove reaction: " + emoji,
 			Action: "unreact",
@@ -52,9 +78,22 @@ func (c *ContextMenuModel) Show(msg DisplayMessage, x, y int, isOwnMessage, isAd
 		})
 	}
 
-	if isRoom {
+	// Thread — the menu's form of the pane's `t`, offered under the same
+	// rule as the pane's t=thread hint, with the reply count when there is
+	// one. It sits with the read actions, above pin and delete. No root is
+	// sent: the App resolves the thread's top-level message as the pane's
+	// `t` does.
+	if opts.ThreadAvailable {
+		label := "Thread"
+		if n := opts.ThreadReplies; n > 0 {
+			label = fmt.Sprintf("Thread (%d %s)", n, pluralize(n, "reply", "replies"))
+		}
+		c.items = append(c.items, ContextMenuItem{Label: label, Action: "thread"})
+	}
+
+	if opts.IsRoom {
 		isPinned := false
-		for _, id := range pinnedIDs {
+		for _, id := range opts.PinnedIDs {
 			if id == msg.ID {
 				isPinned = true
 				break
@@ -74,7 +113,7 @@ func (c *ContextMenuModel) Show(msg DisplayMessage, x, y int, isOwnMessage, isAd
 	}
 
 	// Delete — own messages or admin in rooms
-	if isOwnMessage || (isAdmin && isRoom) {
+	if opts.IsOwnMessage || (opts.IsAdmin && opts.IsRoom) {
 		c.items = append(c.items, ContextMenuItem{Label: "Delete", Action: "delete"})
 	}
 
@@ -98,7 +137,10 @@ func (c ContextMenuModel) AnchorXY() (int, int) {
 
 func (c ContextMenuModel) Update(msg tea.KeyMsg) (ContextMenuModel, tea.Cmd) {
 	switch msg.String() {
-	case "esc":
+	case "esc", "q":
+		// `q` closes any surface without a text field (the owner's
+		// preference; see q-closes-everywhere.md) — the menu has none.
+		// The App-level guard for this menu accepts the same two keys.
 		c.Hide()
 		return c, nil
 	case "up", "k":

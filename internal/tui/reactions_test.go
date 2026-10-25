@@ -247,7 +247,7 @@ func TestContextMenu_ShowsRemoveReactionItems(t *testing.T) {
 	c := NewContextMenu()
 	msg := DisplayMessage{ID: "msg_1", From: "alice", Body: "hi"}
 	myEmojis := []string{"👍", "🎉"}
-	c.Show(msg, 0, 0, false, false, false, nil, myEmojis)
+	c.Show(msg, 0, 0, ContextMenuOptions{MyReactionEmojis: myEmojis})
 
 	var removeItems []ContextMenuItem
 	for _, item := range c.items {
@@ -271,7 +271,7 @@ func TestContextMenu_ShowsRemoveReactionItems(t *testing.T) {
 func TestContextMenu_NoRemoveItemsIfNoReactions(t *testing.T) {
 	c := NewContextMenu()
 	msg := DisplayMessage{ID: "msg_1"}
-	c.Show(msg, 0, 0, false, false, false, nil, nil)
+	c.Show(msg, 0, 0, ContextMenuOptions{})
 
 	for _, item := range c.items {
 		if item.Action == "unreact" {
@@ -354,7 +354,7 @@ func TestMessages_EKeyEmitsReact(t *testing.T) {
 func TestContextMenu_UnreactActionEmitsData(t *testing.T) {
 	c := NewContextMenu()
 	msg := DisplayMessage{ID: "msg_1"}
-	c.Show(msg, 0, 0, false, false, false, nil, []string{"👍"})
+	c.Show(msg, 0, 0, ContextMenuOptions{MyReactionEmojis: []string{"👍"}})
 
 	// Cursor starts at 0 (Reply). Skip Reply + React, cursor=2 is unreact.
 	c.cursor = 2
@@ -377,7 +377,7 @@ func TestContextMenu_UnreactActionEmitsData(t *testing.T) {
 func TestContextMenu_PinnedRoomUsesUnpinAction(t *testing.T) {
 	c := NewContextMenu()
 	msg := DisplayMessage{ID: "msg_1"}
-	c.Show(msg, 0, 0, false, false, true, []string{"msg_1"}, nil)
+	c.Show(msg, 0, 0, ContextMenuOptions{IsRoom: true, PinnedIDs: []string{"msg_1"}})
 
 	found := false
 	for _, item := range c.items {

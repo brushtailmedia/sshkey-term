@@ -416,6 +416,24 @@ func replyCountMarker(n int) string {
 	return timestampStyle.Render(fmt.Sprintf("  · %d %s", n, pluralize(n, "reply", "replies")))
 }
 
+// ThreadInfo reports whether the thread view has something to show for a
+// message — it has replies, is a reply, or has reactions, the same rule as
+// the pane's t=thread hint — and how many replies sit under it (the whole
+// loaded subtree), for labels such as the context menu's "Thread (3
+// replies)". One pass over the loaded list; called when a menu opens, not
+// per render.
+func (m *MessagesModel) ThreadInfo(msgID string) (available bool, replies int) {
+	for i := range m.messages {
+		if m.messages[i].ID != msgID {
+			continue
+		}
+		msg := &m.messages[i]
+		replies = threadReplyTotals(m.messages)[msgID]
+		return replies > 0 || msg.ReplyTo != "" || len(msg.ReactionsByUser) > 0, replies
+	}
+	return false, 0
+}
+
 func (m *MessagesModel) ScrollToMessage(msgID string) bool {
 	for i, msg := range m.messages {
 		if msg.ID == msgID {

@@ -1758,7 +1758,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Bubble Tea internals or terminal-specific key delivery,
 		// guarantee the dismissal here.
 		if a.contextMenu.IsVisible() {
-			if msg.Type == tea.KeyEsc {
+			// Esc or q closes (q: the owner's close key for any surface
+			// without a text field; the menu's own Update accepts both too).
+			if msg.Type == tea.KeyEsc || msg.String() == "q" {
 				a.contextMenu.Hide()
 				return a, nil
 			}
@@ -3559,6 +3561,14 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		switch msg.Action {
+		case "edit":
+			// From the context menu, on the one message the server will
+			// accept an edit for (canEditMessage): the same entry as the
+			// Up-arrow path, plus focus to the input since the menu was
+			// opened from the pane. Enter sends the edit, Esc cancels.
+			a.input.EnterEditMode(msg.Msg.ID, msg.Msg.Body)
+			a.messages.ScrollToMessage(msg.Msg.ID)
+			a.focus = FocusInput
 		case "reply":
 			preview := msg.Msg.Body
 			if len(preview) > 50 {
@@ -3795,7 +3805,17 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
 			anchorX := layout.MessagesX0 + 2
 			anchorY := layout.MessagesY1 - 8 // overlay() clamps if too low
-			a.contextMenu.Show(msg.Msg, anchorX, anchorY, isOwn, isAdmin, isRoom, a.pinnedBar.PinIDs(), myEmojis)
+			threadAvailable, threadReplies := a.messages.ThreadInfo(msg.Msg.ID)
+			a.contextMenu.Show(msg.Msg, anchorX, anchorY, ContextMenuOptions{
+				IsOwnMessage:     isOwn,
+				IsAdmin:          isAdmin,
+				IsRoom:           isRoom,
+				PinnedIDs:        a.pinnedBar.PinIDs(),
+				MyReactionEmojis: myEmojis,
+				ThreadAvailable:  threadAvailable,
+				ThreadReplies:    threadReplies,
+				CanEdit:          a.canEditMessage(msg.Msg),
+			})
 		case "react":
 			userID := ""
 			if a.client != nil {
@@ -3820,8 +3840,14 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// from the pane the one `t` was pressed on (or the capped row
 			// hiding it), from the view the new root or, via "..", the
 			// row you came from.
+			root := msg.Data
+			if root == "" {
+				// From the context menu: no root is sent; resolve the whole
+				// thread's top-level message as the pane's `t` does.
+				root = a.messages.threadRootOf(msg.Msg.ID)
+			}
 			a.threadPanel.SetRetired(a.messages.retired)
-			if a.threadPanel.Show(msg.Data, a.messages.messages) {
+			if a.threadPanel.Show(root, a.messages.messages) {
 				a.threadPanel.Select(msg.Msg.ID)
 			}
 		}
@@ -4931,31 +4957,59 @@ func (a *App) refreshMessageContent() {
 // fills with text). Focus stays on the input — only the cursor and
 // viewport position move.
 func (a *App) tryEnterEditMode() bool {
-	selfID := a.client.UserID()
-	if selfID == "" {
+	id := a.mostRecentOwnMessageID()
+	if id == "" {
 		return false
 	}
-	// Scan backwards: most recent first. Skip deleted rows and system
-	// messages (which have IsSystem == true). The first non-deleted
-	// message from the local user is the edit target.
-	for i := len(a.messages.messages) - 1; i >= 0; i-- {
-		msg := a.messages.messages[i]
-		if msg.IsSystem || msg.Deleted {
-			continue
+	for i := range a.messages.messages {
+		if a.messages.messages[i].ID == id {
+			// Populate the input AND scroll the messages pane to show
+			// the target, so the user sees what they are editing.
+			a.input.EnterEditMode(id, a.messages.messages[i].Body)
+			a.messages.ScrollToMessage(id)
+			return true
 		}
-		if msg.FromID != selfID {
-			continue
-		}
-		// Found the user's most recent editable message. Populate the
-		// input AND scroll the messages pane to show the target. The
-		// duplicate ID lookup inside ScrollToMessage is cheap (linear
-		// scan over the same in-memory list) and keeps the side-effect
-		// localized to one method call.
-		a.input.EnterEditMode(msg.ID, msg.Body)
-		a.messages.ScrollToMessage(msg.ID)
-		return true
 	}
 	return false
+}
+
+// mostRecentOwnMessageID returns the ID of the user's most recent
+// non-deleted, non-system message in the current context — the ONE message
+// the server will accept an edit for (it answers edit_not_most_recent for
+// any other) — or "" when there is none. The scan uses the in-memory list,
+// most recent first, so it respects what the user is viewing. Shared by the
+// Up-arrow edit entry and the context menu's Edit item, so the two agree.
+func (a *App) mostRecentOwnMessageID() string {
+	if a.client == nil {
+		return ""
+	}
+	selfID := a.client.UserID()
+	if selfID == "" {
+		return ""
+	}
+	for i := len(a.messages.messages) - 1; i >= 0; i-- {
+		msg := a.messages.messages[i]
+		if msg.IsSystem || msg.Deleted || msg.FromID != selfID {
+			continue
+		}
+		return msg.ID
+	}
+	return ""
+}
+
+// canEditMessage reports whether the context menu should offer Edit for a
+// message: the Up-arrow path's gates (an active, not archived context; no
+// retired-partner banner) plus "this is the one message the server will
+// accept an edit for". The room epoch window is server-side only; its
+// error is surfaced when the edit is sent, as it is for the Up path.
+func (a *App) canEditMessage(msg DisplayMessage) bool {
+	if a.messages.IsLeft() || a.messages.IsRoomRetired() {
+		return false
+	}
+	if retired, _ := a.currentDMRetiredPartner(); retired {
+		return false
+	}
+	return msg.ID != "" && msg.ID == a.mostRecentOwnMessageID()
 }
 
 // dispatchEdit sends the appropriate edit verb for the current
