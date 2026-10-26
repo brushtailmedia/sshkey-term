@@ -125,8 +125,8 @@ func TestCompletion_PopupStaysInThePaneAndKeepsTheImagePreview(t *testing.T) {
 	}
 	after := got.View()
 
-	if !strings.Contains(after, "\x1b_Ga=T,") || strings.HasPrefix(after, "\x1b_Ga=d,") {
-		t.Fatal("the popup must leave the preview's placement in place and must not clear the image layer")
+	if n := strings.Count(after, "\x1b_Ga=T,"); n != 1 || strings.HasPrefix(after, "\x1b_Ga=d,") {
+		t.Fatalf("the frame must carry the preview's placement exactly once (got %d) and no delete escape: a second copy after the popup would move the image there", n)
 	}
 	layout := computeLayout(90, 24, false)
 	popup := got.input.CompletionView(layout.MessagesWidth - 2)

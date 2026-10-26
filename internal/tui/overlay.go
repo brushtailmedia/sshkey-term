@@ -102,10 +102,43 @@ func overlay(screen, dialog string, col, row, terminalWidth, terminalHeight int)
 		leftPart := ansi.Cut(screenLine, 0, col)
 		rightPart := ""
 		if screenLineWidth > col+dialogWidth {
-			rightPart = ansi.Cut(screenLine, col+dialogWidth, screenLineWidth)
+			// Cut keeps every escape sequence from the cells it removes, so
+			// a style that began left of the dialog still applies to the
+			// right part. That is right for SGR and wrong for a graphics
+			// placement: the sidebar preview's kitty escape would be
+			// emitted a second time after the dialog and the terminal
+			// would draw the image there — the "image jumps to the right
+			// of the popup" bug. Drop graphics escapes from the right part;
+			// the left part keeps the one that is physically there.
+			rightPart = stripGraphicsEscapes(ansi.Cut(screenLine, col+dialogWidth, screenLineWidth))
 		}
 		screenLines[targetRow] = leftPart + dl + rightPart
 	}
 
 	return strings.Join(screenLines, "\n")
+}
+
+// stripGraphicsEscapes removes APC sequences (ESC _ … ESC \), the kitty
+// graphics protocol's envelope, from s. Used on the part of a row that
+// follows a spliced dialog, where ansi.Cut carries escapes over from the
+// cells it removed: a style should carry, an image placement must not.
+func stripGraphicsEscapes(s string) string {
+	if !strings.Contains(s, "\x1b_") {
+		return s
+	}
+	var b strings.Builder
+	for {
+		start := strings.Index(s, "\x1b_")
+		if start < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		b.WriteString(s[:start])
+		end := strings.Index(s[start:], "\x1b\\")
+		if end < 0 {
+			// Unterminated: drop the rest, it is not text.
+			return b.String()
+		}
+		s = s[start+end+2:]
+	}
 }
