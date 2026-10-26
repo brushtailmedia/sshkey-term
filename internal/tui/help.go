@@ -167,7 +167,7 @@ func (h HelpModel) renderContent(width int) string {
 		{"o", "open attachment, or the link"},
 		{"s", "save attachment"},
 		{"C / Y", "copy link"},
-		{"d", "delete (own only)"},
+		{"d", "delete (asks first; own only)"},
 		{"g", "go to parent (reply)"},
 		{"t", "thread view (replies + who reacted)"},
 		{"c / y", "copy text"},

@@ -142,3 +142,27 @@ func stripGraphicsEscapes(s string) string {
 		s = s[start+end+2:]
 	}
 }
+
+// overlayCentered splices dialog at the centre of a width×height screen —
+// the compact confirm prompts' placement (quit, delete message).
+func overlayCentered(screen, dialog string, width, height int) string {
+	if dialog == "" {
+		return screen
+	}
+	lines := strings.Split(strings.TrimRight(dialog, "\n"), "\n")
+	dialogW := 0
+	for _, l := range lines {
+		if w := ansi.StringWidth(l); w > dialogW {
+			dialogW = w
+		}
+	}
+	col := (width - dialogW) / 2
+	row := (height - len(lines)) / 2
+	if col < 0 {
+		col = 0
+	}
+	if row < 0 {
+		row = 0
+	}
+	return overlay(screen, dialog, col, row, width, height)
+}

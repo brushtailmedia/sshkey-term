@@ -14,7 +14,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
@@ -100,6 +99,9 @@ type App struct {
 	verify        VerifyModel
 	keyWarning    KeyWarningModel
 	quitConfirm   QuitConfirmModel
+	// deleteMsgConfirm asks before a message delete (d, or the menu's
+	// Delete); the quit modal's shape and its y-only rule.
+	deleteMsgConfirm DeleteMsgConfirmModel
 
 	// renameInFlight + renameAttempted implement Option B confirm-then-apply
 	// for the Settings display-name rename (rename-collision-ux.md). On submit
@@ -1819,6 +1821,15 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			a.contextMenu, cmd = a.contextMenu.Update(msg)
+			return a, cmd
+		}
+
+		// Delete-message confirmation intercepts all keys but Ctrl+Q (the
+		// quit modal's rule: only y confirms, n/Esc/q cancel, the rest is
+		// ignored — Enter included).
+		if a.deleteMsgConfirm.IsVisible() && msg.String() != "ctrl+q" {
+			var cmd tea.Cmd
+			a.deleteMsgConfirm, cmd = a.deleteMsgConfirm.Update(msg)
 			return a, cmd
 		}
 
@@ -3664,6 +3675,18 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.continueHistoryOnServer(msg.Room, msg.Group, msg.DM, msg.BeforeID)
 		return a, nil
 
+	case DeleteMsgConfirmedMsg:
+		// The delete dialog's y. The gate and the permission check run
+		// again: the connection may have changed while the dialog was up.
+		if !a.canUseServerAction() {
+			a.statusBar.SetError("offline - this action needs the server")
+			return a, nil
+		}
+		if a.canDeleteMessage(msg.Msg) {
+			sendMessageDelete(a.client, msg.Msg.ID, msg.Msg.Room, msg.Msg.Group, msg.Msg.DM)
+		}
+		return a, nil
+
 	case MessageAction:
 		a.statusBar.ClearError()
 		// Offline-browse (Step 4): server-mutating actions need a live
@@ -3704,8 +3727,11 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// just before, or from the mouse context menu.
 			a.messages.ScrollToMessage(msg.Msg.ID)
 		case "delete":
-			if a.client != nil && (msg.Msg.FromID == a.client.UserID() || a.client.IsAdmin()) {
-				a.client.SendDelete(msg.Msg.ID, msg.Msg.Room, msg.Msg.Group, msg.Msg.DM)
+			// Ask first (deletemsgconfirm.go): the dialog's y comes back as
+			// DeleteMsgConfirmedMsg. The permission check stays here so a d
+			// on a message you cannot delete does nothing.
+			if a.canDeleteMessage(msg.Msg) {
+				a.deleteMsgConfirm.Show(msg.Msg, msg.Msg.FromID != a.client.UserID())
 			}
 		case "pin":
 			if a.client != nil && a.messages.room != "" {
@@ -4267,7 +4293,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// has already logged + ClearVerified; they'll see the missing
 		// ✓ badge from F28 as a persistent indicator).
 		if a.keyWarning.IsVisible() || a.verify.IsVisible() || a.quitConfirm.IsVisible() ||
-			a.passphrase.IsVisible() {
+			a.deleteMsgConfirm.IsVisible() || a.passphrase.IsVisible() {
 			// Skip — a.keyWarning.Show would overwrite in-flight user
 			// interaction. F28's badge carries the state until the
 			// next profile receive (or next user action).
@@ -4505,7 +4531,7 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if a.search.IsVisible() || a.quickSwitch.IsVisible() || a.threadPanel.IsVisible() || a.newConv.IsVisible() ||
 		a.emojiPicker.IsVisible() || a.infoPanel.IsVisible() || a.pendingPanel.IsVisible() ||
 		a.verify.IsVisible() || a.keyWarning.IsVisible() ||
-		a.quitConfirm.IsVisible() || a.leaveConfirm.IsVisible() || a.leaveRoomConfirm.IsVisible() ||
+		a.quitConfirm.IsVisible() || a.deleteMsgConfirm.IsVisible() || a.leaveConfirm.IsVisible() || a.leaveRoomConfirm.IsVisible() ||
 		a.deleteDMConfirm.IsVisible() || a.deleteGroupConfirm.IsVisible() || a.deleteRoomConfirm.IsVisible() ||
 		a.addConfirm.IsVisible() || a.kickConfirm.IsVisible() || a.promoteConfirm.IsVisible() ||
 		a.demoteConfirm.IsVisible() || a.transferConfirm.IsVisible() || a.unverifyConfirm.IsVisible() ||
@@ -5078,6 +5104,11 @@ func (a *App) refreshMessageContent() {
 var (
 	copyText = CopyToClipboard
 	openURL  = client.OpenURL
+	// sendMessageDelete is the delete send behind the confirm dialog, a
+	// seam so tests can see what y sends without a live connection.
+	sendMessageDelete = func(c *client.Client, id, room, group, dm string) {
+		_ = c.SendDelete(id, room, group, dm)
+	}
 )
 
 // actOnLink opens or copies one URL. Opening over SSH cannot reach the
@@ -5160,6 +5191,21 @@ func (a *App) editableMessageID() string {
 // message: it is the one editableMessageID names.
 func (a *App) canEditMessage(msg DisplayMessage) bool {
 	return msg.ID != "" && msg.ID == a.editableMessageID()
+}
+
+// canDeleteMessage is the server's delete rule, mirrored so the d key and
+// the dialog's y agree with the context menu's Delete item: your own
+// message anywhere; any message in a ROOM when you are a server admin
+// (the welcome frame's Admin bit — not a group admin; the server audits
+// such deletes). Groups and DMs have no admin override.
+func (a *App) canDeleteMessage(msg DisplayMessage) bool {
+	if a.client == nil {
+		return false
+	}
+	if msg.FromID == a.client.UserID() {
+		return true
+	}
+	return a.client.IsAdmin() && msg.Room != ""
 }
 
 // syncEditableMessage hands the pane and the thread view the editable
@@ -8973,6 +9019,7 @@ func (a *App) anyModalVisible() bool {
 		a.memberMenu.IsVisible() ||
 		a.contextMenu.IsVisible() ||
 		a.quitConfirm.IsVisible() ||
+		a.deleteMsgConfirm.IsVisible() ||
 		a.retireConfirm.IsVisible() ||
 		a.leaveConfirm.IsVisible() ||
 		a.leaveRoomConfirm.IsVisible() ||
@@ -9277,24 +9324,11 @@ func (a App) viewBody() string {
 		// of replacing it, so the underlying messages/sidebar stay
 		// visible behind the dialog. Compact yes/no prompt feels
 		// out of place as a near-full-screen modal.
-		dialog := a.quitConfirm.View()
-		dialogLines := strings.Split(strings.TrimRight(dialog, "\n"), "\n")
-		dialogH := len(dialogLines)
-		dialogW := 0
-		for _, dl := range dialogLines {
-			if w := ansi.StringWidth(dl); w > dialogW {
-				dialogW = w
-			}
-		}
-		col := (a.width - dialogW) / 2
-		row := (a.height - dialogH) / 2
-		if col < 0 {
-			col = 0
-		}
-		if row < 0 {
-			row = 0
-		}
-		return overlay(screen, dialog, col, row, a.width, a.height)
+		return overlayCentered(screen, a.quitConfirm.View(), a.width, a.height)
+	}
+	if a.deleteMsgConfirm.IsVisible() {
+		// The same compact centred prompt as the quit modal.
+		return overlayCentered(screen, a.deleteMsgConfirm.View(), a.width, a.height)
 	}
 	if a.retireConfirm.IsVisible() {
 		return a.retireConfirm.View(a.width)

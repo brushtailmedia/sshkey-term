@@ -215,6 +215,9 @@ var overlayOpeners = []overlayOpener{
 	{"quitConfirm", func(t *testing.T, a *App) {
 		a.quitConfirm.ShowWithPending("server", 0)
 	}, func(a *App) bool { return a.quitConfirm.IsVisible() }},
+	{"deleteMsgConfirm", func(t *testing.T, a *App) {
+		a.deleteMsgConfirm.Show(DisplayMessage{ID: "m1", From: "Bob", FromID: "usr_b", Body: "hi"}, false)
+	}, func(a *App) bool { return a.deleteMsgConfirm.IsVisible() }},
 	{"help", func(t *testing.T, a *App) { a.help.Toggle() }, func(a *App) bool { return a.help.IsVisible() }},
 	{"settings", func(t *testing.T, a *App) { a.openSettingsPanel() }, func(a *App) bool { return a.settings.IsVisible() }},
 	{"search", func(t *testing.T, a *App) { a.search.Show() }, func(a *App) bool { return a.search.IsVisible() }},

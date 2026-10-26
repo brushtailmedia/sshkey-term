@@ -65,7 +65,7 @@ After `Ctrl+g`, a which-key popup lists these continuations once you pause (300 
 | `e` | Open emoji reaction picker |
 | `u` | Remove your reaction from selected message |
 | `p` | Pin/unpin selected message (rooms only) |
-| `d` | Delete selected message (own only; admin: any in rooms) |
+| `d` | Delete the selected message (own only; admin: any in rooms) — **asks first**: a compact dialog quotes the message, `y` deletes, `n`/`Esc`/`q` cancel and change nothing, and `Enter` does nothing (as in the quit dialog, so a reflexive `Enter` cannot finish a stray `d`). The context menu's Delete opens the same dialog |
 | `c` or `y` | Copy message text to clipboard (`y`: the vim/terminal copy-mode habit; same action) |
 | `C` or `Y` | Copy the link in the message to the clipboard; with several links a picker lists them (`Enter` chooses, `q` closes) |
 | `g` | Jump to parent message (on a reply) |
@@ -94,7 +94,7 @@ All confirmation dialogs — leave, delete, kick, promote, demote, add, transfer
 | `y` or `Enter` | Confirm action |
 | `n` or `Esc` | Cancel |
 
-The retirement dialog additionally requires typing `RETIRE MY ACCOUNT` into a text field before `Enter` is accepted.
+The quit and message-delete dialogs accept only `y` to confirm; `Enter` does nothing there, by design, and `q` also cancels the message-delete dialog. The retirement dialog additionally requires typing `RETIRE MY ACCOUNT` into a text field before `Enter` is accepted.
 
 ### Last-Admin Promote Picker
 

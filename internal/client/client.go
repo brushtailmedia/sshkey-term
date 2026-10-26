@@ -2087,3 +2087,12 @@ func (c *Client) cleanupAttachmentFiles(fileIDs []string) {
 		}
 	}
 }
+
+// SetAdminForTesting sets the server-wide admin flag (the welcome frame's
+// Admin bit) from an external package so TUI tests can exercise the
+// room-admin paths. Do not call from production code.
+func SetAdminForTesting(c *Client, admin bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.admin = admin
+}

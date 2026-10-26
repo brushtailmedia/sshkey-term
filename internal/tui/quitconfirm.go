@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"strings"
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -61,27 +59,17 @@ func (q QuitConfirmModel) View() string {
 		return ""
 	}
 
-	var b strings.Builder
-
-	b.WriteString(searchHeaderStyle.Render(" Quit?"))
-	b.WriteString("\n\n")
-	b.WriteString("  Disconnect from " + q.serverName + "?\n")
+	lines := []string{"  Disconnect from " + q.serverName + "?"}
 	// Phase 17c Step 5: warn about unflushed sends if any. User can
 	// still choose [y] to abandon them; message body is lost.
 	if q.pendingSend > 0 {
-		var noun string
-		if q.pendingSend == 1 {
-			noun = "message"
-		} else {
+		noun := "message"
+		if q.pendingSend != 1 {
 			noun = "messages"
 		}
-		b.WriteString("\n")
-		b.WriteString(errorStyle.Render("  ⚠ " + fmtInt(q.pendingSend) + " " + noun + " still sending — quit will lose them."))
-		b.WriteString("\n")
+		lines = append(lines, "", errorStyle.Render("  ⚠ "+fmtInt(q.pendingSend)+" "+noun+" still sending — quit will lose them."))
 	}
-	b.WriteString("\n  [y] Quit  [n] Cancel")
-
-	return dialogStyle.Render(b.String())
+	return renderConfirmBox(" Quit?", lines, "  [y] Quit  [n] Cancel")
 }
 
 // fmtInt is a tiny helper — strconv.Itoa without importing strconv.
