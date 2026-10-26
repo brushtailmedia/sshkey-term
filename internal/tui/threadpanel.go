@@ -568,7 +568,7 @@ func (t ThreadPanelModel) layout(width, height int) threadLayout {
 	// One footer. At narrow widths it wraps, and its wrapped height is
 	// measured rather than assumed, so a narrow panel never pushes the
 	// bottom border off the frame.
-	footer := " t=thread  Enter=go to  r=reply  e=react  Esc/q=close"
+	footer := " t=thread  Enter=go to  r=reply  e=react  q/Esc=close"
 	footerRows := lipgloss.Height(lipgloss.NewStyle().Width(contentWidth).Render(footer))
 	// Header is two rows (title + blank); footer is a blank row + its rows.
 	bodyRows := contentHeight - 3 - footerRows

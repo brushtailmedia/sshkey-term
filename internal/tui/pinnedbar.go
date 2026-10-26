@@ -263,7 +263,7 @@ func (p PinnedBarModel) Update(msg tea.KeyMsg) (PinnedBarModel, tea.Cmd) {
 			}
 		}
 
-	case "ctrl+p", "esc":
+	case "ctrl+p", "esc", "q":
 		// Ctrl+P is the canonical collapse — same key that opened it.
 		// Esc kept as a secondary dismiss path matching other modals.
 		p.expanded = false

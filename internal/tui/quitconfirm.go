@@ -42,7 +42,8 @@ func (q QuitConfirmModel) Update(msg tea.KeyMsg) (QuitConfirmModel, tea.Cmd) {
 		// the deliberate choice to press y.
 		q.Hide()
 		return q, tea.Quit
-	case "n", "esc":
+	case "n", "esc", "q":
+		// q cancels too: q closes anything without a text field.
 		q.Hide()
 		return q, nil
 	}

@@ -85,9 +85,9 @@ func (p PendingPanelModel) View(width, height int) string {
 		searchHeaderStyle.Render(fmt.Sprintf(" Pending Keys (%d)", len(p.keys))),
 		"",
 	}
-	footer := helpDescStyle.Render(" ↑/↓=navigate  c=copy public key  Esc=close")
+	footer := helpDescStyle.Render(" ↑/↓=navigate  c=copy public key  q/Esc=close")
 	if len(p.keys) == 0 {
-		lines = append(lines, helpDescStyle.Render("  No pending keys."), "", helpDescStyle.Render(" Esc=close"))
+		lines = append(lines, helpDescStyle.Render("  No pending keys."), "", helpDescStyle.Render(" q/Esc=close"))
 		return dialogStyle.Width(width - 4).Render(strings.Join(clampLines(lines, innerRows), "\n"))
 	}
 

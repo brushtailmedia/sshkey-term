@@ -567,6 +567,9 @@ func TestMouseClickInSidebarPreviewOnlyFocusesSidebar(t *testing.T) {
 	model, _ := a.handleMouseClick(x, y)
 	updated := model.(App)
 
+	// A click on the preview area is not a conversation click: it only focuses
+	// the sidebar (a click on a conversation row commits it and lands on the
+	// composer — focus_return_test.go).
 	if updated.focus != FocusSidebar {
 		t.Fatalf("focus = %v, want FocusSidebar", updated.focus)
 	}

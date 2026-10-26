@@ -981,7 +981,7 @@ func (i InfoPanelModel) renderContextContent() ([]string, int) {
 	// NOT short-circuited here.
 	if i.room != "" && (i.retired || i.left) {
 		appendBlank()
-		appendLine(helpDescStyle.Render(" Esc=close"))
+		appendLine(helpDescStyle.Render(" q/Esc=close"))
 		return lines, selectedLine
 	}
 
@@ -1053,7 +1053,7 @@ func (i InfoPanelModel) renderContextContent() ([]string, int) {
 
 	appendBlank()
 	if i.isDM {
-		appendLine(helpDescStyle.Render(" m=mute  Esc=close"))
+		appendLine(helpDescStyle.Render(" m=mute  q/Esc=close"))
 	} else if i.isGroup {
 		// Group admin-action hints (group-infopanel-picker-rework.md §1
 		// step 6): shown ONLY to group admins; non-admins see the
@@ -1061,16 +1061,16 @@ func (i InfoPanelModel) renderContextContent() ([]string, int) {
 		// footer→picker path); `r/p/x` act directly on the highlighted
 		// member via the existing kick/promote/demote confirms.
 		if i.isGroupAdmin {
-			appendLine(helpDescStyle.Render(" Enter=message  a=add  r=remove  p=promote  x=demote  m=mute  Esc=close"))
+			appendLine(helpDescStyle.Render(" Enter=message  a=add  r=remove  p=promote  x=demote  m=mute  q/Esc=close"))
 		} else {
-			appendLine(helpDescStyle.Render(" Enter=message  m=mute  Esc=close"))
+			appendLine(helpDescStyle.Render(" Enter=message  m=mute  q/Esc=close"))
 		}
 	} else {
 		// Room context: surface r=refresh — `r` performs a real
 		// room-member-list refresh here (missing.md §2c). It is a no-op
 		// in DM/group context (case "r" is guarded `if i.room != ""`),
 		// so it is advertised only on this room branch.
-		appendLine(helpDescStyle.Render(" Enter=message  r=refresh  m=mute  Esc=close"))
+		appendLine(helpDescStyle.Render(" Enter=message  r=refresh  m=mute  q/Esc=close"))
 	}
 
 	return lines, selectedLine
@@ -1181,7 +1181,7 @@ func (i InfoPanelModel) renderUserContent(width int) []string {
 	if i.userFingerprint != "" {
 		actions = append(actions, "f=copy fingerprint")
 	}
-	actions = append(actions, "Esc=close")
+	actions = append(actions, "q/Esc=close")
 	appendLine(helpDescStyle.Render("  " + strings.Join(actions, "  ")))
 
 	return lines

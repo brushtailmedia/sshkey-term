@@ -65,7 +65,7 @@ func TestThreadPanel_FooterNeverBreaksFrame(t *testing.T) {
 	for _, size := range [][2]int{{60, 12}, {46, 12}, {40, 12}, {30, 12}, {20, 12}} {
 		view := p.View(size[0], size[1])
 		assertFramed(t, view, size[0], size[1])
-		for _, key := range []string{"t=thread", "Enter=go to", "r=reply", "e=react", "Esc/q=close"} {
+		for _, key := range []string{"t=thread", "Enter=go to", "r=reply", "e=react", "q/Esc=close"} {
 			if !strings.Contains(view, key) {
 				t.Errorf("%v: footer lacks %q", size, key)
 			}

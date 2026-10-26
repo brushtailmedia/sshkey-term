@@ -125,7 +125,7 @@ func (m StatusPickerModel) View() string {
 	b.WriteString("\n")
 	b.WriteString(helpDescStyle.Render("  ↑/↓=navigate") + "\n")
 	b.WriteString(helpDescStyle.Render("  Enter=select") + "\n")
-	b.WriteString(helpDescStyle.Render("  Esc=cancel"))
+	b.WriteString(helpDescStyle.Render("  q/Esc=cancel"))
 
 	return dialogStyle.Render(b.String())
 }

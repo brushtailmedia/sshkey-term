@@ -27,6 +27,8 @@ import (
 // appLiteralBaseline is the number of `App{…}` literals in this package's
 // tests when the ratchet was set (2026-10-25: 51 before the builder, 47
 // after the first seven harnesses moved). Lower it when you remove some.
+// Note for new tests: reflect on App with reflect.TypeFor[App](), since
+// reflect.TypeOf(App{}) spells a literal this count includes.
 const appLiteralBaseline = 47
 
 // countLiterals counts composite literals of the named type across this

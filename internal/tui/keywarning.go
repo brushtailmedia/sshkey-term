@@ -67,7 +67,7 @@ func (k KeyWarningModel) View(width int) string {
 	b.WriteString("  approve a new account.\n\n")
 	b.WriteString("  Old: " + helpDescStyle.Render(k.oldFingerprint) + "\n")
 	b.WriteString("  New: " + helpDescStyle.Render(k.newFingerprint) + "\n\n")
-	b.WriteString("  [d] Disconnect  [Esc] Disconnect\n")
+	b.WriteString("  [d] Disconnect  [q/Esc] Disconnect\n")
 
 	return dialogStyle.Width(width - 4).Render(b.String())
 }

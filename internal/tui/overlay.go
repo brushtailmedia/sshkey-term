@@ -166,3 +166,24 @@ func overlayCentered(screen, dialog string, width, height int) string {
 	}
 	return overlay(screen, dialog, col, row, width, height)
 }
+
+// padFrameHeight pads frame with empty rows up to height lines, so the
+// frame never SHRINKS between renders. Bubble Tea's alt-screen renderer
+// (v1.3.10, standard_renderer.go flush) skips writing any line identical to
+// the previous frame's line at that index, and when the new frame has fewer
+// lines than the last it then erases from the cursor to the end of the
+// screen. If the new frame's last line is one it skipped, the cursor is
+// still at the START of that line and the erase wipes it. Seen as the info
+// panel's bottom border vanishing after a quit dialog drawn below the
+// 13-line panel was cancelled. A frame that is always the terminal's height
+// never takes that path.
+func padFrameHeight(frame string, height int) string {
+	if height <= 0 {
+		return frame
+	}
+	n := strings.Count(frame, "\n") + 1
+	if n >= height {
+		return frame
+	}
+	return frame + strings.Repeat("\n", height-n)
+}

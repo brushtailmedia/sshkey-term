@@ -269,12 +269,16 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 
 	switch msg.String() {
 	case "esc":
-		// Input-local cancel: clear compose state (reply/edit/draft).
-		// App-level Esc handling routes here only in some paths, but
-		// keeping this local guard makes behavior deterministic.
-		if i.replyTo != "" || i.editMode || i.textInput.Value() != "" || (i.completion != nil && i.completion.visible) {
-			i.ResetComposeState()
+		// Input-local backstop for the App's global Esc (clause 4): cancel
+		// context, never typed text. An edit is left with the composer
+		// cleared (it held the old message); a reply target and an open
+		// popup are dropped; a plain draft is untouched.
+		if i.editMode {
+			i.ExitEditMode()
+			i.ClearInput()
 		}
+		i.clearReply()
+		i.completion = nil
 		return i, nil
 	case "tab":
 		// Open the completion popup for the word at the cursor (the App
@@ -568,6 +572,12 @@ func (i *InputModel) clearReply() {
 	i.replyRoom = ""
 	i.replyGroup = ""
 	i.replyDM = ""
+}
+
+// CancelReply drops the reply target and keeps the draft: Esc cancels
+// context, never typed text (focus-consistency.md clause 4).
+func (i *InputModel) CancelReply() {
+	i.clearReply()
 }
 
 // InsertComposeNewline inserts a compose-only newline marker at the current

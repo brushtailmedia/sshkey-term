@@ -13,11 +13,12 @@
 | Key | macOS | Action |
 |---|---|---|
 | `Enter` | `Enter` | Send message |
-| `Esc` | `Esc` | Close panel / cancel / back to input |
+| `Esc` | `Esc` | Close the open panel, cancel a reply, or come back to the input. Closing anything returns you where you were; `Esc` never clears typed text |
+| `q` | `q` | Close or cancel anything that has no text field — every panel, popup and dialog (on a confirm, the same as `n`; on the quit dialog, cancel); collapse the pinned bar; cancel nav mode. From a pane, back to the input, leaving a reply context alone. Where there is a text field, `q` is a character and `Esc` closes |
 | `Tab` / `Shift+Tab` | `Tab` / `Shift+Tab` | Cycle focus forwards / backwards: Input → Sidebar → Messages → Members → Input. In the input, `Tab` completes when it can: at the end of a `/command` or `@name` word it opens the completion popup (or accepts the highlighted suggestion); anywhere else in the draft it cycles |
 | `Ctrl+g` | `Ctrl+g` | Enter navigation prefix mode |
 | `Ctrl+P` | `Ctrl+P` | Toggle pinned messages |
-| `Ctrl+Q` | `Ctrl+Q` | Quit (confirmation dialog) |
+| `Ctrl+Q` | `Ctrl+Q` | Quit, from any screen: the confirmation draws over whatever is showing — an overlay, a dialog, a picker, the connecting or connect-failed screens — and `n`, `Esc` or `q` returns you exactly where you were (same overlay, cursor and text). `y` quits with the same cleanup as `Ctrl+C`; only `y` confirms, `Enter` does nothing, and holding the key only shows the dialog |
 | `Ctrl+C` | `Ctrl+C` | Force quit (alternative to Ctrl+Q) |
 | `?` | `?` | Open help screen (when not in input) |
 
@@ -40,7 +41,7 @@ Press `Ctrl+g`, then one of:
 | `j` | Server quick-switch overlay (configured servers + an Add server row) |
 | `o` | Toggle online/offline for the current server — Offline → connect; Online or Connecting → disconnect (or cancel the attempt) and keep browsing local history |
 | `r` | Reconnect: drop the current session and open a fresh one — Online → reconnect; Offline → connect; inert while connecting |
-| `g` or `Esc` | Cancel nav mode |
+| `g`, `q` or `Esc` | Cancel nav mode |
 
 After `Ctrl+g`, a which-key popup lists these continuations once you pause (300 ms). Nav mode does not auto-exit: press a listed key to run it, `g`/`Esc` to cancel, or any other key/click to dismiss.
 
@@ -54,7 +55,7 @@ After `Ctrl+g`, a which-key popup lists these continuations once you pause (300 
 | `h/l` | `h/l` | Same as `←/→` when not in the input (j/k navigation) |
 | `PgUp` | `Fn+↑` | Scroll message history up (triggers lazy scroll-back from server) |
 | `Alt+↑/↓` | `Opt+↑/↓` | Switch to previous/next room or DM |
-| `Enter` | `Enter` | Confirm sidebar selection (when FocusSidebar) |
+| `Enter` | `Enter` | Confirm the sidebar selection (when FocusSidebar) and land on the input — you went there to talk. A mouse click on a conversation does the same; the quick switch too |
 
 ### Message Actions (when a message is selected in FocusMessages)
 
@@ -111,10 +112,10 @@ When a sole admin runs `/leave` or `/delete` on a group with other members, the 
 | Key | macOS | Action |
 |---|---|---|
 | `Enter` | `Enter` | Send message (or execute slash command). If the input is in edit mode, dispatches the appropriate edit verb instead. With the completion popup open, `Enter` accepts the highlighted suggestion when that would change the text, otherwise it sends — a command typed in full never needs `Enter` twice. |
-| `Ctrl+J` (preferred) or `Alt+Enter` | `Ctrl+J` (preferred) or `Option+Enter` | Insert a newline in the draft (multi-line message). **Prefer `Ctrl+J`**: it is a single byte that every terminal sends unchanged. `Alt+Enter` needs Option set to send Esc on macOS, is taken for fullscreen by some terminals (Windows Terminal, WezTerm), and on a slow link can arrive as Esc followed by Enter. Shift+Enter cannot be used: a terminal sends the same byte for it as for Enter. |
+| `Ctrl+J` (preferred) or `Alt+Enter` | `Ctrl+J` (preferred) or `Option+Enter` | Insert a newline in the draft (multi-line message). **Prefer `Ctrl+J`**: it is a single byte that every terminal sends unchanged. `Alt+Enter` needs Option set to send Esc on macOS, is taken for fullscreen by some terminals (Windows Terminal, WezTerm), and on a slow link can arrive as Esc followed by Enter. Shift+Enter cannot be used: a terminal sends the same byte for it as for Enter. Since `Esc` never clears typed text, a split `Alt+Enter` costs at most an early send, never the draft; under tmux, set `escape-time` low, since it delays every bare `Esc`. |
 | `Tab` | `Tab` | Complete when it can, else cycle focus. The completion popup opens on its own as you type a `/command` (first word) or an `@name` (at a word start), from the first character: a bare `/` lists every command (alphabetically) and a bare `@` every other member (never yourself), in a window of eight rows with `↑ N more` / `↓ N more` markers; typing narrows it, `Backspace` widens it, a space or a word nothing matches closes it. It is drawn just above the input box. With the popup open, `Tab` or `→` accepts the highlighted suggestion (`↑`/`↓` move through it); after `Esc` dismissed it for the word, `Tab` reopens it. Anywhere else in the draft, `Tab` cycles focus |
 | `Up` | `Up` | Moves focus up to the message pane, draft or no draft — the composer is a single line, so `Up` has nothing to do in it; the draft and its cursor stay, and `↓` from the last message (or `Esc`) brings you back to them, e.g. to copy text from another message mid-draft. The pane cursor snaps to the last message when none is selected and is kept otherwise, so `↓` then `↑` is a round trip. The one exception: while the `@`/`/` completion popup is open, `Up` is its previous suggestion. Editing your latest message is `a` in the pane (or Edit in the context menu); it used to be this key. |
-| `Esc` | `Esc` | With the completion popup open, closes the popup and keeps the draft; it does not reopen for that word (a space ends the word, and `Tab` reopens it). Otherwise, **Phase 15**: if in edit mode, clears the buffer and exits edit mode without dispatching; otherwise moves focus to the sidebar. |
+| `Esc` | `Esc` | Cancels context, never typed text. With the completion popup open, closes the popup and keeps the draft (it does not reopen for that word; a space ends the word, and `Tab` reopens it). With a reply armed, drops the reply target and keeps the draft. In edit mode, exits edit mode and clears the composer (it held the old message, not a draft). With a plain draft, nothing — `Ctrl+U` and `Ctrl+K` clear text deliberately. From any other panel, back to the input with the draft untouched. |
 | `Ctrl+a` | `Ctrl+a` | Move cursor to start of line (inherited textinput/readline behavior) |
 | `Ctrl+u` | `Ctrl+u` | Delete from cursor to start of line (inherited textinput/readline behavior) |
 | `Cmd+v` / terminal paste key | `Cmd+v` | Paste text from the terminal/OS clipboard. This is terminal-level behavior, not an app-remappable keybinding. |

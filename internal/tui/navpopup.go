@@ -97,6 +97,6 @@ func renderNavPopup() string {
 	columns := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
 
 	header := searchHeaderStyle.Render("Ctrl+g") + helpDescStyle.Render("  navigation")
-	footer := helpDescStyle.Render("esc · g  cancel")
+	footer := helpDescStyle.Render("q · esc · g  cancel")
 	return dialogStyle.Render(header + "\n\n" + columns + "\n\n" + footer)
 }

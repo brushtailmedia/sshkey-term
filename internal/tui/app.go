@@ -102,6 +102,12 @@ type App struct {
 	// deleteMsgConfirm asks before a message delete (d, or the menu's
 	// Delete); the quit modal's shape and its y-only rule.
 	deleteMsgConfirm DeleteMsgConfirmModel
+	// focusReturn is where focus was when the first overlay opened, so
+	// closing can put it back (focus-consistency.md clause 1: closing
+	// returns you where you were). The Update wrapper records it;
+	// focusReturnSet marks a live record and clears once nothing is open.
+	focusReturn    Focus
+	focusReturnSet bool
 
 	// renameInFlight + renameAttempted implement Option B confirm-then-apply
 	// for the Settings display-name rename (rename-collision-ux.md). On submit
@@ -113,11 +119,6 @@ type App struct {
 	renameInFlight  bool
 	renameAttempted string
 
-	// lastCtrlQAt (Phase 17c Step 5 polish) stamps the time of the
-	// last Ctrl+Q keypress. A second Ctrl+Q within doubleQuitWindow
-	// bypasses the confirm dialog — escape hatch for users who
-	// genuinely want to abandon pending sends.
-	lastCtrlQAt        time.Time
 	retireConfirm      RetireConfirmModel
 	leaveConfirm       LeaveConfirmModel
 	leaveRoomConfirm   LeaveRoomConfirmModel
@@ -281,14 +282,6 @@ const createDMRetryDelay = 80
 // stale, preventing late unrelated creates from stealing focus.
 const pendingFocusCreatedTTL = 30 * time.Second
 
-// doubleQuitWindow is the time window during which a second Ctrl+Q
-// keypress bypasses the quit-confirmation dialog. Phase 17c Step 5
-// polish: "bypass-able with repeated quit keypresses for users who
-// genuinely want to abandon". 500ms — long enough for a deliberate
-// double-tap, short enough that accidental double-presses from the
-// existing dialog flow don't trigger it.
-const doubleQuitWindow = 500 * time.Millisecond
-
 // defaultNavModePopupDelay is the pause after Ctrl+g before the which-key
 // popup reveals: a quick `Ctrl+g k` never flashes it, a pause gets the
 // reminder. Tested at this value and fixed by owner decision (2026-10-23)
@@ -378,6 +371,71 @@ func (a *App) moveFocus(right bool) bool {
 		}
 	}
 	return false
+}
+
+// anyOverlayVisible reports whether anything that takes the keyboard over
+// the panels is up: the modals, plus the non-modal views that own every
+// key while open. The member panel is a panel, not an overlay.
+func (a *App) anyOverlayVisible() bool {
+	return a.anyModalVisible() || a.threadPanel.IsVisible() || a.search.IsVisible() ||
+		a.quickSwitch.IsVisible() || a.newConv.IsVisible() || a.emojiPicker.IsVisible() ||
+		a.pendingPanel.IsVisible() || a.picker.IsVisible() || a.statusPicker.IsVisible() ||
+		a.filePicker.IsVisible()
+}
+
+// qClosesVisibleSurface reports whether the surface up right now is one
+// where q means close: no text field, and no q of its own (those take the
+// key themselves). The lists here are mirrored by the role table in
+// q_closes_test.go, which also forces every IsVisible field to be
+// classified. With a typing surface up at the same time, q stays a
+// character.
+func (a *App) qClosesVisibleSurface() bool {
+	if a.anyQTypingSurfaceVisible() {
+		return false
+	}
+	return a.infoPanel.IsVisible() || a.pendingPanel.IsVisible() || a.memberMenu.IsVisible() ||
+		a.statusPicker.IsVisible() || a.keyWarning.IsVisible() ||
+		a.leaveConfirm.IsVisible() || a.leaveRoomConfirm.IsVisible() ||
+		a.deleteDMConfirm.IsVisible() || a.deleteGroupConfirm.IsVisible() || a.deleteRoomConfirm.IsVisible() ||
+		a.addConfirm.IsVisible() || a.kickConfirm.IsVisible() || a.promoteConfirm.IsVisible() ||
+		a.demoteConfirm.IsVisible() || a.transferConfirm.IsVisible() || a.unverifyConfirm.IsVisible()
+}
+
+// anyQTypingSurfaceVisible reports whether a surface with a text field is
+// up — where q is a character the user may be typing. The generic picker
+// counts only when it shows its filter; without one it closes on q itself.
+func (a *App) anyQTypingSurfaceVisible() bool {
+	return a.search.IsVisible() || a.quickSwitch.IsVisible() || a.newConv.IsVisible() ||
+		a.emojiPicker.IsVisible() || a.filePicker.IsVisible() || a.addServer.IsVisible() ||
+		a.settings.IsVisible() || a.saveAttachment.IsVisible() || a.retireConfirm.IsVisible() ||
+		a.verify.IsVisible() || a.passphrase.IsVisible() ||
+		(a.picker.IsVisible() && a.picker.req.ShowFilter)
+}
+
+// noteFocusReturn records where focus was when the first overlay opened,
+// from `before` (the focus the Update wrapper saw before the message), so
+// closing can put it back — focus-consistency.md clause 1, "closing
+// returns you where you were". Nested overlays keep the first record; it
+// clears once nothing is open.
+func (a *App) noteFocusReturn(before Focus) {
+	switch {
+	case !a.anyOverlayVisible():
+		a.focusReturnSet = false
+	case !a.focusReturnSet:
+		a.focusReturn, a.focusReturnSet = before, true
+	}
+}
+
+// restoreFocus puts focus back where it was when the overlay opened — the
+// input when nothing was recorded. A panel that has since closed cannot
+// take it: the member panel falls back to the pane. Closes that mean to
+// go somewhere (a reply, a jump) set their focus after this and win.
+func (a *App) restoreFocus() {
+	f := a.focusReturn
+	if f == FocusMembers && !a.memberPanel.IsVisible() {
+		f = FocusMessages
+	}
+	a.setFocus(f)
 }
 
 // New creates the app model.
@@ -925,7 +983,7 @@ func (a *App) openDeviceManager() {
 func (a *App) handleNavModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	key := msg.String()
 	switch key {
-	case "g", "esc", "ctrl+g":
+	case "g", "esc", "ctrl+g", "q":
 		a.exitNavMode()
 		return nil, true
 	case "k":
@@ -1541,11 +1599,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// not persist between events.
 	a.syncMessageViewportState()
 	a.syncEditableMessage()
+	focusBefore := a.focus
 
 	model, cmd := a.updateInner(msg)
 	if app, ok := model.(App); ok {
 		app.syncMessageViewportState()
 		app.syncEditableMessage()
+		app.noteFocusReturn(focusBefore)
 		app.sidebar.SetPreviewImagePath(app.computePreviewPath())
 		// Async preview render: dispatch a tea.Cmd if the desired
 		// render key changed and the cache doesn't already have it.
@@ -1696,6 +1756,55 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Quit
 		}
 
+		// The quit dialog owns every key while it is up — y quits with
+		// Ctrl+C's cleanup, n / Esc / q cancel, anything else is ignored —
+		// and it sits HERE, above every overlay intercept, so a dialog
+		// drawn over a menu, a picker or a form cannot have its keys eaten
+		// by what is underneath (quit-always-works.md §2.1). A repeat
+		// Ctrl+Q lands here too and is a no-op.
+		if a.quitConfirm.IsVisible() {
+			var cmd tea.Cmd
+			a.quitConfirm, cmd = a.quitConfirm.Update(msg)
+			if cmd != nil {
+				if a.client != nil {
+					a.abandonActiveHistoryRequest()
+					a.client.Close()
+				}
+			}
+			return a, cmd
+		}
+		// Quit is always available: Ctrl+Q, above every overlay, opens the
+		// dialog over whatever is showing (View splices it onto the final
+		// frame) and cancel returns the user exactly where they were.
+		// There is no double-press bypass: the old one had never been
+		// reachable, and once live it would have let a held key quit
+		// without the dialog.
+		if msg.String() == "ctrl+q" {
+			serverName := "server"
+			if a.appConfig != nil && a.serverIdx < len(a.appConfig.Servers) {
+				serverName = a.appConfig.Servers[a.serverIdx].Name
+			}
+			// Phase 17c Step 5: surface pending-send count so the user
+			// sees if they'll lose unflushed messages on quit.
+			pendingSend := 0
+			if a.client != nil {
+				pendingSend = a.client.SendQueue().PendingCount()
+			}
+			a.quitConfirm.ShowWithPending(serverName, pendingSend)
+			return a, nil
+		}
+
+		// q closes anything without a text field (q-closes-everywhere.md):
+		// on a surface classified "closes on q" the key is rewritten as Esc
+		// and takes that surface's existing close path — one rule, and the
+		// return rule applies as it does for Esc. Surfaces with a text
+		// field keep q as a character, and the ones that bind q themselves
+		// (thread view, menus, pickers, alerts, the quit and delete
+		// dialogs) are untouched.
+		if msg.String() == "q" && a.qClosesVisibleSurface() {
+			msg = tea.KeyMsg{Type: tea.KeyEsc}
+		}
+
 		// Connection failed overlay (first-run)
 		if a.connectFailed.IsVisible() {
 			// Escape hatch: a failed/unreachable server must not be
@@ -1714,7 +1823,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				switch msg.String() {
 				case "h", "l", "j",
 					"1", "2", "3", "4", "5", "6", "7", "8", "9",
-					"g", "esc", "ctrl+g":
+					"g", "esc", "ctrl+g", "q":
 					if cmd, handled := a.handleNavModeKey(msg); handled {
 						return a, cmd
 					}
@@ -1750,6 +1859,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			a.memberMenu, cmd = a.memberMenu.Update(msg)
+			if !a.memberMenu.IsVisible() {
+				a.restoreFocus()
+			}
 			return a, cmd
 		}
 
@@ -1763,6 +1875,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			a.statusPicker, cmd = a.statusPicker.Update(msg)
+			if !a.statusPicker.IsVisible() {
+				a.restoreFocus()
+			}
 			return a, cmd
 		}
 
@@ -1776,6 +1891,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			a.picker, cmd = a.picker.Update(msg)
+			if !a.picker.IsVisible() {
+				a.restoreFocus()
+			}
 			return a, cmd
 		}
 
@@ -1789,7 +1907,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Type == tea.KeyEsc {
 				a.filePicker.Hide()
 				a.filePickerLastRoot = a.filePicker.LastRoot()
-				a.focus = FocusInput
+				a.restoreFocus()
 				return a, nil
 			}
 			layout := computeLayout(a.width, a.height, a.memberPanel.IsVisible())
@@ -1798,7 +1916,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.filePicker, cmd = a.filePicker.Update(msg)
 			if !a.filePicker.IsVisible() {
 				a.filePickerLastRoot = a.filePicker.LastRoot()
-				a.focus = FocusInput
+				a.restoreFocus()
 			}
 			return a, cmd
 		}
@@ -1821,30 +1939,23 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			a.contextMenu, cmd = a.contextMenu.Update(msg)
+			if !a.contextMenu.IsVisible() {
+				a.restoreFocus()
+			}
 			return a, cmd
 		}
 
-		// Delete-message confirmation intercepts all keys but Ctrl+Q (the
-		// quit modal's rule: only y confirms, n/Esc/q cancel, the rest is
-		// ignored — Enter included).
-		if a.deleteMsgConfirm.IsVisible() && msg.String() != "ctrl+q" {
+		// Delete-message confirmation intercepts all keys (Ctrl+Q is
+		// handled above every intercept): only y confirms, n/Esc/q cancel,
+		// the rest is ignored — Enter included.
+		if a.deleteMsgConfirm.IsVisible() {
 			var cmd tea.Cmd
 			a.deleteMsgConfirm, cmd = a.deleteMsgConfirm.Update(msg)
 			return a, cmd
 		}
 
-		// Quit confirmation intercepts all keys
-		if a.quitConfirm.IsVisible() {
-			var cmd tea.Cmd
-			a.quitConfirm, cmd = a.quitConfirm.Update(msg)
-			if cmd != nil {
-				if a.client != nil {
-					a.abandonActiveHistoryRequest()
-					a.client.Close()
-				}
-			}
-			return a, cmd
-		}
+		// (The quit dialog's intercept sits at the top of the dispatcher,
+		// right after Ctrl+C — see quit-always-works.md.)
 
 		// Retire confirmation intercepts all keys
 		if a.retireConfirm.IsVisible() {
@@ -1995,7 +2106,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.help.IsVisible() {
 			a.help.Update(msg, a.width, a.height)
 			if !a.help.IsVisible() {
-				a.focus = FocusInput
+				a.restoreFocus()
 			}
 			return a, nil
 		}
@@ -2005,7 +2116,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			a.settings, cmd = a.settings.Update(msg)
 			if !a.settings.IsVisible() {
-				a.focus = FocusInput
+				a.restoreFocus()
 			}
 			return a, cmd
 		}
@@ -2025,7 +2136,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				switch msg.String() {
 				case "h", "l", "j",
 					"1", "2", "3", "4", "5", "6", "7", "8", "9",
-					"g", "esc", "ctrl+g":
+					"g", "esc", "ctrl+g", "q":
 					if cmd, handled := a.handleNavModeKey(msg); handled {
 						return a, cmd
 					}
@@ -2038,7 +2149,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			a.addServer, cmd = a.addServer.Update(msg)
 			if !a.addServer.IsVisible() {
-				a.focus = FocusInput
+				a.restoreFocus()
 			}
 			return a, cmd
 		}
@@ -2053,7 +2164,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.refreshInfoPanelLiveRows()
 			a.infoPanel, cmd = a.infoPanel.Update(msg)
 			if !a.infoPanel.IsVisible() {
-				a.focus = FocusInput
+				a.restoreFocus()
 			}
 			return a, cmd
 		}
@@ -2063,7 +2174,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			a.pendingPanel, cmd = a.pendingPanel.Update(msg)
 			if !a.pendingPanel.IsVisible() {
-				a.focus = FocusInput
+				a.restoreFocus()
 			}
 			return a, cmd
 		}
@@ -2075,7 +2186,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.emojiPicker.SetViewport(layout.MessagesWidth, layout.InputY0-layout.MessagesY0)
 			a.emojiPicker, cmd = a.emojiPicker.Update(msg)
 			if !a.emojiPicker.IsVisible() {
-				a.focus = FocusInput
+				a.restoreFocus()
 			}
 			return a, cmd
 		}
@@ -2085,7 +2196,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			a.newConv, cmd = a.newConv.Update(msg)
 			if !a.newConv.IsVisible() {
-				a.focus = FocusInput
+				a.restoreFocus()
 				// Dialog closed without emitting a create intent (Esc/cancel).
 				// Reset source marker so stale member-panel context can't leak
 				// into a future create flow.
@@ -2105,7 +2216,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.threadPanel.SetSize(a.width, a.height)
 			a.threadPanel, cmd = a.threadPanel.Update(msg)
 			if !a.threadPanel.IsVisible() {
-				a.focus = FocusMessages
+				a.restoreFocus()
 			}
 			return a, cmd
 		}
@@ -2115,7 +2226,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			a.quickSwitch, cmd = a.quickSwitch.Update(msg)
 			if !a.quickSwitch.IsVisible() {
-				a.focus = FocusInput
+				a.restoreFocus()
 			}
 			return a, cmd
 		}
@@ -2126,13 +2237,13 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// don't route cleanly through the search input's key map.
 			if msg.Type == tea.KeyEsc || msg.String() == "ctrl+[" {
 				a.search.Hide()
-				a.focus = FocusInput
+				a.restoreFocus()
 				return a, nil
 			}
 			var cmd tea.Cmd
 			a.search, cmd = a.search.Update(msg, a.client)
 			if !a.search.IsVisible() {
-				a.focus = FocusInput
+				a.restoreFocus()
 			}
 			return a, cmd
 		}
@@ -2143,7 +2254,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fell through to the input/messages handlers (since
 		// PinnedBarModel.Update was never called from anywhere) — the
 		// user reported all the listed shortcuts were dead.
-		if a.pinnedBar.expanded && msg.String() != "ctrl+q" {
+		if a.pinnedBar.expanded {
 			var cmd tea.Cmd
 			a.pinnedBar, cmd = a.pinnedBar.Update(msg)
 			return a, cmd
@@ -2165,35 +2276,6 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// modal IsVisible check) so it can't be swallowed by any
 		// overlay that lacks its own ctrl+c branch. See the early
 		// return above.
-
-		case "ctrl+q":
-			// Phase 17c Step 5 polish: double-press Ctrl+Q within
-			// doubleQuitWindow bypasses the confirm dialog — escape
-			// hatch for users who genuinely want to abandon pending
-			// sends.
-			now := time.Now()
-			if !a.lastCtrlQAt.IsZero() && now.Sub(a.lastCtrlQAt) < doubleQuitWindow {
-				a.lastCtrlQAt = time.Time{}
-				if a.client != nil {
-					a.abandonActiveHistoryRequest()
-					a.client.Close()
-				}
-				return a, tea.Quit
-			}
-			a.lastCtrlQAt = now
-
-			serverName := "server"
-			if a.appConfig != nil && a.serverIdx < len(a.appConfig.Servers) {
-				serverName = a.appConfig.Servers[a.serverIdx].Name
-			}
-			// Phase 17c Step 5: surface pending-send count so the
-			// user sees if they'll lose unflushed messages on quit.
-			pendingSend := 0
-			if a.client != nil {
-				pendingSend = a.client.SendQueue().PendingCount()
-			}
-			a.quitConfirm.ShowWithPending(serverName, pendingSend)
-			return a, nil
 
 		case "ctrl+g":
 			return a, a.enterNavMode()
@@ -2295,6 +2377,17 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, nil
 			}
 
+		case "q":
+			// q from a pane is a pure "back to typing": focus the input and
+			// nothing else — unlike Esc it leaves a reply context alone
+			// (q-closes-everywhere.md rule 2). Surfaces that close on q never
+			// reach here: the key was rewritten as Esc above the overlay
+			// chain, or the surface took it itself.
+			if a.focus != FocusInput {
+				a.setFocus(FocusInput)
+				return a, nil
+			}
+
 		case "down", "j":
 			// The pane's bottom edge: Down (or j) on the last message
 			// drops into the input, the panel below it. Anywhere else the
@@ -2313,36 +2406,35 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.focus == FocusInput && a.input.CompletionOpen() {
 				break
 			}
-			// Esc behavior, in priority order:
+			// Esc cancels CONTEXT, never typed text (focus-consistency.md
+			// clause 4). In priority order:
 			//
-			//   1. If a reply is active (regardless of which panel
-			//      currently has focus), cancel the compose state
-			//      and refocus the input. This makes Esc-from-the-
-			//      messages-pane-while-replying actually cancel the
-			//      reply instead of just refocusing — the previous
-			//      handler only cancelled when focus was already on
-			//      input, leaving the user replying-but-not-focused
-			//      stuck pressing Esc twice.
-			//
-			//   2. Else if input focus + (editing | non-empty draft),
-			//      ResetComposeState (clears edit + text + completion).
-			//
-			//   3. Else, refocus the input panel — the existing "Esc
-			//      returns focus to input from anywhere" behavior.
+			//   1. A reply in progress, from any panel: drop the reply
+			//      target, keep the draft, focus the input — so Esc from
+			//      the pane while replying cancels the reply rather than
+			//      merely refocusing.
+			//   2. An edit in progress (input focus): leave edit mode and
+			//      clear the composer — it held the old message, not a
+			//      draft (gate G6).
+			//   3. Input focus with a plain draft or nothing: nothing to
+			//      cancel. The draft stays; Ctrl+U and Ctrl+K clear text
+			//      deliberately. (Before, this wiped the draft — one
+			//      reflexive Esc, or an Alt+Enter split across two reads
+			//      on a slow link, lost the message.)
+			//   4. Any other panel: back to the input, draft untouched.
 			if a.input.IsReplying() {
-				a.input.ResetComposeState()
-				if a.focus != FocusInput {
-					a.focus = FocusInput
-				}
+				a.input.CancelReply()
+				a.setFocus(FocusInput)
 				return a, nil
 			}
 			if a.focus == FocusInput {
-				if a.input.IsEditing() || !a.input.IsEmpty() {
-					a.input.ResetComposeState()
+				if a.input.IsEditing() {
+					a.input.ExitEditMode()
+					a.input.ClearInput()
 				}
 				return a, nil
 			}
-			a.focus = FocusInput
+			a.setFocus(FocusInput)
 			return a, nil
 		}
 
@@ -2368,6 +2460,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.input.SetNonMembers(a.activeNonMemberEntries())
 				}
 				a.sendReadReceipt()
+				// Clause 2: committing a conversation (Enter) lands on the
+				// composer — you went there to talk.
+				a.setFocus(FocusInput)
 			}
 		case FocusMessages:
 			var cmd tea.Cmd
@@ -2416,14 +2511,9 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.messages.SelectLastIfNone()
 				return a, nil
 			}
-			// Phase 15 edit mode Esc handling: if we're in edit mode and
-			// the user presses Esc, clear the buffer and exit edit mode
-			// without dispatching anything.
-			if msg.String() == "esc" && a.input.IsEditing() && !a.input.CompletionOpen() {
-				a.input.ExitEditMode()
-				a.input.ClearInput()
-				return a, nil
-			}
+			// (Esc in edit mode is handled by the global Esc case above —
+			// clause 4, step 2 — which returns before the routing reaches
+			// here; the old Phase 15 handler at this point was unreachable.)
 			// Phase 15 edit mode Enter dispatch: if we're in edit mode
 			// and the user presses Enter with non-empty content, send
 			// the edit envelope for the tracked target instead of a
@@ -3529,12 +3619,17 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.sidebar.updateSelection()
 		a.switchToSidebarSelection()
+		// Clause 2: a committed conversation lands on the composer, from
+		// whichever panel the quick switch was opened.
+		a.setFocus(FocusInput)
 		return a, nil
 
 	case SearchJumpMsg:
-		// Jump to the message in context
+		// Jump to the message in context. Clause 2: a jump lands on the
+		// message, as the pinned-bar jump does (it used to land on the
+		// input).
 		a.search.Hide()
-		a.focus = FocusInput
+		a.setFocus(FocusMessages)
 		if msg.Room != "" {
 			a.switchMessageContext(msg.Room, "", "")
 		} else if msg.Group != "" {
@@ -4476,6 +4571,13 @@ func (a App) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if a.connectFailed.IsVisible() {
 		return a, nil
 	}
+	// The quit dialog is drawn over everything (View), so it consumes
+	// clicks before the mouse-capable dialogs below are consulted — a
+	// click must not act on the form, picker or help underneath it
+	// (quit-always-works.md §2.3).
+	if a.quitConfirm.IsVisible() {
+		return a, nil
+	}
 	// Dialogs with mouse support — route clicks to the dialog.
 	if a.addServer.IsVisible() {
 		var cmd tea.Cmd
@@ -4639,6 +4741,10 @@ func (a App) handleMouseClick(x, y int) (tea.Model, tea.Cmd) {
 				}
 				a.sendReadReceipt()
 			}
+			// Clause 2 (G3): a click commits the conversation like Enter
+			// and lands on the composer. A click on a header or a blank
+			// row only focuses the sidebar (above).
+			a.setFocus(FocusInput)
 		}
 
 	case "messages":
@@ -9090,7 +9196,18 @@ const (
 )
 
 func (a App) View() string {
-	body := a.viewBody()
+	// Every frame is the terminal's height: a frame that never shrinks
+	// cannot trip the renderer's skip-then-erase path (padFrameHeight), and
+	// a dialog spliced onto it never has to grow it.
+	frame := padFrameHeight(a.viewBody(), a.height)
+	// The quit dialog goes on the FINAL frame — over any gate, overlay or
+	// pre-session screen — so Ctrl+Q works from every screen and cancel
+	// returns the user to exactly what was showing (quit-always-works.md
+	// §2.2). Skipped on the too-small bouncer (G6): the dialog stays set
+	// and appears as soon as the terminal grows.
+	if a.quitConfirm.IsVisible() && a.width >= appMinWidth && a.height >= appMinHeight {
+		frame = overlayCentered(frame, a.quitConfirm.View(), a.width, a.height)
+	}
 	// Stateless rasterm clear (kitty terminals only): if this
 	// frame's output doesn't carry a kitty placement, prepend a
 	// delete escape so any prior placement gets removed from the
@@ -9113,10 +9230,10 @@ func (a App) View() string {
 	// non-existent image is a no-op, so double-emission on frames
 	// where buildPreviewContent already prepended a delete adds
 	// ~30 bytes per frame and is harmless.
-	if rastermProtocolCache == rastermKitty && !strings.Contains(body, "\x1b_Ga=T,") {
-		return rastermDeleteEscape() + body
+	if rastermProtocolCache == rastermKitty && !strings.Contains(frame, "\x1b_Ga=T,") {
+		return rastermDeleteEscape() + frame
 	}
-	return body
+	return frame
 }
 
 func (a App) viewBody() string {
@@ -9319,13 +9436,8 @@ func (a App) viewBody() string {
 	if a.keyWarning.IsVisible() {
 		return a.keyWarning.View(a.width)
 	}
-	if a.quitConfirm.IsVisible() {
-		// Centered overlay — splice onto the current screen instead
-		// of replacing it, so the underlying messages/sidebar stay
-		// visible behind the dialog. Compact yes/no prompt feels
-		// out of place as a near-full-screen modal.
-		return overlayCentered(screen, a.quitConfirm.View(), a.width, a.height)
-	}
+	// (The quit dialog is not in this chain: View splices it onto the
+	// final frame, over whatever this chain returns.)
 	if a.deleteMsgConfirm.IsVisible() {
 		// The same compact centred prompt as the quit modal.
 		return overlayCentered(screen, a.deleteMsgConfirm.View(), a.width, a.height)
