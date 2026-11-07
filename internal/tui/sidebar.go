@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"strconv"
 	"strings"
 
@@ -173,7 +175,13 @@ type SidebarModel struct {
 	// scrolling between previously-rendered images.
 	previewRenderKey   previewRenderKey
 	previewRenderValue string
-	previewRendering   bool
+	// previewErr is the typed reason the current key's render produced
+	// nothing (see previewRenderReadyMsg.err). previewRenderValue is
+	// empty and the preview area shows previewNoticeFor(previewErr)
+	// instead of a blank. Reset whenever the key changes or the path
+	// clears; nil while a render is in flight.
+	previewErr       error
+	previewRendering bool
 
 	// activeRoom / activeGroup / activeDM — the room, group, or DM
 	// currently shown in the messages pane. Distinct from
@@ -610,6 +618,7 @@ func (s *SidebarModel) RequestPreviewRender(width, rows int) tea.Cmd {
 	if s.previewImagePath == "" {
 		s.previewRenderKey = previewRenderKey{}
 		s.previewRenderValue = ""
+		s.previewErr = nil
 		s.previewRendering = false
 		return nil
 	}
@@ -622,6 +631,7 @@ func (s *SidebarModel) RequestPreviewRender(width, rows int) tea.Cmd {
 		return nil
 	}
 	s.previewRenderKey = desired
+	s.previewErr = nil
 	if cached, ok := lookupCachedRenderForKey(desired); ok {
 		s.previewRenderValue = cached
 		s.previewRendering = false
@@ -1164,9 +1174,18 @@ func teeBorderEdges(row string) string {
 // emission for that case.
 func (s SidebarModel) buildPreviewContent(width, rows int) []string {
 	var content []string
-	if s.previewImagePath == "" {
+	switch {
+	case s.previewImagePath == "":
 		content = buildPreviewPlaceholder(width, rows)
-	} else {
+	case s.previewErr != nil:
+		// The render finished with nothing to draw. A notice saying
+		// why, drawn like the placeholder — wrapped to the pane,
+		// centred, never wider than `width` — so the panel keeps its
+		// exact height; a free-text row wider than the pane would be
+		// wrapped by the panel style and push the frame's top border
+		// off the terminal.
+		content = buildPreviewNotice(width, rows, previewNoticeFor(s.previewErr))
+	default:
 		// Read the pre-rendered escape from the model. Population
 		// happens off-thread via renderPreviewCmd → previewRenderReadyMsg
 		// → updateInner; or synchronously inside RequestPreviewRender
@@ -1356,6 +1375,110 @@ func extractRasterInt(s, key string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// What the preview area says when a render finished with nothing to
+// draw. The reason arrives as a typed error from RenderImageInline;
+// the text is decided here, in one place, so a new reason is one more
+// case in previewNoticeFor and nothing else.
+const (
+	// previewTooLargeNotice: the header declares more than the decode
+	// budget (`[images] max_decode_bytes`). The file is intact and `o`
+	// opens it externally; the message pane's own hints say so.
+	previewTooLargeNotice = "image too large for preview"
+	// previewUndecodableNotice: the header cannot be read (fail closed).
+	previewUndecodableNotice = "image could not be decoded"
+	// previewNotCachedNotice: the file is gone from the cache (evicted,
+	// or deleted between selection and render).
+	previewNotCachedNotice = "image not cached"
+	// previewImagesOffNotice: inline images are switched off for the
+	// process (SSHKEY_NO_INLINE_IMAGES=1).
+	previewImagesOffNotice = "inline images are off"
+	// previewUnavailableNotice: any other failure (a corrupt file past
+	// its header, an encoder error, a recovered decoder panic).
+	previewUnavailableNotice = "preview unavailable"
+)
+
+// previewNoticeFor maps a render failure to the notice the preview area
+// shows. nil means nothing to say (no failure).
+func previewNoticeFor(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, client.ErrImageTooLarge):
+		return previewTooLargeNotice
+	case errors.Is(err, client.ErrImageHeader):
+		return previewUndecodableNotice
+	case errors.Is(err, fs.ErrNotExist):
+		return previewNotCachedNotice
+	case errors.Is(err, errInlineImagesOff):
+		return previewImagesOffNotice
+	default:
+		return previewUnavailableNotice
+	}
+}
+
+// buildPreviewNotice returns exactly `rows` rows carrying text in the
+// preview area the way buildPreviewPlaceholder carries its label: the
+// same white label style, every line centred horizontally, the block
+// centred vertically. The text is word-wrapped to `width` (a word
+// longer than the pane is cut rather than overflowing) and lines past
+// the row budget are dropped, so no row is ever wider than `width` and
+// the sidebar panel keeps its exact height.
+func buildPreviewNotice(width, rows int, text string) []string {
+	out := make([]string, rows)
+	if rows <= 0 || width <= 0 {
+		return out
+	}
+	lines := wrapNoticeWords(text, width)
+	if len(lines) > rows {
+		lines = lines[:rows]
+	}
+	top := (rows - len(lines)) / 2
+	for i, line := range lines {
+		pad := (width - ansi.StringWidth(line)) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		out[top+i] = strings.Repeat(" ", pad) + previewLabelStyle.Render(line)
+	}
+	return out
+}
+
+// wrapNoticeWords greedily wraps plain text at spaces so that no line
+// measures more than width cells; a single word wider than the pane is
+// cut at the width.
+func wrapNoticeWords(text string, width int) []string {
+	var lines []string
+	cur := ""
+	for _, word := range strings.Fields(text) {
+		for ansi.StringWidth(word) > width {
+			if cur != "" {
+				lines = append(lines, cur)
+				cur = ""
+			}
+			head := ansi.Truncate(word, width, "")
+			if head == "" {
+				break
+			}
+			lines = append(lines, head)
+			word = word[len(head):]
+		}
+		switch {
+		case word == "":
+		case cur == "":
+			cur = word
+		case ansi.StringWidth(cur)+1+ansi.StringWidth(word) <= width:
+			cur += " " + word
+		default:
+			lines = append(lines, cur)
+			cur = word
+		}
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
 }
 
 // buildPreviewPlaceholder returns the rows that fill the sidebar's

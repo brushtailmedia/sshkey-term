@@ -25,7 +25,7 @@ func TestBuildPreviewImageRowsFromValue_RastermRowContainsEscapeAndIsCentered(t 
 	// path the async render Cmd takes). Then exercise the formatting
 	// helper directly — that's the unit under test now that the file-
 	// reading version of buildPreviewImageRows is gone.
-	rendered := RenderImageInline(srcPath, 20, 8)
+	rendered, _ := RenderImageInline(srcPath, 20, 8)
 	if rendered == "" {
 		t.Fatal("RenderImageInline returned empty; cannot exercise centering")
 	}
@@ -59,7 +59,7 @@ func TestBuildPreviewImageRowsFromValue_BlockFallbackStillCentered(t *testing.T)
 	withCleanInlineImageEnv(t)
 	srcPath := writeImageWithThumbs(t, t.TempDir())
 
-	rendered := RenderImageInline(srcPath, 40, 8)
+	rendered, _ := RenderImageInline(srcPath, 40, 8)
 	if rendered == "" {
 		t.Fatal("RenderImageInline returned empty; cannot exercise centering")
 	}
@@ -129,7 +129,7 @@ func TestBuildPreviewContent_NoDeleteEscapeWhenKittyPlacementPresent(t *testing.
 	withCleanInlineImageEnv(t)
 	srcPath := writeImageWithThumbs(t, t.TempDir())
 
-	rendered := RenderImageInline(srcPath, 20, 8)
+	rendered, _ := RenderImageInline(srcPath, 20, 8)
 	if rendered == "" {
 		t.Fatal("RenderImageInline returned empty; cannot exercise placement detection")
 	}
@@ -223,7 +223,7 @@ func TestRequestPreviewRender_CacheHitSyncPopulates(t *testing.T) {
 
 	// Prime the cache by running a render through RenderImageInline
 	// (the same call the Cmd would make).
-	primed := RenderImageInline(srcPath, 20, 8)
+	primed, _ := RenderImageInline(srcPath, 20, 8)
 	if primed == "" {
 		t.Fatal("RenderImageInline returned empty; cache not primed")
 	}

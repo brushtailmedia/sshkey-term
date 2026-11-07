@@ -1505,6 +1505,13 @@ type SaveResultEvent struct {
 type previewRenderReadyMsg struct {
 	key   previewRenderKey
 	value string
+	// err is the typed reason when there is nothing to draw: the image
+	// is over the decode budget, its header is unreadable, the file is
+	// gone from the cache, inline images are off, or the decoder or
+	// encoder failed. The sidebar turns it into a notice in the preview
+	// area (previewNoticeFor) instead of leaving the pane blank. A
+	// render that has not landed yet is not an error and stays blank.
+	err error
 }
 
 // renderPreviewCmd dispatches RenderImageInline on a goroutine so
@@ -1518,10 +1525,8 @@ type previewRenderReadyMsg struct {
 // value on the model.
 func renderPreviewCmd(key previewRenderKey) tea.Cmd {
 	return func() tea.Msg {
-		return previewRenderReadyMsg{
-			key:   key,
-			value: RenderImageInline(key.path, key.maxCols, key.maxRows),
-		}
+		rendered, err := RenderImageInline(key.path, key.maxCols, key.maxRows)
+		return previewRenderReadyMsg{key: key, value: rendered, err: err}
 	}
 }
 
@@ -4305,6 +4310,7 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// while the Cmd was running) are dropped.
 		if msg.key == a.sidebar.previewRenderKey {
 			a.sidebar.previewRenderValue = msg.value
+			a.sidebar.previewErr = msg.err
 			a.sidebar.previewRendering = false
 		}
 

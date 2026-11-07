@@ -88,7 +88,7 @@ func TestRenderImageInline_MalformedBytesDoesNotPanic(t *testing.T) {
 		}
 	}()
 
-	got := RenderImageInline(path, 40, 12)
+	got, _ := RenderImageInline(path, 40, 12)
 	if got != "" {
 		t.Logf("RenderImageInline returned non-empty on malformed bytes (len=%d) — acceptable provided no panic", len(got))
 	}
@@ -172,7 +172,7 @@ func TestRenderImageInline_MissingFile(t *testing.T) {
 	}()
 	os.Unsetenv("SSHKEY_NO_INLINE_IMAGES")
 
-	got := RenderImageInline("/definitely/does/not/exist/photo.png", 40, 12)
+	got, _ := RenderImageInline("/definitely/does/not/exist/photo.png", 40, 12)
 	if got != "" {
 		t.Errorf("RenderImageInline on missing file = %d bytes, want \"\"", len(got))
 	}
@@ -251,7 +251,7 @@ func TestRenderImageInline_RastermPlacementIsQuiet(t *testing.T) {
 
 	srcPath := writeImageWithThumbs(t, t.TempDir())
 
-	out := RenderImageInline(srcPath, 20, 12)
+	out, _ := RenderImageInline(srcPath, 20, 12)
 	if !strings.Contains(out, "q=2") {
 		t.Errorf("rasterm-rendered placement should include q=2, got prefix %q",
 			truncateForLog(out, 80))
@@ -310,7 +310,7 @@ func TestRenderImageInline_RastermBranchUsedWhenCapable(t *testing.T) {
 
 	srcPath := writeImageWithThumbs(t, t.TempDir())
 
-	out := RenderImageInline(srcPath, 20, 12)
+	out, _ := RenderImageInline(srcPath, 20, 12)
 	if out == "" {
 		t.Fatal("RenderImageInline returned empty output for valid PNG with rasterm capable")
 	}
@@ -337,7 +337,7 @@ func TestRenderImageInline_FallsBackToBlockCharsWhenNotCapable(t *testing.T) {
 
 	srcPath := writeImageWithThumbs(t, t.TempDir())
 
-	out := RenderImageInline(srcPath, 20, 12)
+	out, _ := RenderImageInline(srcPath, 20, 12)
 	if out == "" {
 		t.Fatal("RenderImageInline returned empty output for valid PNG with block-char path")
 	}
@@ -359,13 +359,13 @@ func TestRenderImageInline_CacheKeyHonorsRastermBool(t *testing.T) {
 	srcPath := writeImageWithThumbs(t, t.TempDir())
 
 	withRastermProtocol(t, rastermKitty)
-	rastermOut := RenderImageInline(srcPath, 20, 12)
+	rastermOut, _ := RenderImageInline(srcPath, 20, 12)
 	if !strings.HasPrefix(rastermOut, "\x1b_G") {
 		t.Fatalf("first render: expected kitty prefix, got %q", rastermOut[:min(20, len(rastermOut))])
 	}
 
 	withRastermProtocol(t, rastermNone)
-	blockOut := RenderImageInline(srcPath, 20, 12)
+	blockOut, _ := RenderImageInline(srcPath, 20, 12)
 	if strings.HasPrefix(blockOut, "\x1b_G") {
 		t.Errorf("second render with rasterm disabled returned kitty escape — cache key not honoring rasterm bool")
 	}
@@ -384,7 +384,7 @@ func TestRenderImageInline_ItermBranchIncludesPaneBounds(t *testing.T) {
 
 	srcPath := writeImageWithThumbs(t, t.TempDir())
 
-	out := RenderImageInline(srcPath, 20, 12)
+	out, _ := RenderImageInline(srcPath, 20, 12)
 	if out == "" {
 		t.Fatal("RenderImageInline returned empty output for valid PNG with iTerm rasterm capable")
 	}

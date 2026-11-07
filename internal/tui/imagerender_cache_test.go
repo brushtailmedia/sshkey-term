@@ -36,8 +36,8 @@ func TestRenderImageInline_CachesStableFile(t *testing.T) {
 	}
 	renderImageFn = func(_ image.Image, _, _ int) string { return "rendered" }
 
-	got1 := RenderImageInline(path, 80, 15)
-	got2 := RenderImageInline(path, 80, 15)
+	got1, _ := RenderImageInline(path, 80, 15)
+	got2, _ := RenderImageInline(path, 80, 15)
 
 	if got1 != "rendered" || got2 != "rendered" {
 		t.Fatalf("unexpected render outputs: %q / %q", got1, got2)
@@ -79,7 +79,7 @@ func TestRenderImageInline_CacheSurvivesFileRewrite(t *testing.T) {
 	}
 	renderImageFn = func(_ image.Image, _, _ int) string { return "rendered" }
 
-	_ = RenderImageInline(path, 80, 15)
+	_, _ = RenderImageInline(path, 80, 15)
 	if decodeCalls != 1 {
 		t.Fatalf("decode calls after first render = %d, want 1", decodeCalls)
 	}
@@ -88,7 +88,7 @@ func TestRenderImageInline_CacheSurvivesFileRewrite(t *testing.T) {
 		t.Fatalf("mutate temp image file: %v", err)
 	}
 
-	_ = RenderImageInline(path, 80, 15)
+	_, _ = RenderImageInline(path, 80, 15)
 	if decodeCalls != 1 {
 		t.Fatalf("decode calls after file rewrite = %d, want 1 (cache should survive rewrite)", decodeCalls)
 	}
@@ -129,7 +129,7 @@ func TestRenderImageInline_PrefersThumbnail(t *testing.T) {
 	}
 	renderImageFn = func(_ image.Image, _, _ int) string { return "rendered" }
 
-	_ = RenderImageInline(srcPath, 32, 8)
+	_, _ = RenderImageInline(srcPath, 32, 8)
 
 	if len(seenPaths) == 0 {
 		t.Fatal("decodeImageFile was never called")

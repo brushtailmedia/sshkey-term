@@ -3,13 +3,16 @@ package tui
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
 	"image"
 	"image/png"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-term/internal/client"
 )
 
 // craftedPNGHeader is a valid PNG signature plus IHDR (correct CRC)
@@ -37,36 +40,47 @@ func craftedPNGHeader(w, h uint32) []byte {
 	return b.Bytes()
 }
 
-// TestRenderImageInline_OversizedImageShowsPlaceholder: an original whose
-// header declares more than the decode budget is never decoded; the
-// preview slot gets the placeholder line, cached like a render so the
-// header is not re-read every frame. The real decode path runs here —
-// no stubs — which is the point.
-func TestRenderImageInline_OversizedImageShowsPlaceholder(t *testing.T) {
+// TestRenderImageInline_FailuresAreTypedAndNeverText: the renderer
+// returns an empty string and a typed reason for every failure — never
+// text of its own, which is what let a 44-cell line grow the sidebar
+// past the terminal. The real decode path runs here, no stubs.
+func TestRenderImageInline_FailuresAreTypedAndNeverText(t *testing.T) {
 	t.Setenv("SSHKEY_NO_INLINE_IMAGES", "")
 	resetInlineImageRenderCache()
 	defer resetInlineImageRenderCache()
-
-	path := filepath.Join(t.TempDir(), "file_bigAAAAAAAAAAAAAAAAAA")
-	if err := os.WriteFile(path, craftedPNGHeader(30000, 30000), 0o600); err != nil {
-		t.Fatal(err)
+	dir := t.TempDir()
+	write := func(name string, data []byte) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
 	}
 
-	got := RenderImageInline(path, 40, 12)
-	if !strings.Contains(got, imageTooLargePlaceholder) {
-		t.Fatalf("render = %q, want the placeholder %q", got, imageTooLargePlaceholder)
+	cases := []struct {
+		name string
+		path string
+		want error
+	}{
+		{"over the budget", write("file_bigAAAAAAAAAAAAAAAAAA", craftedPNGHeader(30000, 30000)), client.ErrImageTooLarge},
+		{"unreadable header", write("file_junkAAAAAAAAAAAAAAAAA", []byte("not an image at all")), client.ErrImageHeader},
+		{"missing file", filepath.Join(dir, "file_goneAAAAAAAAAAAAAAAAA"), fs.ErrNotExist},
+	}
+	for _, c := range cases {
+		rendered, err := RenderImageInline(c.path, 40, 12)
+		if !errors.Is(err, c.want) {
+			t.Errorf("%s: error = %v, want %v", c.name, err, c.want)
+		}
+		if rendered != "" {
+			t.Errorf("%s: rendered %q, want nothing", c.name, rendered)
+		}
 	}
 
-	// Second render is served from the cache: the decode hook is never
-	// reached (a stub that fails the test proves it).
-	oldDecode := decodeImageFile
-	defer func() { decodeImageFile = oldDecode }()
-	decodeImageFile = func(string) (image.Image, error) {
-		t.Error("cached placeholder re-decoded the file")
-		return nil, os.ErrNotExist
-	}
-	if again := RenderImageInline(path, 40, 12); again != got {
-		t.Fatalf("second render = %q, want the cached %q", again, got)
+	// Inline images off is a reason too, not a silent blank.
+	t.Setenv("SSHKEY_NO_INLINE_IMAGES", "1")
+	if rendered, err := RenderImageInline(cases[0].path, 40, 12); !errors.Is(err, errInlineImagesOff) || rendered != "" {
+		t.Errorf("images off: rendered %q, error %v; want nothing and errInlineImagesOff", rendered, err)
 	}
 }
 

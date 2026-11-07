@@ -493,15 +493,26 @@ func tryRenderRasterm(filePath string, maxCols, maxRows int) (string, bool) {
 	return out, true
 }
 
+// errInlineImagesOff is the reason when inline images are switched off
+// for the process (SSHKEY_NO_INLINE_IMAGES=1).
+var errInlineImagesOff = errors.New("inline images are off")
+
 // RenderImageInline renders an image file as a string of cell-aligned
 // terminal escape sequences. maxCols/maxRows define the bounding box
 // in terminal cells; aspect ratio is preserved within those bounds
 // using the standard ~1:2 width:height cell aspect.
 //
-// A deferred recover wraps decode + encode so a malformed or crafted
-// image (untrusted sender-supplied bytes) that trips a decoder panic
-// does not crash the TUI — we fall back to the empty-string result
-// which makes the caller render the 🖼 placeholder instead.
+// A failure is an empty string and a typed reason: the file is missing
+// (fs.ErrNotExist), the image is over the decode budget
+// (client.ErrImageTooLarge), its header is unreadable
+// (client.ErrImageHeader), inline images are off (errInlineImagesOff),
+// or the decoder or encoder failed. The renderer never returns text of
+// its own — everything it returns is an image render sized to the box,
+// so a caller can place it without measuring it — and what a failure
+// says on screen is the caller's decision (the sidebar's
+// previewNoticeFor). A deferred recover wraps decode + encode so a
+// malformed or crafted image (untrusted sender-supplied bytes) that
+// trips a decoder panic does not crash the TUI.
 //
 // Encoder selection: when the active terminal advertises a rasterm-
 // supported graphics protocol (kitty / iTerm2 / WezTerm / Ghostty
@@ -509,19 +520,19 @@ func tryRenderRasterm(filePath string, maxCols, maxRows int) (string, bool) {
 // kitty / iTerm2 escape sequences sized to the preview pane. If
 // rasterm is not capable or the encode fails, the block-char path
 // runs unchanged.
-func RenderImageInline(filePath string, maxCols, maxRows int) (result string) {
+func RenderImageInline(filePath string, maxCols, maxRows int) (result string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			result = ""
+			result, err = "", fmt.Errorf("image render: %v", r)
 		}
 	}()
 
 	if !CanRenderImages() {
-		return ""
+		return "", errInlineImagesOff
 	}
 	info, err := os.Stat(filePath)
 	if err != nil {
-		return ""
+		return "", err
 	}
 
 	tc := useTrueColor()
@@ -538,11 +549,11 @@ func RenderImageInline(filePath string, maxCols, maxRows int) (result string) {
 			rasterm:   true,
 		}
 		if cached, ok := getCachedInlineImage(rkey, info.ModTime().UnixNano(), info.Size()); ok {
-			return cached
+			return cached, nil
 		}
 		if rendered, ok := tryRenderRasterm(filePath, maxCols, maxRows); ok {
 			putCachedInlineImage(rkey, info.ModTime().UnixNano(), info.Size(), rendered)
-			return rendered
+			return rendered, nil
 		}
 		// Rasterm capability detected but encode failed (decode error,
 		// IO error, etc.). Fall through to block-char path so the
@@ -556,7 +567,7 @@ func RenderImageInline(filePath string, maxCols, maxRows int) (result string) {
 		truecolor: tc,
 	}
 	if cached, ok := getCachedInlineImage(key, info.ModTime().UnixNano(), info.Size()); ok {
-		return cached
+		return cached, nil
 	}
 
 	// Prefer a persisted thumbnail (~50 KB PNG, fast decode) over the
@@ -570,16 +581,12 @@ func RenderImageInline(filePath string, maxCols, maxRows int) (result string) {
 	if err != nil {
 		img, err = decodeImageFile(filePath)
 		if err != nil {
-			// An original over the decode budget (PLAN step 1b) is
-			// never decoded; say so in the preview slot instead of
-			// leaving it blank, and cache the line like a render so
-			// the header is not re-read on every frame.
-			if errors.Is(err, client.ErrImageTooLarge) {
-				rendered := helpDescStyle.Render(imageTooLargePlaceholder)
-				putCachedInlineImage(key, info.ModTime().UnixNano(), info.Size(), rendered)
-				return rendered
-			}
-			return ""
+			// An original over the decode budget is never decoded; the
+			// error (client.ErrImageTooLarge) goes back to the caller,
+			// which draws its own notice. Nothing is cached: a render
+			// is requested only when the selection changes, and the
+			// header read behind this error is a few bytes.
+			return "", err
 		}
 		// Thumbnail missing for this file. Generate it asynchronously
 		// for next time. Eager paths in DownloadFile / uploadEncrypted
@@ -593,34 +600,12 @@ func RenderImageInline(filePath string, maxCols, maxRows int) (result string) {
 	}
 
 	rendered := renderImageFn(img, maxCols, maxRows)
-	if rendered != "" {
-		putCachedInlineImage(key, info.ModTime().UnixNano(), info.Size(), rendered)
+	if rendered == "" {
+		return "", errors.New("image render: encoder produced nothing")
 	}
-	return rendered
+	putCachedInlineImage(key, info.ModTime().UnixNano(), info.Size(), rendered)
+	return rendered, nil
 }
-
-// RenderImageFromBytes renders an image from raw bytes. Used by paths
-// that have an in-memory image without a backing file (e.g. share
-// screen previews). Bypasses the persistence cache; suitable for
-// one-off rendering.
-func RenderImageFromBytes(data []byte, maxCols, maxRows int) string {
-	if !CanRenderImages() {
-		return ""
-	}
-
-	img, err := client.DecodeBounded(bytes.NewReader(data), client.DecodeBudget())
-	if err != nil {
-		return ""
-	}
-
-	return renderImageFn(img, maxCols, maxRows)
-}
-
-// imageTooLargePlaceholder is what the preview slot shows for an image
-// whose header declares more pixels than the decode budget allows
-// (`[images] max_decode_bytes`). The file itself is intact and opens
-// externally with `o`.
-const imageTooLargePlaceholder = "image too large to preview — press o to open"
 
 // decodeImageFromFile is the one file-decode path of the package. It is
 // bounded (PLAN step 1b): the header is checked against the decode budget
