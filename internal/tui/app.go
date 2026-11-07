@@ -5308,7 +5308,17 @@ func (a *App) editableMessageID() string {
 	// than the next older message, because the server accepts an edit of
 	// the most recent own message only. When captions arrive this refines
 	// to "the body is just the attachment's name".
-	if msg := a.messages.MessageByID(id); msg != nil && len(msg.Attachments) > 0 {
+	msg := a.messages.MessageByID(id)
+	if msg != nil && len(msg.Attachments) > 0 {
+		return ""
+	}
+	// The server accepts an edit for protocol.EditWindowSeconds after the
+	// ORIGINAL send (the message's server-stamped ts), so past that the
+	// affordance is withdrawn rather than offered and refused. Compared
+	// against the local clock: a skewed clock moves this moment a little,
+	// the server's own check stays authoritative. A message with no ts (a
+	// local echo not yet stamped) is left to the server.
+	if msg != nil && msg.TS > 0 && time.Now().Unix()-msg.TS > protocol.EditWindowSeconds {
 		return ""
 	}
 	return id

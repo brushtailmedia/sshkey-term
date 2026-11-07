@@ -19,9 +19,9 @@ func editPane(cursor int) MessagesModel {
 	m.SetContext("room_edit", "", "")
 	m.SetSelfUserID("usr_alice")
 	m.messages = []DisplayMessage{
-		{ID: "msg_1", From: "alice", FromID: "usr_alice", Body: "first", TS: 1},
-		{ID: "msg_2", From: "bob", FromID: "usr_bob", Body: "second", TS: 2},
-		{ID: "msg_3", From: "alice", FromID: "usr_alice", Body: "latest from me", TS: 3},
+		{ID: "msg_1", From: "alice", FromID: "usr_alice", Body: "first", TS: recentTS(30)},
+		{ID: "msg_2", From: "bob", FromID: "usr_bob", Body: "second", TS: recentTS(20)},
+		{ID: "msg_3", From: "alice", FromID: "usr_alice", Body: "latest from me", TS: recentTS(10)},
 	}
 	m.SetEditableMessageID("msg_3")
 	_ = m.View(100, 16, true)

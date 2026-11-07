@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -28,9 +29,9 @@ func newEditAppHarness(t *testing.T) (App, *store.Store) {
 func editFixture(a *App) {
 	a.messages.SetContext("room_edit", "", "")
 	a.messages.messages = []DisplayMessage{
-		{ID: "msg_1", FromID: "usr_alice", Body: "first", TS: 1},
-		{ID: "msg_2", FromID: "usr_bob", Body: "second", TS: 2},
-		{ID: "msg_3", FromID: "usr_alice", Body: "latest from me", TS: 3},
+		{ID: "msg_1", FromID: "usr_alice", Body: "first", TS: recentTS(30)},
+		{ID: "msg_2", FromID: "usr_bob", Body: "second", TS: recentTS(20)},
+		{ID: "msg_3", FromID: "usr_alice", Body: "latest from me", TS: recentTS(10)},
 	}
 }
 
@@ -323,9 +324,9 @@ func TestApp_ReplyActionUsesResolvedDisplayName(t *testing.T) {
 func attachmentFixture(a *App) {
 	a.messages.SetContext("room_edit", "", "")
 	a.messages.messages = []DisplayMessage{
-		{ID: "msg_1", FromID: "usr_alice", Body: "first", TS: 1},
-		{ID: "msg_2", FromID: "usr_bob", Body: "second", TS: 2},
-		{ID: "msg_3", FromID: "usr_alice", Body: "photo.png", TS: 3,
+		{ID: "msg_1", FromID: "usr_alice", Body: "first", TS: recentTS(30)},
+		{ID: "msg_2", FromID: "usr_bob", Body: "second", TS: recentTS(20)},
+		{ID: "msg_3", FromID: "usr_alice", Body: "photo.png", TS: recentTS(10),
 			Attachments: []DisplayAttachment{{FileID: "file_photoAAAAAAAAAAAAAAAA", Name: "photo.png", Mime: "image/png", IsImage: true}}},
 	}
 }
@@ -366,12 +367,64 @@ func TestApp_OlderAttachmentDoesNotBlockEditingNewerText(t *testing.T) {
 	a, _ := newEditAppHarness(t)
 	a.messages.SetContext("room_edit", "", "")
 	a.messages.messages = []DisplayMessage{
-		{ID: "msg_1", FromID: "usr_alice", Body: "photo.png", TS: 1,
+		{ID: "msg_1", FromID: "usr_alice", Body: "photo.png", TS: recentTS(30),
 			Attachments: []DisplayAttachment{{FileID: "file_photoAAAAAAAAAAAAAAAA", Name: "photo.png", Mime: "image/png", IsImage: true}}},
-		{ID: "msg_2", FromID: "usr_bob", Body: "nice", TS: 2},
-		{ID: "msg_3", FromID: "usr_alice", Body: "thanks", TS: 3},
+		{ID: "msg_2", FromID: "usr_bob", Body: "nice", TS: recentTS(20)},
+		{ID: "msg_3", FromID: "usr_alice", Body: "thanks", TS: recentTS(10)},
 	}
 	if got := a.editableMessageID(); got != "msg_3" {
 		t.Fatalf("editableMessageID = %q, want msg_3", got)
+	}
+}
+
+// recentTS is a server-style timestamp `secondsAgo` before now, so a fixture
+// message sits inside the fifteen-minute edit window regardless of when the
+// test runs.
+func recentTS(secondsAgo int64) int64 { return time.Now().Unix() - secondsAgo }
+
+// A message older than the edit window is not editable: the rule answers
+// "", so the `a` key does nothing, the hint is absent and the context menu
+// has no Edit; one inside the window still is. Margins of a hundred seconds
+// either side of the fifteen-minute line keep the test immune to slow runs.
+func TestApp_EditWindow_OldMessageNotEditable(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		secondsAgo int64
+		editable   bool
+	}{
+		{"inside the window", protocol.EditWindowSeconds - 100, true},
+		{"past the window", protocol.EditWindowSeconds + 100, false},
+	} {
+		a, _ := newEditAppHarness(t)
+		a.messages.SetContext("room_edit", "", "")
+		a.messages.messages = []DisplayMessage{
+			{ID: "msg_1", FromID: "usr_bob", Body: "hello", TS: recentTS(tc.secondsAgo + 5)},
+			{ID: "msg_2", FromID: "usr_alice", Body: "my last", TS: recentTS(tc.secondsAgo)},
+		}
+		a.setFocus(FocusMessages)
+		a.messages.cursor = 1
+
+		got := a.editableMessageID()
+		if tc.editable && got != "msg_2" {
+			t.Fatalf("%s: editableMessageID = %q, want msg_2", tc.name, got)
+		}
+		if !tc.editable && got != "" {
+			t.Fatalf("%s: editableMessageID = %q, want \"\"", tc.name, got)
+		}
+		if a.canEditMessage(a.messages.messages[1]) != tc.editable {
+			t.Fatalf("%s: canEditMessage = %v, want %v", tc.name, !tc.editable, tc.editable)
+		}
+		// The update wrapper pushes the rule to the pane on every update;
+		// a benign message runs it so the hint reflects the rule.
+		model, _ := a.Update(previewRenderReadyMsg{})
+		synced := model.(App)
+		if hint := strings.Contains(stripANSI(synced.messages.View(80, 20, true)), "a=edit"); hint != tc.editable {
+			t.Fatalf("%s: a=edit hint shown=%v, want %v", tc.name, hint, tc.editable)
+		}
+		model, cmd := synced.Update(keyRune('a'))
+		after := deliver(t, model.(App), cmd)
+		if after.input.IsEditing() != tc.editable {
+			t.Fatalf("%s: a key → editing=%v, want %v", tc.name, after.input.IsEditing(), tc.editable)
+		}
 	}
 }

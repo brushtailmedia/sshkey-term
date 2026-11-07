@@ -34,10 +34,10 @@ func TestContextMenu_EditItem(t *testing.T) {
 // most recent one; someone else wrote the last message in the room.
 func ownAndOtherMessages() []DisplayMessage {
 	return []DisplayMessage{
-		{ID: "mine_old", From: "me", FromID: "usr_self", Body: "first draft", TS: 1000},
-		{ID: "theirs", From: "Bob", FromID: "usr_bob", Body: "hello", TS: 1001},
-		{ID: "mine_new", From: "me", FromID: "usr_self", Body: "second draft", TS: 1002},
-		{ID: "theirs_last", From: "Bob", FromID: "usr_bob", Body: "bye", TS: 1003},
+		{ID: "mine_old", From: "me", FromID: "usr_self", Body: "first draft", TS: recentTS(40)},
+		{ID: "theirs", From: "Bob", FromID: "usr_bob", Body: "hello", TS: recentTS(30)},
+		{ID: "mine_new", From: "me", FromID: "usr_self", Body: "second draft", TS: recentTS(20)},
+		{ID: "theirs_last", From: "Bob", FromID: "usr_bob", Body: "bye", TS: recentTS(10)},
 	}
 }
 

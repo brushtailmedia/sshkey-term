@@ -1278,3 +1278,11 @@ type DecryptedReaction struct {
 
 // RawMessage is a JSON object that hasn't been decoded into a specific type yet.
 type RawMessage = json.RawMessage
+
+// EditWindowSeconds mirrors the server's protocol rule: an edit is accepted
+// for fifteen minutes after a message's ORIGINAL send (its server-stamped
+// `ts`), never measured from a previous edit. The client hides the edit
+// affordance once a message is older than this by its `ts`; the server
+// enforces it against its own clock, so a skewed local clock only moves
+// the moment the affordance disappears, never what the server accepts.
+const EditWindowSeconds int64 = 15 * 60
