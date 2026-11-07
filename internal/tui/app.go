@@ -5296,7 +5296,22 @@ func (a *App) editableMessageID() string {
 	if retired, _ := a.currentDMRetiredPartner(); retired {
 		return ""
 	}
-	return a.mostRecentOwnMessageID()
+	id := a.mostRecentOwnMessageID()
+	if id == "" {
+		return ""
+	}
+	// A message that carries an attachment is not offered for editing. An
+	// edit never touches the attachment set (server rule), and a bare upload
+	// sends the file's name as its body, so the only thing an edit could
+	// change is a copy of the name that no client displays — pointless, and
+	// it reads as if the file could be replaced. The answer is "" rather
+	// than the next older message, because the server accepts an edit of
+	// the most recent own message only. When captions arrive this refines
+	// to "the body is just the attachment's name".
+	if msg := a.messages.MessageByID(id); msg != nil && len(msg.Attachments) > 0 {
+		return ""
+	}
+	return id
 }
 
 // canEditMessage reports whether the context menu should offer Edit for a

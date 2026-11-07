@@ -317,3 +317,61 @@ func TestApp_ReplyActionUsesResolvedDisplayName(t *testing.T) {
 			updated.input.replyRoom, updated.input.replyGroup, updated.input.replyDM)
 	}
 }
+
+// attachmentFixture is editFixture with alice's most recent message carrying
+// an attachment (a bare upload: its body is the file's name).
+func attachmentFixture(a *App) {
+	a.messages.SetContext("room_edit", "", "")
+	a.messages.messages = []DisplayMessage{
+		{ID: "msg_1", FromID: "usr_alice", Body: "first", TS: 1},
+		{ID: "msg_2", FromID: "usr_bob", Body: "second", TS: 2},
+		{ID: "msg_3", FromID: "usr_alice", Body: "photo.png", TS: 3,
+			Attachments: []DisplayAttachment{{FileID: "file_photoAAAAAAAAAAAAAAAA", Name: "photo.png", Mime: "image/png", IsImage: true}}},
+	}
+}
+
+// A message with an attachment is never offered for editing: an edit cannot
+// change the attachment, only the copy of its name in the body. The one
+// predicate answers "" — not the older text message, which the server would
+// refuse — so the pane's `a`, its hint and the context menu all go quiet.
+func TestApp_AttachmentMessageIsNotEditable(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	attachmentFixture(&a)
+	a.setFocus(FocusMessages)
+	a.messages.cursor = 2 // msg_3, the attachment
+
+	if got := a.editableMessageID(); got != "" {
+		t.Fatalf("editableMessageID = %q, want \"\" for an attachment message", got)
+	}
+	if a.canEditMessage(a.messages.messages[2]) {
+		t.Fatal("context menu would offer Edit on an attachment message")
+	}
+	if a.canEditMessage(a.messages.messages[0]) {
+		t.Fatal("context menu would offer Edit on an older message the server would refuse")
+	}
+
+	model, cmd := a.Update(keyRune('a'))
+	got := deliver(t, model.(App), cmd)
+	if got.input.IsEditing() || got.focus != FocusMessages {
+		t.Fatalf("a on the attachment message: editing=%v focus=%v; want nothing to happen", got.input.IsEditing(), got.focus)
+	}
+	if strings.Contains(stripANSI(got.messages.View(80, 20, true)), "a=edit") {
+		t.Fatal("the a=edit hint is shown on an attachment message")
+	}
+}
+
+// An older attachment message leaves a newer text message editable: the
+// rule is about the most recent own message only.
+func TestApp_OlderAttachmentDoesNotBlockEditingNewerText(t *testing.T) {
+	a, _ := newEditAppHarness(t)
+	a.messages.SetContext("room_edit", "", "")
+	a.messages.messages = []DisplayMessage{
+		{ID: "msg_1", FromID: "usr_alice", Body: "photo.png", TS: 1,
+			Attachments: []DisplayAttachment{{FileID: "file_photoAAAAAAAAAAAAAAAA", Name: "photo.png", Mime: "image/png", IsImage: true}}},
+		{ID: "msg_2", FromID: "usr_bob", Body: "nice", TS: 2},
+		{ID: "msg_3", FromID: "usr_alice", Body: "thanks", TS: 3},
+	}
+	if got := a.editableMessageID(); got != "msg_3" {
+		t.Fatalf("editableMessageID = %q, want msg_3", got)
+	}
+}

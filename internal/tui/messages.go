@@ -1923,6 +1923,21 @@ func (m *MessagesModel) OnLastMessage() bool {
 	return m.cursor >= len(m.messages)-1
 }
 
+// MessageByID returns the loaded message with the given ID, or nil. The
+// App's edit-eligibility rule uses it to inspect the most recent own
+// message (attachments are not editable).
+func (m *MessagesModel) MessageByID(id string) *DisplayMessage {
+	if id == "" {
+		return nil
+	}
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].ID == id {
+			return &m.messages[i]
+		}
+	}
+	return nil
+}
+
 // MessageAction is returned when the user performs an action on a selected message.
 type MessageAction struct {
 	Action string // "reply", "delete", "pin", "unpin", "copy", "react", "unreact", ...
