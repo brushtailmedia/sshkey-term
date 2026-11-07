@@ -95,11 +95,11 @@ func TestCompletion_PopupStaysInThePaneAndKeepsTheImagePreview(t *testing.T) {
 	// the cache so the preview embeds a kitty placement synchronously.
 	dir := t.TempDir()
 	a.messages.SetFilesDir(dir)
-	if err := os.WriteFile(filepath.Join(dir, "file_pic"), []byte("png"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "file_picAAAAAAAAAAAAAAAAAA"), []byte("png"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	a.messages.messages = []DisplayMessage{{ID: "m1", From: "Alice", FromID: "usr_alice", Body: "look", TS: 1,
-		Attachments: []DisplayAttachment{{FileID: "file_pic", Name: "pic.png", Mime: "image/png", IsImage: true}}}}
+		Attachments: []DisplayAttachment{{FileID: "file_picAAAAAAAAAAAAAAAAAA", Name: "pic.png", Mime: "image/png", IsImage: true}}}}
 	a.messages.cursor = 0
 	path := a.messages.SelectedImagePath()
 	if path == "" {

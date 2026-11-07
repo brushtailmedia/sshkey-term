@@ -50,9 +50,9 @@ func imageMessage(fileID string) DisplayMessage {
 
 func TestOfflinePreview_CachedBlobNeedsNoServer(t *testing.T) {
 	a := newOfflineAttachmentApp(t)
-	cacheBlob(t, a, "file_cached01")
+	cacheBlob(t, a, "file_cached01AAAAAAAAAAAAA")
 
-	model, _ := a.Update(MessageAction{Action: "preview_attachment", Msg: imageMessage("file_cached01")})
+	model, _ := a.Update(MessageAction{Action: "preview_attachment", Msg: imageMessage("file_cached01AAAAAAAAAAAAA")})
 	na := model.(App)
 	if na.statusBar.errorMsg != "Preview ready: pic.png" {
 		t.Fatalf("cached preview offline: status = %q, want Preview ready", na.statusBar.errorMsg)
@@ -62,7 +62,7 @@ func TestOfflinePreview_CachedBlobNeedsNoServer(t *testing.T) {
 func TestOfflinePreview_UncachedBlobSaysReconnect(t *testing.T) {
 	a := newOfflineAttachmentApp(t)
 
-	model, _ := a.Update(MessageAction{Action: "preview_attachment", Msg: imageMessage("file_missing01")})
+	model, _ := a.Update(MessageAction{Action: "preview_attachment", Msg: imageMessage("file_missing01AAAAAAAAAAAA")})
 	na := model.(App)
 	if !strings.Contains(na.statusBar.errorMsg, "not cached") || !strings.Contains(na.statusBar.errorMsg, "reconnect") {
 		t.Fatalf("uncached preview offline: status = %q, want the not-cached / reconnect message", na.statusBar.errorMsg)
@@ -74,7 +74,7 @@ func TestOfflinePreview_UncachedBlobSaysReconnect(t *testing.T) {
 
 func TestOfflineOpen_CachedBlobOpensWithoutServer(t *testing.T) {
 	a := newOfflineAttachmentApp(t)
-	want := cacheBlob(t, a, "file_cached02")
+	want := cacheBlob(t, a, "file_cached02AAAAAAAAAAAAA")
 
 	opened := make(chan [2]string, 1)
 	orig := openCachedAttachment
@@ -84,7 +84,7 @@ func TestOfflineOpen_CachedBlobOpensWithoutServer(t *testing.T) {
 	}
 	t.Cleanup(func() { openCachedAttachment = orig })
 
-	model, _ := a.Update(MessageAction{Action: "open_attachment", Msg: imageMessage("file_cached02")})
+	model, _ := a.Update(MessageAction{Action: "open_attachment", Msg: imageMessage("file_cached02AAAAAAAAAAAAA")})
 	na := model.(App)
 	select {
 	case got := <-opened:
@@ -109,7 +109,7 @@ func TestOfflineOpen_UncachedBlobSaysReconnect(t *testing.T) {
 	}
 	t.Cleanup(func() { openCachedAttachment = orig })
 
-	model, _ := a.Update(MessageAction{Action: "open_attachment", Msg: imageMessage("file_missing02")})
+	model, _ := a.Update(MessageAction{Action: "open_attachment", Msg: imageMessage("file_missing02AAAAAAAAAAAA")})
 	na := model.(App)
 	if !strings.Contains(na.statusBar.errorMsg, "not cached") {
 		t.Fatalf("uncached open offline: status = %q, want the not-cached message", na.statusBar.errorMsg)
@@ -124,7 +124,7 @@ func TestOnlinePreview_UncachedStillDownloads(t *testing.T) {
 	a, _ := newEditAppHarness(t) // live session: connected client, ConnStateOnline
 	a.cfg.DataDir = t.TempDir()
 
-	model, _ := a.Update(MessageAction{Action: "preview_attachment", Msg: imageMessage("file_missing03")})
+	model, _ := a.Update(MessageAction{Action: "preview_attachment", Msg: imageMessage("file_missing03AAAAAAAAAAAA")})
 	na := model.(App)
 	if na.statusBar.errorMsg != "Loading preview of pic.png..." {
 		t.Fatalf("online uncached preview must start a download: status = %q", na.statusBar.errorMsg)

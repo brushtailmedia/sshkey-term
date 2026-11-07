@@ -239,24 +239,61 @@ func AttachmentPath(dataDir, fileID string) string {
 	return filepath.Join(FilesDir(dataDir), fileID)
 }
 
-// ValidFileID reports whether fileID is safe to use as a single path
-// component under FilesDir — i.e. turning it into a local path cannot escape
-// the attachment cache via traversal. fileID is server/sender-supplied (it
-// arrives in the E2E attachment metadata), so EVERY site that turns it into a
-// local path must gate on this before touching the filesystem — not just the
-// write/delete paths but the read/stat/render paths too (audit F12): a
-// traversal-shaped id like "../../etc/passwd" must never be treated as a
-// cached local file, or the recipient's own files could be stat'd and decoded
-// as images in their own view. Rejects empty / "." / ".." / path separators
-// (/ and \) / NUL, and requires the id to equal its own filepath.Base.
+// AttachmentPartPath returns `<dataDir>/files/<fileID>.part`, the
+// in-progress download written beside its final name and renamed into
+// place once the content hash passes (attachments v2). Listed by the
+// delete path's closed list so a message deletion cannot leave a
+// half-written blob behind.
+func AttachmentPartPath(dataDir, fileID string) string {
+	return AttachmentPath(dataDir, fileID) + ".part"
+}
+
+// AttachmentLocalThumbPath returns `<dataDir>/files/<fileID>.lthumb`,
+// the receiver-generated safety-net thumbnail of attachments v2 (made
+// only when a message carries no sender thumbnail). Listed by the
+// delete path's closed list.
+func AttachmentLocalThumbPath(dataDir, fileID string) string {
+	return AttachmentPath(dataDir, fileID) + ".lthumb"
+}
+
+// FileIDPrefix and fileIDBodyLen mirror the server's minting rule
+// exactly: `store.GenerateID` produces "file_" followed by 21 nanoid
+// characters over [A-Za-z0-9_-], and the server validates downloads
+// against the same shape (`store.ValidateNanoID`).
+const (
+	FileIDPrefix  = "file_"
+	fileIDBodyLen = 21
+)
+
+// ValidFileID reports whether fileID has exactly the shape the server
+// mints: FileIDPrefix plus 21 characters of [A-Za-z0-9_-], nothing
+// else. fileID is server/sender-supplied (it arrives in the E2E
+// attachment metadata), so EVERY site that turns it into a local path
+// under FilesDir must gate on this before touching the filesystem — not
+// just the write/delete paths but the read/stat/render paths too (audit
+// F12): a traversal-shaped id like "../../etc/passwd" must never be
+// treated as a cached local file, or the recipient's own files could be
+// stat'd and decoded as images in their own view.
+//
+// The exact-shape rule replaces the earlier "any safe single path
+// component" rule (which accepted dots). The alphabet has no dot, so no
+// valid id can spell another attachment's derived-file name (`<id>.part`,
+// `<id>.lthumb`, the thumbnail suffixes): a hostile server cannot mint an
+// id that collides with a neighbour's sidecar and have the cache
+// overwrite or delete it (attachments v2 PLAN step 3b).
 func ValidFileID(fileID string) bool {
-	if fileID == "" || fileID == "." || fileID == ".." {
+	if len(fileID) != len(FileIDPrefix)+fileIDBodyLen || !strings.HasPrefix(fileID, FileIDPrefix) {
 		return false
 	}
-	if strings.ContainsAny(fileID, "\x00/\\") {
-		return false
+	for i := len(FileIDPrefix); i < len(fileID); i++ {
+		c := fileID[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
 	}
-	return filepath.Base(fileID) == fileID
+	return true
 }
 
 // MessagesDBPath returns `<dataDir>/messages.db`, the per-server

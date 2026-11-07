@@ -56,7 +56,7 @@ func TestMaybeAutoPreview_DisabledByZeroCap(t *testing.T) {
 	c, done := newTestAutoPreviewClient(t, 0) // cap=0 => disabled
 
 	att := store.StoredAttachment{
-		FileID:     "file_should_skip",
+		FileID:     "file_should_skipAAAAAAAAAA",
 		Name:       "photo.jpg",
 		Size:       100,
 		Mime:       "image/jpeg",
@@ -78,7 +78,7 @@ func TestMaybeAutoPreview_OverCapSkips(t *testing.T) {
 	c, done := newTestAutoPreviewClient(t, 2*1024*1024) // cap=2MB
 
 	att := store.StoredAttachment{
-		FileID:     "file_too_big",
+		FileID:     "file_too_bigAAAAAAAAAAAAAA",
 		Name:       "huge.png",
 		Size:       10 * 1024 * 1024, // 10MB — over cap
 		Mime:       "image/png",
@@ -95,7 +95,7 @@ func TestMaybeAutoPreview_NonImageMimeSkips(t *testing.T) {
 	c, done := newTestAutoPreviewClient(t, 2*1024*1024)
 
 	att := store.StoredAttachment{
-		FileID:     "file_pdf",
+		FileID:     "file_pdfAAAAAAAAAAAAAAAAAA",
 		Name:       "report.pdf",
 		Size:       50 * 1024, // well under cap
 		Mime:       "application/pdf",
@@ -119,7 +119,7 @@ func TestMaybeAutoPreview_AlreadyCached(t *testing.T) {
 	c.cfg.DataDir = dir
 
 	// Seed the cache with a file at the deterministic path.
-	fileID := "file_already_cached"
+	fileID := "file_already_cachedAAAAAAA"
 	if err := os.MkdirAll(filepath.Join(dir, "files"), 0700); err != nil {
 		t.Fatalf("mkdir cache: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestMaybeAutoPreview_BadDecryptKeySkips(t *testing.T) {
 	c, done := newTestAutoPreviewClient(t, 2*1024*1024)
 
 	att := store.StoredAttachment{
-		FileID:     "file_bad_key",
+		FileID:     "file_bad_keyAAAAAAAAAAAAAA",
 		Name:       "photo.jpg",
 		Size:       500,
 		Mime:       "image/jpeg",

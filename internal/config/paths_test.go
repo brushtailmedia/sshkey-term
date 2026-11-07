@@ -348,15 +348,17 @@ func TestHelpers_ComposeCorrectly(t *testing.T) {
 
 // TestValidFileID is the canonical test for the audit-F12 path-safety
 // invariant. fileID is server/sender-supplied and gets joined onto FilesDir at
-// every read/write/stat/render site, so it must reject anything that isn't a
-// safe single path component. Legitimate server fileIDs ("file_" + nanoid over
-// [A-Za-z0-9_-]) must still pass.
+// every read/write/stat/render site, so it must accept exactly the shape the
+// server mints ("file_" + 21 nanoid characters over [A-Za-z0-9_-]) and
+// nothing else — not merely "a safe single path component" (attachments v2
+// PLAN step 3b).
 func TestValidFileID(t *testing.T) {
 	valid := []string{
 		"file_V1StGXR8_Z5jdHi6B-myT", // server format: file_ + 21-char nanoid (incl. _ and -)
-		"file_abc123",
-		"safename",
-		"a-b_c.d", // a dot INSIDE a name is fine — only "." / ".." are rejected
+		"file_AAAAAAAAAAAAAAAAAAAAA",
+		"file_---------------------",
+		"file______________________",
+		"file_000000000000000000000",
 	}
 	for _, id := range valid {
 		if !ValidFileID(id) {
@@ -378,10 +380,61 @@ func TestValidFileID(t *testing.T) {
 		"..\\..\\windows", // windows-style traversal
 		"a/../../b",
 		"file_\x00evil", // embedded NUL
+		// Step 3b: shape, not just safety.
+		"file_abc123",                     // short
+		"safename",                        // no prefix
+		"a-b_c.d",                         // no prefix, dotted
+		"FILE_V1StGXR8_Z5jdHi6B-myT",      // wrong prefix case
+		"file_V1StGXR8_Z5jdHi6B-myTX",     // 22 characters
+		"file_V1StGXR8_Z5jdHi6B-my",       // 20 characters
+		"file_V1StGXR8_Z5jdHi6B.myT",      // dot inside the body
+		"file_V1StGXR8_Z5jdHi6B+myT",      // outside the alphabet
+		"file_V1StGXR8_Z5jdHi6B myT",      // space
+		"file_V1StGXR8_Z5jdHi6B-myT.part", // a derived-file name
+		"file_V1StGXR8_Z5jdHi6Bé-my",      // multibyte, right byte length
 	}
 	for _, id := range invalid {
 		if ValidFileID(id) {
-			t.Errorf("ValidFileID(%q) = true, want false (path-traversal risk)", id)
+			t.Errorf("ValidFileID(%q) = true, want false", id)
 		}
+	}
+}
+
+// TestValidFileID_CannotSpellADerivedFileName pins the property the delete
+// path's closed list relies on: every derived file is `<id>` plus a dotted
+// suffix, the alphabet has no dot, so no valid id can name another
+// attachment's sidecar (a hostile server cannot make the cache overwrite or
+// delete a neighbour's `.part`, `.lthumb` or thumbnail).
+func TestValidFileID_CannotSpellADerivedFileName(t *testing.T) {
+	suffixes := []string{".part", ".lthumb", ".thumb_v2.png", ".thumb_rasterm_v1.png", ".png"}
+	for _, id := range []string{"file_V1StGXR8_Z5jdHi6B-myT", "file_AAAAAAAAAAAAAAAAAAAAA"} {
+		if !ValidFileID(id) {
+			t.Fatalf("fixture %q is not a valid id", id)
+		}
+		if strings.Contains(id, ".") {
+			t.Errorf("valid id %q contains a dot", id)
+		}
+		for _, s := range suffixes {
+			if ValidFileID(id + s) {
+				t.Errorf("ValidFileID(%q) = true, want false (derived-file name)", id+s)
+			}
+		}
+	}
+}
+
+// TestAttachmentSidecarPaths pins the two sidecar helpers against the
+// original's path: the same directory, the id plus a fixed suffix.
+func TestAttachmentSidecarPaths(t *testing.T) {
+	dataDir := filepath.Join("some", "data")
+	const id = "file_V1StGXR8_Z5jdHi6B-myT"
+	orig := AttachmentPath(dataDir, id)
+	if got, want := AttachmentPartPath(dataDir, id), orig+".part"; got != want {
+		t.Errorf("AttachmentPartPath = %q, want %q", got, want)
+	}
+	if got, want := AttachmentLocalThumbPath(dataDir, id), orig+".lthumb"; got != want {
+		t.Errorf("AttachmentLocalThumbPath = %q, want %q", got, want)
+	}
+	if filepath.Dir(AttachmentPartPath(dataDir, id)) != FilesDir(dataDir) {
+		t.Errorf("sidecar left the files dir: %q", AttachmentPartPath(dataDir, id))
 	}
 }

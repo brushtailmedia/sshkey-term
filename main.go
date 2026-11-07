@@ -42,6 +42,12 @@ func run() error {
 	}
 	config.EnsureDeviceID(cfg)
 
+	// Image bounds (attachments v2 PLAN step 1b): the decode budget every
+	// local decode is checked against, and the soft memory limit that
+	// returns decode transients to the OS promptly.
+	client.SetDecodeBudget(cfg.Images.MaxDecodeBytes)
+	applyMemoryLimit(cfg.Images.MemoryLimitPercent)
+
 	var server config.ServerConfig
 	// ephemeral is set to true when the CLI bypass is used in
 	// "ephemeral mode" — `-host`/`-key` supplied but the host

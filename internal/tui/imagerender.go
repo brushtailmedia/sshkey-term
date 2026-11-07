@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -569,6 +570,15 @@ func RenderImageInline(filePath string, maxCols, maxRows int) (result string) {
 	if err != nil {
 		img, err = decodeImageFile(filePath)
 		if err != nil {
+			// An original over the decode budget (PLAN step 1b) is
+			// never decoded; say so in the preview slot instead of
+			// leaving it blank, and cache the line like a render so
+			// the header is not re-read on every frame.
+			if errors.Is(err, client.ErrImageTooLarge) {
+				rendered := helpDescStyle.Render(imageTooLargePlaceholder)
+				putCachedInlineImage(key, info.ModTime().UnixNano(), info.Size(), rendered)
+				return rendered
+			}
 			return ""
 		}
 		// Thumbnail missing for this file. Generate it asynchronously
@@ -598,7 +608,7 @@ func RenderImageFromBytes(data []byte, maxCols, maxRows int) string {
 		return ""
 	}
 
-	img, _, err := image.Decode(bytes.NewReader(data))
+	img, err := client.DecodeBounded(bytes.NewReader(data), client.DecodeBudget())
 	if err != nil {
 		return ""
 	}
@@ -606,17 +616,24 @@ func RenderImageFromBytes(data []byte, maxCols, maxRows int) string {
 	return renderImageFn(img, maxCols, maxRows)
 }
 
+// imageTooLargePlaceholder is what the preview slot shows for an image
+// whose header declares more pixels than the decode budget allows
+// (`[images] max_decode_bytes`). The file itself is intact and opens
+// externally with `o`.
+const imageTooLargePlaceholder = "image too large to preview — press o to open"
+
+// decodeImageFromFile is the one file-decode path of the package. It is
+// bounded (PLAN step 1b): the header is checked against the decode budget
+// before any pixel allocation, an unreadable header fails closed, and the
+// decode itself holds the process-wide semaphore, so a crafted image can
+// neither allocate gigabytes nor run several decodes at once.
 func decodeImageFromFile(filePath string) (image.Image, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	img, _, err := image.Decode(f)
-	if err != nil {
-		return nil, err
-	}
-	return img, nil
+	return client.DecodeBounded(f, client.DecodeBudget())
 }
 
 // lookupCachedRenderForKey is the synchronous cache-hit fast-path

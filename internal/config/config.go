@@ -17,7 +17,35 @@ type Config struct {
 	Servers       []ServerConfig     `toml:"servers"`
 	Notifications NotificationConfig `toml:"notifications"`
 	Attachments   AttachmentsConfig  `toml:"attachments"`
+	Images        ImagesConfig       `toml:"images"`
 }
+
+// ImagesConfig bounds what the client will do with image bytes it did
+// not produce (attachments v2 PLAN step 1b).
+type ImagesConfig struct {
+	// MaxDecodeBytes is the decode budget: an image whose header
+	// declares width × height × bytes-per-pixel above it is refused
+	// before any pixel allocation and shown as a placeholder (it still
+	// opens externally). Default when unset or ≤ 0: 256 MiB, which
+	// admits 64 megapixels of 8-bit RGBA — current phone and full-frame
+	// camera output — and refuses 200 MP phone modes. There is no
+	// "unlimited"; set a larger number instead.
+	MaxDecodeBytes int64 `toml:"max_decode_bytes"`
+	// MemoryLimitPercent sets Go's soft memory limit at startup to this
+	// percentage of physical RAM, so transient decode memory is returned
+	// to the OS promptly instead of leaving the process large for
+	// minutes. It does not prevent a large allocation; the budget does.
+	// Default when unset or ≤ 0: 25. Values above 100 are clamped.
+	// Skipped silently when physical RAM cannot be determined.
+	MemoryLimitPercent int `toml:"memory_limit_percent"`
+}
+
+// Defaults for ImagesConfig, applied in Load when the keys are absent or
+// non-positive.
+const (
+	DefaultMaxDecodeBytes     int64 = 256 * 1024 * 1024
+	DefaultMemoryLimitPercent       = 25
+)
 
 // AttachmentsConfig controls inline attachment behavior.
 type AttachmentsConfig struct {
@@ -116,6 +144,19 @@ func Load(dir string) (*Config, error) {
 	// instead of having to wait for a restart.
 	if cfg.Attachments.ImageAutoPreviewMaxBytes == 0 {
 		cfg.Attachments.ImageAutoPreviewMaxBytes = DefaultImageAutoPreviewMaxBytes
+	}
+
+	// The image bounds have no "off" value: non-positive means the
+	// default, and a percentage above 100 is clamped. Runs for fresh
+	// installs and for configs written before the section existed.
+	if cfg.Images.MaxDecodeBytes <= 0 {
+		cfg.Images.MaxDecodeBytes = DefaultMaxDecodeBytes
+	}
+	if cfg.Images.MemoryLimitPercent <= 0 {
+		cfg.Images.MemoryLimitPercent = DefaultMemoryLimitPercent
+	}
+	if cfg.Images.MemoryLimitPercent > 100 {
+		cfg.Images.MemoryLimitPercent = 100
 	}
 
 	return cfg, nil

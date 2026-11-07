@@ -2074,15 +2074,38 @@ func (c *Client) cleanupAttachmentFiles(fileIDs []string) {
 		return
 	}
 	for _, fid := range fileIDs {
-		// F12: fid is a server-relayed attachment id; skip os.Remove for any
-		// unsafe value so a malicious server can't make cleanup delete an
-		// arbitrary file via path traversal.
-		if !validFileID(fid) {
-			continue
-		}
-		if err := os.Remove(config.AttachmentPath(c.cfg.DataDir, fid)); err != nil && !os.IsNotExist(err) {
-			if c.logger != nil {
-				c.logger.Warn("attachment cleanup", "fileID", fid, "error", err)
+		removeCachedAttachment(c.cfg.DataDir, fid, c.logger)
+	}
+}
+
+// removeCachedAttachment removes every file the cache derives from one
+// attachment id: the original, the in-progress `.part`, the local
+// safety-net thumbnail `.lthumb`, and the two legacy plaintext thumbnails
+// (attachments-v2.md §7). Before this, a deletion removed the original
+// only and both thumbnails stayed on disk — a deleted image remained
+// recoverable from them. A closed list, never a glob, so a neighbouring
+// name that merely shares the prefix (`<id>x`, `<id>.png`) is untouched.
+//
+// F12: fid is a server-relayed attachment id; an invalid value is a no-op
+// so a malicious server cannot make cleanup delete an arbitrary file via
+// path traversal. A file that was never written is silent (IsNotExist);
+// any other removal error is logged and the rest of the list still runs.
+func removeCachedAttachment(dataDir, fileID string, logger *slog.Logger) {
+	if dataDir == "" || !validFileID(fileID) {
+		return
+	}
+	p := config.AttachmentPath(dataDir, fileID)
+	derived := []string{
+		p,
+		config.AttachmentPartPath(dataDir, fileID),
+		config.AttachmentLocalThumbPath(dataDir, fileID),
+		ThumbnailPath(p),
+		ThumbnailPathRasterm(p),
+	}
+	for _, path := range derived {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			if logger != nil {
+				logger.Warn("attachment cleanup", "fileID", fileID, "path", path, "error", err)
 			}
 		}
 	}

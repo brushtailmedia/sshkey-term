@@ -54,7 +54,7 @@ func decodeSingleDownloadRequest(t *testing.T, data []byte) protocol.Download {
 }
 
 func TestDownloadFile_HappyPath(t *testing.T) {
-	const fileID = "file_dl_happy"
+	const fileID = "file_dl_happyAAAAAAAAAAAAA"
 
 	plaintext := []byte("hello from download path")
 	decryptKey, err := crypto.GenerateKey()
@@ -128,7 +128,7 @@ func TestDownloadFile_HappyPath(t *testing.T) {
 // check would pass and the blob decrypts cleanly under the shared key. Only the
 // sender-authenticated hash catches the swap.
 func TestDownloadFile_RejectsServerSubstitutedBlob(t *testing.T) {
-	const fileID = "file_dl_swap"
+	const fileID = "file_dl_swapAAAAAAAAAAAAAA"
 
 	key, err := crypto.GenerateKey() // the shared room epoch key
 	if err != nil {
@@ -177,7 +177,7 @@ func TestDownloadFile_RejectsServerSubstitutedBlob(t *testing.T) {
 }
 
 func TestDownloadFile_DownloadErrorFailsFast(t *testing.T) {
-	const fileID = "file_dl_error"
+	const fileID = "file_dl_errorAAAAAAAAAAAAA"
 
 	decryptKey, err := crypto.GenerateKey()
 	if err != nil {

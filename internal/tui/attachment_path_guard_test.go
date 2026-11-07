@@ -37,11 +37,11 @@ func TestAttachmentLocalPath_RejectsTraversal(t *testing.T) {
 
 	// Sanity: a legitimate cached id inside filesDir still resolves so the
 	// guard hasn't broken normal inline-image rendering.
-	good := filepath.Join(filesDir, "file_good")
+	good := filepath.Join(filesDir, "file_goodAAAAAAAAAAAAAAAAA")
 	if err := os.WriteFile(good, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := m.attachmentLocalPath("file_good"); got != good {
-		t.Errorf("attachmentLocalPath(%q) = %q, want %q (valid cached id must still resolve)", "file_good", got, good)
+	if got := m.attachmentLocalPath("file_goodAAAAAAAAAAAAAAAAA"); got != good {
+		t.Errorf("attachmentLocalPath(%q) = %q, want %q (valid cached id must still resolve)", "file_goodAAAAAAAAAAAAAAAAA", got, good)
 	}
 }

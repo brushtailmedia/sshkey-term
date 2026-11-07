@@ -318,14 +318,14 @@ func TestApp_UpdateWrapper_PersistsPreviewPath(t *testing.T) {
 	// a non-empty path. The file just needs to exist; the helper does
 	// an os.Stat to decide whether to surface the path. Cursor sits on
 	// the message with the attachment.
-	imgFile := a.messages.filesDir + "/file_preview"
+	imgFile := a.messages.filesDir + "/file_previewAAAAAAAAAAAAAA"
 	if err := os.WriteFile(imgFile, []byte("fake-image-bytes"), 0600); err != nil {
 		t.Fatalf("seed image file: %v", err)
 	}
 	a.messages.messages = []DisplayMessage{{
 		ID: "msg_with_image",
 		Attachments: []DisplayAttachment{
-			{FileID: "file_preview", IsImage: true},
+			{FileID: "file_previewAAAAAAAAAAAAAA", IsImage: true},
 		},
 	}}
 	a.messages.cursor = 0
@@ -369,14 +369,14 @@ func TestApp_ComputePreviewPath_PreservedOnFocusShiftToInput(t *testing.T) {
 	a.messages.SetContext("room_test", "", "")
 	a.messages.SetFilesDir(t.TempDir())
 
-	imgFile := a.messages.filesDir + "/file_compose"
+	imgFile := a.messages.filesDir + "/file_composeAAAAAAAAAAAAAA"
 	if err := os.WriteFile(imgFile, []byte("fake-image-bytes"), 0600); err != nil {
 		t.Fatalf("seed image file: %v", err)
 	}
 	a.messages.messages = []DisplayMessage{{
 		ID: "msg_with_image",
 		Attachments: []DisplayAttachment{
-			{FileID: "file_compose", IsImage: true},
+			{FileID: "file_composeAAAAAAAAAAAAAA", IsImage: true},
 		},
 	}}
 	a.messages.cursor = 0
@@ -412,14 +412,14 @@ func TestApp_UpdateClearsPreviewPathWhenNavPopupReveals(t *testing.T) {
 	a.messages.SetContext("room_test", "", "")
 	a.messages.SetFilesDir(t.TempDir())
 
-	imgFile := a.messages.filesDir + "/file_nav_popup"
+	imgFile := a.messages.filesDir + "/file_nav_popupAAAAAAAAAAAA"
 	if err := os.WriteFile(imgFile, []byte("fake-image-bytes"), 0600); err != nil {
 		t.Fatalf("seed image file: %v", err)
 	}
 	a.messages.messages = []DisplayMessage{{
 		ID: "msg_with_image",
 		Attachments: []DisplayAttachment{
-			{FileID: "file_nav_popup", IsImage: true},
+			{FileID: "file_nav_popupAAAAAAAAAAAA", IsImage: true},
 		},
 	}}
 	a.messages.cursor = 0

@@ -17,7 +17,7 @@ import (
 // filesystem path from the process working directory in this state.
 func TestAttachmentLocalPath_EmptyFilesDir(t *testing.T) {
 	m := NewMessages()
-	got := m.attachmentLocalPath("file_anything")
+	got := m.attachmentLocalPath("file_anythingAAAAAAAAAAAAA")
 	if got != "" {
 		t.Errorf("attachmentLocalPath with empty filesDir = %q, want \"\"", got)
 	}
@@ -41,7 +41,7 @@ func TestAttachmentLocalPath_EmptyFileID(t *testing.T) {
 func TestAttachmentLocalPath_CacheMiss(t *testing.T) {
 	m := NewMessages()
 	m.SetFilesDir(t.TempDir())
-	got := m.attachmentLocalPath("file_not_downloaded")
+	got := m.attachmentLocalPath("file_not_downloadedAAAAAAA")
 	if got != "" {
 		t.Errorf("attachmentLocalPath on cache miss = %q, want \"\"", got)
 	}
@@ -56,7 +56,7 @@ func TestAttachmentLocalPath_CacheHit(t *testing.T) {
 	m := NewMessages()
 	m.SetFilesDir(dir)
 
-	fileID := "file_cached_locally"
+	fileID := "file_cached_locallyAAAAAAA"
 	cached := filepath.Join(dir, fileID)
 	if err := os.WriteFile(cached, []byte("pretend-decrypted-image-bytes"), 0600); err != nil {
 		t.Fatalf("seed cache file: %v", err)

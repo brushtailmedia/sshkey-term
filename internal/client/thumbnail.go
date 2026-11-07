@@ -147,7 +147,11 @@ func GenerateThumbnail(srcPath, dstPath string) error {
 	}
 	defer f.Close()
 
-	img, _, err := image.Decode(f)
+	// Bounded (PLAN step 1b): the header is checked against the decode
+	// budget before any pixel allocation and the decode holds the
+	// process-wide semaphore. An oversized original gets no thumbnail; the
+	// preview path then shows its placeholder instead of decoding it.
+	img, err := DecodeBounded(f, DecodeBudget())
 	if err != nil {
 		return err
 	}
@@ -229,7 +233,11 @@ func GenerateRastermThumbnail(srcPath, dstPath string) error {
 	}
 	defer f.Close()
 
-	img, _, err := image.Decode(f)
+	// Bounded (PLAN step 1b): the header is checked against the decode
+	// budget before any pixel allocation and the decode holds the
+	// process-wide semaphore. An oversized original gets no thumbnail; the
+	// preview path then shows its placeholder instead of decoding it.
+	img, err := DecodeBounded(f, DecodeBudget())
 	if err != nil {
 		return err
 	}
