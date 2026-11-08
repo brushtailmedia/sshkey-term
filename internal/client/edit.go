@@ -106,6 +106,11 @@ func (c *Client) EditRoomMessage(msgID, room, newBody string) error {
 		Signature: base64.StdEncoding.EncodeToString(sig),
 		CorrID:    corrID,
 	}
+	// Exact size check on the real frame before anything is queued or
+	// written (see limits.go).
+	if err := c.checkFrameSize("edit", encrypted, envelope); err != nil {
+		return err
+	}
 	c.sendQueue.EnqueueWithID(corrID, "edit", envelope)
 	c.sendQueue.MarkSending(corrID)
 	return c.enc.Encode(envelope)
@@ -169,6 +174,10 @@ func (c *Client) EditGroupMessage(msgID, group, newBody string) error {
 		Signature:   base64.StdEncoding.EncodeToString(sig),
 		CorrID:      corrID,
 	}
+	// Exact size check (group budget) before anything is queued or written.
+	if err := c.checkFrameSize("edit_group", encrypted, envelope); err != nil {
+		return err
+	}
 	c.sendQueue.EnqueueWithID(corrID, "edit_group", envelope)
 	c.sendQueue.MarkSending(corrID)
 	return c.enc.Encode(envelope)
@@ -230,6 +239,11 @@ func (c *Client) EditDMMessage(msgID, dmID, newBody string) error {
 		Payload:     encrypted,
 		Signature:   base64.StdEncoding.EncodeToString(sig),
 		CorrID:      corrID,
+	}
+	// Exact size check (checked whole, like a DM send) before anything is
+	// queued or written.
+	if err := c.checkFrameSize("edit_dm", encrypted, envelope); err != nil {
+		return err
 	}
 	c.sendQueue.EnqueueWithID(corrID, "edit_dm", envelope)
 	c.sendQueue.MarkSending(corrID)

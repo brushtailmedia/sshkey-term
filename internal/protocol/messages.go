@@ -6,10 +6,35 @@ import "encoding/json"
 // Handshake
 
 type ServerHello struct {
-	Type     string `json:"type"`
-	Protocol string `json:"protocol"`
-	Version  int    `json:"version"`
-	ServerID string `json:"server_id"`
+	Type     string       `json:"type"`
+	Protocol string       `json:"protocol"`
+	Version  int          `json:"version"`
+	ServerID string       `json:"server_id"`
+	Limits   ServerLimits `json:"limits"` // this server's size rules; required, validated at handshake
+}
+
+// ServerLimits mirrors the server's limits block: the one place the client
+// reads its size rules from, so nothing here hard-codes a number the
+// operator may have configured differently. The block is required and
+// complete — the client has no defaults of its own and refuses a hello
+// without it (client.validateLimits). Only RoomTypingMaxMembers may be
+// zero, meaning typing is off in every room.
+type ServerLimits struct {
+	// MaxGroupMembers is the group-DM membership cap, and the most
+	// wrapped_keys entries a group frame may carry.
+	MaxGroupMembers int `json:"max_group_members"`
+	// RoomTypingMaxMembers is the room size above which the server drops
+	// typing frames; zero means typing is off in every room.
+	RoomTypingMaxMembers int `json:"room_typing_max_members"`
+	// MaxBodyBytes is the cap on a message's sealed, encoded payload.
+	MaxBodyBytes int `json:"max_body_bytes"`
+	// WrappedKeyEntryBytes is the per-entry allowance a group frame gets on
+	// top of MaxBodyBytes: a raw group frame may be up to
+	// MaxBodyBytes + WrappedKeyEntryBytes × MaxGroupMembers.
+	WrappedKeyEntryBytes int `json:"wrapped_key_entry_bytes"`
+	// MaxFileIDsPerMessage is how many attachments one message may
+	// reference. Kept for the multi-file compose flow; nothing reads it yet.
+	MaxFileIDsPerMessage int `json:"max_file_ids_per_message"`
 }
 
 type ClientHello struct {
@@ -328,6 +353,7 @@ type RoomAddedTo struct {
 	Name    string   `json:"name,omitempty"`
 	Topic   string   `json:"topic,omitempty"`
 	Members []string `json:"members"`
+	Typing  bool     `json:"typing"`   // typing indicators relayed in this room (see RoomInfo.Typing)
 	AddedBy string   `json:"added_by"` // user ID or "os:<uid>"
 }
 
@@ -860,6 +886,11 @@ type RoomInfo struct {
 	Name    string   `json:"name"`
 	Topic   string   `json:"topic"`
 	Members []string `json:"members"` // full member user IDs
+	// Typing is the server's answer for this room at list time: typing
+	// frames are relayed while the room has ServerLimits.RoomTypingMaxMembers
+	// members or fewer. The client derives the live answer from the member
+	// list it keeps; this flag is the fallback when it has none.
+	Typing bool `json:"typing"`
 }
 
 // RoomEvent is the protocol type for room audit events. Phase 20

@@ -122,6 +122,11 @@ func (c *Client) SendRoomMessageFull(room, body string, replyTo string, mentions
 		Signature: base64.StdEncoding.EncodeToString(sig),
 		CorrID:    corrID,
 	}
+	// Exact size check on the bytes that go on the wire: refuse what the
+	// server would refuse, before anything is queued or written.
+	if err := c.checkFrameSize("send", encrypted, envelope); err != nil {
+		return err
+	}
 	c.sendQueue.EnqueueWithID(corrID, "send", envelope)
 	c.sendQueue.MarkSending(corrID)
 	return c.enc.Encode(envelope)
@@ -255,6 +260,11 @@ func (c *Client) SendGroupMessageFull(group, body, replyTo string, mentions []st
 		FileIDs:     fileIDs,
 		Signature:   base64.StdEncoding.EncodeToString(sig),
 		CorrID:      corrID,
+	}
+	// Exact size check (group budget: body cap + an allowance per possible
+	// member) before anything is queued or written.
+	if err := c.checkFrameSize("send_group", encrypted, envelope); err != nil {
+		return err
 	}
 	c.sendQueue.EnqueueWithID(corrID, "send_group", envelope)
 	c.sendQueue.MarkSending(corrID)
@@ -748,6 +758,13 @@ func (c *Client) SendTyping(room, group, dm string) error {
 	if !c.IsConnected() {
 		return nil
 	}
+	// A room over the server's typing size limit: the server would drop the
+	// frame after a member lookup, so do not send it. Silent, like offline —
+	// a keystroke, not an action. Groups and DMs are never gated here; the
+	// local /typing preference is the caller's.
+	if room != "" && !c.RoomTypingAllowed(room) {
+		return nil
+	}
 	return c.enc.Encode(protocol.Typing{
 		Type:  "typing",
 		Room:  room,
@@ -1005,6 +1022,11 @@ func (c *Client) SendDMMessageFull(dmID, body, replyTo string, mentions []string
 		FileIDs:     fileIDs,
 		Signature:   base64.StdEncoding.EncodeToString(sig),
 		CorrID:      corrID,
+	}
+	// Exact size check (the server checks a DM frame whole) before anything
+	// is queued or written.
+	if err := c.checkFrameSize("send_dm", encrypted, envelope); err != nil {
+		return err
 	}
 	c.sendQueue.EnqueueWithID(corrID, "send_dm", envelope)
 	c.sendQueue.MarkSending(corrID)

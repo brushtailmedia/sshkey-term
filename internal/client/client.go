@@ -153,9 +153,17 @@ type Client struct {
 	// roomMembersRoom/roomMembers fields. See
 	// fix-member-panel-refetch-storm-v8.md.
 	roomMemberCache map[string][]string // room ID -> member user IDs
-	privKey         ed25519.PrivateKey
-	signer          ssh.Signer
-	lastSynced      string
+	// limits is the size-rule block from this connection's server_hello,
+	// validated at handshake; nil until then. Replaced wholesale on every
+	// handshake, never mutated in place (see limits.go).
+	limits *protocol.ServerLimits
+	// roomTypingFlag is the server's per-room "typing relayed" answer from
+	// room_list / room_added_to: the fallback for RoomTypingAllowed when the
+	// member cache has no entry for the room.
+	roomTypingFlag map[string]bool
+	privKey        ed25519.PrivateKey
+	signer         ssh.Signer
+	lastSynced     string
 	// connected is true from handshake completion (set just before readLoop
 	// starts) until readLoop exits or Close/Disconnect runs. Offline-browse
 	// gates every encode-reaching path on it (offline-startup-browse R2/R18).
@@ -193,6 +201,7 @@ func New(cfg Config) *Client {
 		rotatedEpoch:     make(map[string]int64),
 		seqCounters:      make(map[string]int64),
 		roomMemberCache:  make(map[string][]string),
+		roomTypingFlag:   make(map[string]bool),
 		sendQueue:        NewQueue(),
 		done:             make(chan struct{}),
 	}
@@ -542,9 +551,23 @@ func (c *Client) handshake() error {
 		return fmt.Errorf("unexpected server response: %s", hello.Type)
 	}
 
+	// The server's size rules for this connection. The block is required
+	// and complete — the client has no defaults to fall back to, so a hello
+	// without it is a protocol error like a wrong protocol name.
+	if err := validateLimits(hello.Limits); err != nil {
+		return err
+	}
+	limits := hello.Limits
+	c.mu.Lock()
+	c.limits = &limits
+	c.mu.Unlock()
+
 	c.logger.Info("server hello",
 		"server", hello.ServerID,
 		"version", hello.Version,
+		"max_body_bytes", limits.MaxBodyBytes,
+		"max_group_members", limits.MaxGroupMembers,
+		"room_typing_max_members", limits.RoomTypingMaxMembers,
 	)
 
 	// Send client_hello
@@ -777,6 +800,7 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			break
 		}
 		c.setRoomMembers(ra.Room, ra.Members)
+		c.setRoomTypingFlag(ra.Room, ra.Typing)
 		if c.store != nil {
 			// V8's combined helper writes the member-count + member_ids CSV
 			// in one statement, so count and IDs cannot drift.
@@ -799,6 +823,7 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 			// membership cache. setRoomMembers copies the slice.
 			for _, r := range rl.Rooms {
 				c.setRoomMembers(r.ID, r.Members)
+				c.setRoomTypingFlag(r.ID, r.Typing)
 			}
 
 			if c.store != nil {
@@ -1840,6 +1865,15 @@ func SetUserIDForTesting(c *Client, userID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.userID = userID
+}
+
+// SetPrivateKeyForTesting installs the signing key a live session loads
+// from its key file, so package-external tests can drive the send paths
+// (which sign every frame) without one. Do not call from production code.
+func SetPrivateKeyForTesting(c *Client, priv ed25519.PrivateKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.privKey = priv
 }
 
 // SetEncoderForTesting attaches a protocol encoder from an external package.

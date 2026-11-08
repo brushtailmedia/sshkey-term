@@ -15,7 +15,8 @@ Terminal client for [sshkey-chat](https://github.com/brushtailmedia/sshkey-chat)
 - **In-group admin model for group DMs** -- creators become the first admin; admins can add, remove, promote, demote, and rename via `/add`, `/kick`, `/promote`, `/demote`, `/transfer` with confirmation dialogs, `/audit` for recent admin actions, and `/undo` for 30-second kick revert
 - `/leave` and `/delete` for rooms, 1:1 DMs, and group DMs with multi-device sync
 - Retired-room read-only state (admin-archived rooms show a distinct banner)
-- File sharing, reactions, typing indicators, read receipts, presence, pinned messages
+- File sharing, reactions, typing indicators (in rooms up to the server's size limit, 100 members by default), read receipts, presence, pinned messages
+- Size rules come from the server: the group member cap and the message size limit are read from the connection's hello, the composer counts bytes against the server's budget, and a message the server would refuse as too large is refused at the keyboard with the draft kept
 - Soft-delete: deleted messages show as tombstones in the stream, not disappearances
 - Inline image previews: native-resolution via rasterm (kitty / iTerm2 / WezTerm / Ghostty), with a universal block-cell fallback on every other terminal — never a "your terminal isn't supported" cliff
 - Local encrypted database (SQLCipher) with full-text search (FTS5)

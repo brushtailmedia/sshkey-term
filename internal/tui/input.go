@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -54,6 +56,15 @@ type InputModel struct {
 	nonMembers []MemberEntry
 	pendingCmd *SlashCommandMsg // slash command needing app-level handling
 	didSend    bool             // true after a message was sent (cleared by DidSend)
+	// byteBudget is the server's plaintext compose budget as last read from
+	// the client (Client.ComposeBudget): one number per connection, in
+	// bytes. It sets the widget's CharLimit and drives BudgetNotice. Zero
+	// until a client has been seen.
+	byteBudget int
+	// sendRefusal is the message for a send the client refused as too
+	// large; the draft is kept and the App takes the message once with
+	// TakeSendRefusal.
+	sendRefusal string
 	// Phase 15: edit mode state. editMode is true when the user has
 	// pressed Up-arrow on an empty input and populated it with the body
 	// of a previously-sent message. editTarget is the message ID being
@@ -92,7 +103,10 @@ func NewInput() InputModel {
 	ti := textinput.New()
 	ti.Placeholder = "Type a message..."
 	ti.Focus()
-	ti.CharLimit = 16000 // under 16KB
+	// No limit until the server's hello sets the compose budget (Update
+	// reads it from the client on every key): the number comes from the
+	// server, never from here, and nothing can be sent before then anyway.
+	ti.CharLimit = 0
 	ti.Prompt = "> "
 	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#875FFF"))
 	return InputModel{
@@ -145,6 +159,17 @@ func looksLikeLeakedMouseEvent(runes []rune) bool {
 }
 
 func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm string) (InputModel, tea.Cmd) {
+	// Keep the widget's limit in step with the server's compose budget:
+	// one number per connection, re-read cheaply on every key so a
+	// reconnect to a server with other limits takes effect at once. Zero
+	// (no handshake yet) means no limit, as before the hello.
+	if c != nil {
+		if b := c.ComposeBudget(); b != i.byteBudget {
+			i.byteBudget = b
+			i.textInput.CharLimit = b
+		}
+	}
+
 	// Defensive: drop bytes that look like mouse-event escape sequences
 	// missing their leading ESC. Handle arbitrary chunking shapes:
 	// single-rune, multi-rune, and multiple `[<...M` sequences packed
@@ -336,12 +361,22 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 		}
 		if c != nil {
 			mentions := i.ExtractMentions(text)
-			if room != "" {
-				c.SendRoomMessage(room, text, replyTo, mentions)
-			} else if group != "" {
-				c.SendGroupMessage(group, text, replyTo, mentions)
-			} else if dm != "" {
-				c.SendDMMessage(dm, text, replyTo, mentions)
+			var err error
+			switch {
+			case room != "":
+				err = c.SendRoomMessage(room, text, replyTo, mentions)
+			case group != "":
+				err = c.SendGroupMessage(group, text, replyTo, mentions)
+			case dm != "":
+				err = c.SendDMMessage(dm, text, replyTo, mentions)
+			}
+			var tooLarge *client.MessageTooLargeError
+			if errors.As(err, &tooLarge) {
+				// The client measured the real frame and the server would
+				// refuse it: nothing was queued or written. Keep the draft
+				// and the reply context; the App shows the refusal.
+				i.sendRefusal = tooLarge.Error()
+				return i, nil
 			}
 			i.didSend = true
 		}
@@ -396,6 +431,40 @@ func (i InputModel) Update(msg tea.KeyMsg, c *client.Client, room, group, dm str
 // relay independently regardless of this.
 func (i *InputModel) SetTypingDisabled(disabled bool) {
 	i.typingDisabled = disabled
+}
+
+// TakeSendRefusal returns the message for the last send the client
+// declined as too large, and clears it. Empty when there was none.
+func (i *InputModel) TakeSendRefusal() string {
+	msg := i.sendRefusal
+	i.sendRefusal = ""
+	return msg
+}
+
+// ByteBudget is the plaintext byte budget in force: 0 before a client has
+// reported one.
+func (i InputModel) ByteBudget() int {
+	return i.byteBudget
+}
+
+// BudgetNotice is the live counter's word on the draft: "N bytes left"
+// within the last tenth of the budget, "Message is N bytes over …" past
+// it, empty otherwise. Bytes, not characters — the server counts the
+// sealed, encoded payload, so a non-Latin draft runs out sooner than its
+// character count suggests. A heuristic: the exact answer is the client's
+// check on the real frame at send time.
+func (i InputModel) BudgetNotice() string {
+	if i.byteBudget <= 0 {
+		return ""
+	}
+	used := len(i.ValueForSend())
+	switch {
+	case used > i.byteBudget:
+		return fmt.Sprintf("Message is %d bytes over this server's limit", used-i.byteBudget)
+	case used > 0 && used*10 >= i.byteBudget*9:
+		return fmt.Sprintf("%d bytes left", i.byteBudget-used)
+	}
+	return ""
 }
 
 func (i *InputModel) SetTextInputWidth(width int) {

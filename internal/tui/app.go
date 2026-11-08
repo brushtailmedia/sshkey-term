@@ -4,6 +4,7 @@ package tui
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -220,6 +221,12 @@ type App struct {
 	// field rather than a map because the user can only kick off one
 	// create_dm at a time via the newconv dialog.
 	pendingCreateDM pendingCreateDMState
+
+	// lastBudgetNotice is the compose-budget notice last shown in the
+	// status bar ("N bytes left" / "Message is N bytes over …"), so it is
+	// cleared when the draft drops back under the budget and never
+	// clobbers an unrelated status (see syncBudgetNotice).
+	lastBudgetNotice string
 
 	// membersPanelCreateSource tracks whether the currently-open NewConv
 	// dialog was launched from the member panel/menu. Used to scope the
@@ -2532,7 +2539,11 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.input.ClearInput()
 					return a, nil
 				}
-				a.dispatchEdit(a.input.EditTarget(), text)
+				if a.dispatchEdit(a.input.EditTarget(), text) {
+					// Too large by the client's own measure: keep the
+					// edit in the composer so it can be shortened.
+					return a, nil
+				}
 				a.input.ExitEditMode()
 				a.input.ClearInput()
 				return a, nil
@@ -2619,6 +2630,12 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.statusBar.ClearError()
 				a.messages.SnapToOwnSend()
 			}
+			// A send the client refused as too large (measured on the real
+			// frame): the draft is kept, the reason goes to the status bar.
+			if refusal := a.input.TakeSendRefusal(); refusal != "" {
+				a.statusBar.SetError(refusal)
+			}
+			a.syncBudgetNotice()
 			// Check for pending slash commands. The connection verbs return
 			// a connect cmd that MUST propagate (offline-startup-browse
 			// Step 6) — dropping it would switch state but never dial.
@@ -3572,16 +3589,25 @@ func (a App) updateInner(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				a.client.CreateDM(msg.Members[0])
 			} else if len(msg.Members) > 0 {
+				// The server's member cap, when it advertised one: refuse
+				// at the keyboard rather than after a round trip (the
+				// server's too_many_members stays the authority).
+				total := len(msg.Members) + 1 // others + caller
+				if refusal := a.groupSizeRefusal(total); refusal != "" {
+					a.statusBar.SetError(refusal)
+					a.membersPanelCreateSource = false
+					return a, nil
+				}
 				// Focus the just-created group regardless of where the
 				// NewConv dialog was opened from (members panel OR
 				// Ctrl+g n) — same rationale as the DM branch above.
 				a.setPendingFocusCreatedGroup(msg.Members, msg.Name)
-				// Soft warning at 50+ total members (49+ others + caller).
-				// Per-message wrapped keys scale linearly with member count;
-				// rooms use a shared epoch key and are more efficient for
-				// high-traffic large groups. The server hard-caps at 150.
-				if len(msg.Members) >= 49 {
-					a.statusBar.SetError(fmt.Sprintf("Large group (%d members) — consider using a room for better performance", len(msg.Members)+1))
+				// Soft warning from half the server's cap (50 at the
+				// default 100). Per-message wrapped keys scale linearly
+				// with member count; rooms use a shared epoch key and are
+				// more efficient for high-traffic large groups.
+				if th := a.groupWarnThreshold(); th > 0 && total >= th {
+					a.statusBar.SetError(fmt.Sprintf("Large group (%d members) — consider using a room for better performance", total))
 				}
 				a.client.CreateGroup(msg.Members, msg.Name)
 			}
@@ -5362,10 +5388,13 @@ func (a *App) syncEditableMessage() {
 // messages.dm is non-empty. Client validates and sends; server
 // validates and either broadcasts an `edited` echo (which the
 // dispatch path applies to local state) or returns an error (which
-// the error handler surfaces to the status bar).
-func (a *App) dispatchEdit(msgID, newBody string) {
+// the error handler surfaces to the status bar). Returns true when the
+// client refused the edit as too large before sending it: the caller
+// then leaves the composer in edit mode with the text, so the user can
+// shorten it instead of losing it.
+func (a *App) dispatchEdit(msgID, newBody string) (keepDraft bool) {
 	if a.client == nil || msgID == "" {
-		return
+		return false
 	}
 	var err error
 	switch {
@@ -5376,11 +5405,17 @@ func (a *App) dispatchEdit(msgID, newBody string) {
 	case a.messages.dm != "":
 		err = a.client.EditDMMessage(msgID, a.messages.dm, newBody)
 	default:
-		return
+		return false
 	}
 	if err != nil {
+		var tooLarge *client.MessageTooLargeError
+		if errors.As(err, &tooLarge) {
+			a.statusBar.SetError(tooLarge.Error())
+			return true
+		}
 		a.statusBar.SetError("Edit failed: " + err.Error())
 	}
+	return false
 }
 
 // syncMessagesLeftState updates the messages model's "left" and
@@ -6333,11 +6368,13 @@ func (a *App) handleSlashCommand(sc *SlashCommandMsg) {
 			a.statusBar.SetError("Typing pref not saved: " + err.Error())
 			return
 		}
+		status := "Typing indicators on"
 		if disabled {
-			a.statusBar.SetError("Typing indicators off")
-		} else {
-			a.statusBar.SetError("Typing indicators on")
+			status = "Typing indicators off"
 		}
+		// One line to explain the product's rule: where the server relays
+		// them, from the limits it advertised.
+		a.statusBar.SetError(status + a.typingRuleSuffix())
 	case "/help", "/?":
 		// The help panel lists ALL slash commands unconditionally;
 		// admin/context restrictions are labelled in each command's
@@ -6740,7 +6777,8 @@ func (a *App) handleUndoCommand(sc *SlashCommandMsg) {
 //
 // The quoted name is optional. Targets are resolved via the profile
 // cache (same as /add). Min 1 target (plus the caller = 2-member
-// group); max 149 (plus caller = 150, the server's hard cap).
+// group); the maximum is the member cap the server advertised in its
+// hello (100 by default), checked here before sending when there is one.
 func (a *App) handleGroupcreateCommand(sc *SlashCommandMsg) {
 	if a.client == nil {
 		return
@@ -6770,6 +6808,10 @@ func (a *App) handleGroupcreateCommand(sc *SlashCommandMsg) {
 	}
 	if len(members) == 0 {
 		a.statusBar.SetError("No valid members — nothing to create")
+		return
+	}
+	if refusal := a.groupSizeRefusal(len(members) + 1); refusal != "" {
+		a.statusBar.SetError(refusal)
 		return
 	}
 	if err := a.client.CreateGroup(members, name); err != nil {

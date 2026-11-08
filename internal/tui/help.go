@@ -234,7 +234,7 @@ func (h HelpModel) renderContent(width int) string {
 		{cmd: "/topic [text]", desc: "show or set room topic — set is admin only (rooms only)"},
 		{cmd: "/settings", desc: "open settings"},
 		{cmd: "/setstatus [status]", desc: "set status — bare opens picker, or pass: available / away / busy"},
-		{cmd: "/typing [on|off]", desc: "toggle typing indicators — local, persisted, default on"},
+		{cmd: "/typing [on|off]", desc: "toggle typing indicators — local, persisted, default on; rooms over the server's size limit never show them"},
 		{cmd: "/unverify <user>", desc: "remove verification"},
 		{cmd: "/whois <user>", desc: "open user profile (display name, ID, fingerprint, key, verified, role)"},
 		{cmd: "/pending", desc: "pending keys (admin)"},
