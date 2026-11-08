@@ -42,11 +42,12 @@ The unit suite tests client behavior locally with fakes and local stores and nev
 - `t.Parallel()` only for isolated tests (TempDir-backed, no shared mutable globals).
 - No `time.Sleep` synchronization in new tests; use explicit signaling.
 - Existing sleeps are governed by `docs/testing/sleep_allowlist.txt`.
+- Nightly enforces `docs/testing/duration_budgets.txt` (`.github/scripts/check_test_durations.sh`): serial wall time per package, and 3 s per top-level test unless the func carries a `// slow: <reason>` comment naming the wait.
 
 ## Short Mode and Build Tags
 
 - Default expectation is fast unit-level suite.
-- If a test is meaningfully slow, guard with `testing.Short()` skip.
+- `-short` is the developer-loop switch; nothing in this repo skips under it today, and CI runs no separate short pass (dropped 2026-11-08: with no `testing.Short()` skip outside e2e it repeated the race pass). A slow test is not hidden behind `-short`: it stays under the nightly duration budget (`docs/testing/duration_budgets.txt`) or carries a `// slow: <reason>` comment naming the wait.
 - Build-tagged cross-product paths are allowed only in `internal/e2e` (tag `e2e`); nowhere else. The e2e suite itself follows every rule here (no sleeps — bounded waits on tickers and channels; typed errors; `t.Helper()`), and runs serially (`-p 1`, no `t.Parallel()`: real processes and real ports).
 
 ## Coverage Policy

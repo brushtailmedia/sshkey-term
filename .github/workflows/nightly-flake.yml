@@ -19,6 +19,10 @@ jobs:
         run: bash .github/scripts/check_test_coupling.sh
       - name: Sleep Guard
         run: bash .github/scripts/check_test_sleeps.sh
+      - name: Duration Budget
+        run: |
+          CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" \
+          bash .github/scripts/check_test_durations.sh
       - name: Shuffle Stress (critical packages)
         run: |
           CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" \
