@@ -46,3 +46,35 @@ jobs:
         run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
       - name: Staticcheck
         run: CGO_ENABLED=1 CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" CGO_LDFLAGS="-lm" staticcheck ./...
+
+  # End to end: the real client against a real server and ctl built from the
+  # server repo's main (both repos move together — no compatibility fallbacks,
+  # so a drift between them is exactly what this job should catch). Lives in
+  # internal/e2e behind the `e2e` build tag; the test job above never sees it.
+  # Both repos are public, so the server checkout needs no token. The server
+  # repo runs the same suite from its side on its own pushes.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: brushtailmedia/sshkey-chat
+          ref: main
+          path: sshkey-chat
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y gcc
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@2026.1
+      - name: End-to-end (real server + real client)
+        run: make e2e SSHKEY_CHAT_REPO="$GITHUB_WORKSPACE/sshkey-chat"
+      - name: Keep failure dirs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-dirs
+          path: /tmp/sshkey-e2e-*
+          if-no-files-found: ignore

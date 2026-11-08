@@ -9,6 +9,9 @@ sshkey-term
 # Test binary, built with `go test -c`
 *.test
 
+# Server binaries built by `make e2e` (internal/e2e runs them as processes)
+.e2e-bin/
+
 # Code coverage
 *.out
 coverage.*

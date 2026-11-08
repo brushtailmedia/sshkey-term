@@ -6,6 +6,13 @@ set -euo pipefail
 # `*_test.go` files; others also need to catch the handful of `*.go` files
 # under `internal/testutil/`, which is where a resurrected cross-product
 # harness would most naturally land.
+#
+# 2026-11-08: internal/e2e is the one sanctioned cross-product suite — the
+# real client against the real server and ctl run as BINARIES (never
+# imported), behind the `e2e` build tag, with its own CI job. The e2e-tag and
+# server-build rules below therefore exempt that directory; the sibling-path
+# rule still applies to it (the harness reads SSHKEY_CHAT_REPO / SSHKEY_E2E_BIN,
+# the Makefile owns the ../sshkey-chat default).
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fail=0
@@ -51,21 +58,31 @@ check_in_tests_and_testutil() {
   report "$description" "$matches"
 }
 
-# Test files must not reintroduce e2e build tags.
-check_in_tests '^//go:build e2e' \
-  'found disallowed //go:build e2e in test sources'
+# outside_e2e drops matches under internal/e2e, the one sanctioned
+# cross-product suite.
+outside_e2e() {
+  grep -v '/internal/e2e/' || true
+}
+
+# The e2e build tag belongs to internal/e2e and nowhere else.
+report 'found //go:build e2e outside internal/e2e' \
+  "$(grep -rn --include='*_test.go' -E '^//go:build e2e' "$ROOT" 2>/dev/null | outside_e2e)"
 
 # Test code must not call the removed StartTestServer harness.
 check_in_tests 'StartTestServer\(' \
   'found disallowed StartTestServer usage'
 
-# Test utilities must not probe sibling source trees.
+# Test utilities must not probe sibling source trees (internal/e2e included:
+# it is told where the server is, it never guesses).
 check_in_tests_and_testutil '\.\./sshkey-chat' \
   'found disallowed sibling-repo probing (../sshkey-chat)'
 
-# Test utilities must not build the server binary.
-check_in_tests_and_testutil 'go build \./cmd/sshkey-server' \
-  'found disallowed server build invocation from sshkey-term tests'
+# Test utilities must not build the server binary — except internal/e2e,
+# which builds it from SSHKEY_CHAT_REPO when no prebuilt binaries are given.
+report 'found disallowed server build invocation from sshkey-term tests' \
+  "$( (grep -rn --include='*_test.go' -E 'go build \./cmd/sshkey-server' "$ROOT" 2>/dev/null; \
+       [[ -d "$ROOT/internal/testutil" ]] && grep -rn --include='*.go' -E 'go build \./cmd/sshkey-server' "$ROOT/internal/testutil" 2>/dev/null) \
+     | outside_e2e | sort -u)"
 
 if [[ $fail -ne 0 ]]; then
   exit 1

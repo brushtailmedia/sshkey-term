@@ -109,6 +109,10 @@ go build -o sshkey-term .
 
 On first launch, the client prompts to select or generate an Ed25519 SSH key, then connect to a server.
 
+### End-to-end suite
+
+`make e2e` runs the real client against a real `sshkey-server` and `sshkey-ctl` built from a sibling checkout of the server repo (`SSHKEY_CHAT_REPO`, default `../sshkey-chat`): one server per test on a random port, users approved through the real ctl, then the group lifecycle, a group at the member cap with real keys, the typing size rule and the message size limits end to end. The ordinary `go test ./...` never touches it: the suite lives behind the `e2e` build tag in `internal/e2e` and skips when no binaries are given. A failed test keeps its server log and data directory under `sshkey-e2e-*` in the temp dir.
+
 ## Configuration
 
 ```

@@ -2,14 +2,14 @@
 
 ## Scope
 
-This document is the prescriptive test policy for `sshkey-term` only.
-`sshkey-term` tests client behavior locally with fakes and local stores. It does not spin up `sshkey-chat` in tests.
+This document is the prescriptive test policy for `sshkey-term`.
+The unit suite tests client behavior locally with fakes and local stores and never spins up `sshkey-chat`. The one cross-product suite is `internal/e2e` (see Product Boundary).
 
 ## Product Boundary
 
-- No `sshkey-chat` imports, no sibling source-tree probes, no `go build ./cmd/sshkey-server` from client tests.
-- No `//go:build e2e` cross-product harness in this repo.
-- Wire-contract correctness belongs to server-side integration tests in `sshkey-chat`; client repo validates client logic and local state transitions.
+- The unit suite: no `sshkey-chat` imports (Go's `internal` rule forbids them anyway), no sibling source-tree probes, no server builds from test code.
+- The end-to-end suite, `internal/e2e`, is the single exception, behind the `e2e` build tag: it imports the real `internal/client` and runs `sshkey-server` and `sshkey-ctl` as **binaries** built from a server checkout named by `SSHKEY_CHAT_REPO` (or prebuilt in `SSHKEY_E2E_BIN`), one server per test on port 0, users approved through the real ctl. It skips when neither variable is set, so `go test ./...` never depends on the server; `make e2e` runs it and CI runs it as its own job. Added 2026-11-08, reversing the Phase 22 rule, because nothing else runs the two real implementations together — the 16 KB group-frame bug shipped through that gap.
+- Three layers, and a new test goes in the lowest one that can express it: model/unit tests here; the server's wire-contract tests in `sshkey-chat/cmd/sshkey-server`; `internal/e2e` for what only the two real implementations together can show (real crypto, real framing, real limits, real catch-up).
 
 ## Test Harnesses
 
@@ -47,7 +47,7 @@ This document is the prescriptive test policy for `sshkey-term` only.
 
 - Default expectation is fast unit-level suite.
 - If a test is meaningfully slow, guard with `testing.Short()` skip.
-- Do not introduce build-tagged cross-product integration paths.
+- Build-tagged cross-product paths are allowed only in `internal/e2e` (tag `e2e`); nowhere else. The e2e suite itself follows every rule here (no sleeps — bounded waits on tickers and channels; typed errors; `t.Helper()`), and runs serially (`-p 1`, no `t.Parallel()`: real processes and real ports).
 
 ## Coverage Policy
 
