@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Changed
+- **S3 follow-up (2026-11-11).** Fixture lint now checks raw JSON `file_ids`
+  arrays and reports unsupported ID-bearing JSON templates instead of silently
+  skipping their static fields. Add shared regressions for array elements,
+  nested/dynamic JSON, indexed formatting and intentional negative exemptions.
 - Add pure deterministic identifier builders with fixed vectors and a bounded
   file-ID fixture lint. Migrate ordinary file fixtures while preserving negative
   cases and real cryptographic test material. Remove unused client-coupled test

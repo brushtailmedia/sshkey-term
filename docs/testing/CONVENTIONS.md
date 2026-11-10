@@ -105,6 +105,16 @@ review. Non-ID fields (display names, SSH login hints, protocol type names and
 trusted system actors) are outside the ID rule. Optional empty fields retain
 their protocol semantics. Parse/read failures and an empty scan fail the guard.
 
+Raw JSON `members`, `admins` and `file_ids` arrays are checked element by
+element for the repository's selected ID classes, including arrays in nested
+message objects.
+When an ID-bearing JSON expression cannot be evaluated, the lint reports it
+for review instead of skipping its static fields. For example, indexed runtime
+formatting (`%[1]s`) is outside the supported template evaluator: rewrite a
+valid fixture with supported `%s` formatting/builders. Reserve a malformed
+exemption for an actual intentional negative fixture, not a valid unsupported
+format. Non-ID JSON/text and disabled ID classes remain outside the scan.
+
 Keep intentional malformed test input and its rejection assertions unchanged.
 Attach `// malformed: <specific reason>` to the same source line as that input;
 a bare marker, an unrelated comment or a marker on another line does not exempt
