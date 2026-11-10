@@ -190,7 +190,7 @@ func TestRemoveCachedAttachment_RemovesTheClosedListAndSparesNeighbours(t *testi
 // able to point cleanup at an arbitrary file).
 func TestRemoveCachedAttachment_InvalidIDIsANoOp(t *testing.T) {
 	c, filesDir := newCleanupTestClient(t)
-	for _, bad := range []string{"evil", "file_abc123", "file_V1StGXR8_Z5jdHi6B-myT.part"} {
+	for _, bad := range []string{"evil", "file_abc123", "file_V1StGXR8_Z5jdHi6B-myT.part"} { // malformed: cleanup must leave hostile file names untouched.
 		seedFile(t, filesDir, bad)
 		seedFile(t, filesDir, bad+".part")
 		c.cleanupAttachmentFiles([]string{bad})

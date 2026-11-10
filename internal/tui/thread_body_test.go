@@ -7,6 +7,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 // bodyFixture: a root with a long body, and replies with a multi-line
@@ -21,7 +23,7 @@ func bodyFixture() []DisplayMessage {
 		{ID: "emoji", From: "Carol", FromID: "usr_carol", TS: 1002, ReplyTo: "root",
 			Body: strings.Repeat("🎉x", 30)},
 		{ID: "files", From: "Dave", FromID: "usr_dave", TS: 1003, ReplyTo: "root", Body: "photo.png",
-			Attachments: []DisplayAttachment{{FileID: "f1", Name: "photo.png", Size: 102700, IsImage: true}, {FileID: "f2", Name: "notes.pdf", Size: 2048}}},
+			Attachments: []DisplayAttachment{{FileID: testutil.FileID("f1"), Name: "photo.png", Size: 102700, IsImage: true}, {FileID: testutil.FileID("f2"), Name: "notes.pdf", Size: 2048}}},
 		{ID: "mention", From: "Erin", FromID: "usr_erin", TS: 1004, ReplyTo: "root",
 			Body: "thanks @alice"},
 		{ID: "url", From: "Frank", FromID: "usr_frank", TS: 1005, ReplyTo: "root",

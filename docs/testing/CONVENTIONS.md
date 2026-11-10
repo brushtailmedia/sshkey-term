@@ -13,14 +13,33 @@ The unit suite tests client behavior locally with fakes and local stores and nev
 
 ## Test Harnesses
 
-- Use `internal/testutil` fixtures for keys/users and local DB setup.
+- Use the pure `internal/testutil` identifier builders for ordinary ID fixtures; generate real keys in tests that need cryptography.
 - Use `store.OpenUnencrypted` + `t.TempDir()` for local persistence tests.
 - Use model-level `App.Update` calls for TUI logic tests (capture and rebind returned model value).
 - Use `client.SetStoreForTesting` / `client.SetProfileForTesting` for controlled cross-package tests.
 
 ## SQLCipher / Key Material
 
-- For encrypted DB tests, use canonical helper flow (`CreateTestDB`) and derived DB key helpers.
+- Open encrypted test databases with a real Ed25519 key seed, `store.DeriveDBKey`, and `store.Open` under `t.TempDir()`. Fail on any derivation or open error; never silently fall back to an unencrypted store.
+
+```go
+// Imports: crypto/ed25519, crypto/rand, path/filepath, and internal/store.
+// This is test setup: the generated key is real, but is never persisted.
+_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+if err != nil {
+    t.Fatal(err)
+}
+dbKey, err := store.DeriveDBKey(privateKey.Seed())
+if err != nil {
+    t.Fatal(err)
+}
+db, err := store.Open(filepath.Join(t.TempDir(), "messages.db"), dbKey)
+if err != nil {
+    t.Fatal(err)
+}
+t.Cleanup(func() { _ = db.Close() })
+```
+
 - Do not write tests against operator home directories; HOME/XDG-sensitive tests must use temp dirs with `t.Setenv`.
 
 ## Dispatch and Verification Rules
@@ -61,3 +80,36 @@ No open deferrals remain after the 2026-04-24 deferred-items pass.
 
 - Launch-gate support is covered from the server integration side (`sshkey-chat/cmd/sshkey-server/auto_revoke_integration_test.go`) and remains part of the client release checklist.
 - Current CI minimums include: `internal/client` 51.0, `internal/tui` 70.0, `internal/protocol` 78.0.
+
+## Identifier Fixtures
+
+Use the pure `internal/testutil` builders for ordinary IDs: `UserID`, `RoomID`,
+`GroupID`, `DMID`, `MsgID`, `ReactionID`, `FileID`, and `UploadID`. A readable
+label such as `testutil.MsgID("alice-edit")` produces a stable prefixed ID with
+21 nanoid characters. `DeviceID` is also available; existing device fixtures and
+handshake enforcement belong to the device-session work, not this migration.
+Both repositories use SHA-256 of the label and map the first 21 digest bytes
+modulo 64 through `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-`.
+Matching hard-coded vectors cover every builder, empty labels and Unicode labels.
+
+`Signature(label)` and `Payload(label, size)` are opaque size fixtures. They do
+not promise a valid signature or decryptable ciphertext. Use actual generated
+keys, signing and encryption in cryptographic verification and end-to-end tests.
+
+The fixture lint parses Go syntax and checks selected typed ID fields, concrete
+message IDs, member/file slices, known store constructor arguments, ID-named
+variables, raw JSON, constant concatenations and supported formatting calls.
+Runtime-producing calls and variables are not whole-program data-flow checked.
+Unsupported constructed strings in recognized ID positions are reported for
+review. Non-ID fields (display names, SSH login hints, protocol type names and
+trusted system actors) are outside the ID rule. Optional empty fields retain
+their protocol semantics. Parse/read failures and an empty scan fail the guard.
+
+Keep intentional malformed test input and its rejection assertions unchanged.
+Attach `// malformed: <specific reason>` to the same source line as that input;
+a bare marker, an unrelated comment or a marker on another line does not exempt
+it. The lint's own regression corpus locks these rules. Do not replace a negative
+fixture with a valid builder to make the guard pass.
+
+The term guard scans `internal/config`, `internal/client`, `internal/store` and
+`internal/tui` test files for file-ID fixtures. It imports no sibling repository.

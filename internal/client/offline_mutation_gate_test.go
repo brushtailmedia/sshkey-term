@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 func isNotConnected(err error) bool {
@@ -83,7 +85,7 @@ func TestOfflineMutationGate_EveryEncoderReturnsErrNotConnected(t *testing.T) {
 		{"UploadFile", func() error { _, _, _, err := c.UploadFile(missing, "room_x", ""); return err }},
 		{"UploadGroupFile", func() error { _, _, err := c.UploadGroupFile(missing, "grp_x", key); return err }},
 		{"UploadDMFile", func() error { _, _, err := c.UploadDMFile(missing, "dm_x", key); return err }},
-		{"DownloadFile", func() error { _, err := c.DownloadFile("file_x", key, ""); return err }},
+		{"DownloadFile", func() error { _, err := c.DownloadFile(testutil.FileID("x"), key, ""); return err }},
 	}
 
 	// One seeded queue entry: nothing below may mark it sending or add to it.

@@ -2,6 +2,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 func TestSoftDelete_MessageStaysInResults(t *testing.T) {
@@ -134,8 +136,8 @@ func TestAttachments_PersistAndLoad(t *testing.T) {
 	s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "m1", Sender: "alice", Body: "see attached", TS: 1, Room: "general",
 		Attachments: []StoredAttachment{
-			{FileID: "file_abc", Name: "doc.pdf", Size: 45000, Mime: "application/pdf", DecryptKey: "dGVzdGtleQ=="},
-			{FileID: "file_def", Name: "photo.jpg", Size: 230000, Mime: "image/jpeg", DecryptKey: "aW1na2V5"},
+			{FileID: testutil.FileID("abc"), Name: "doc.pdf", Size: 45000, Mime: "application/pdf", DecryptKey: "dGVzdGtleQ=="},
+			{FileID: testutil.FileID("def"), Name: "photo.jpg", Size: 230000, Mime: "image/jpeg", DecryptKey: "aW1na2V5"},
 		},
 	})
 
@@ -150,14 +152,14 @@ func TestAttachments_PersistAndLoad(t *testing.T) {
 		t.Fatalf("expected 2 attachments, got %d", len(msgs[0].Attachments))
 	}
 	a1 := msgs[0].Attachments[0]
-	if a1.FileID != "file_abc" || a1.Name != "doc.pdf" || a1.Size != 45000 {
+	if a1.FileID != testutil.FileID("abc") || a1.Name != "doc.pdf" || a1.Size != 45000 {
 		t.Errorf("attachment 1 mismatch: %+v", a1)
 	}
 	if a1.DecryptKey != "dGVzdGtleQ==" {
 		t.Errorf("decrypt key not preserved: %q", a1.DecryptKey)
 	}
 	a2 := msgs[0].Attachments[1]
-	if a2.FileID != "file_def" || a2.Mime != "image/jpeg" {
+	if a2.FileID != testutil.FileID("def") || a2.Mime != "image/jpeg" {
 		t.Errorf("attachment 2 mismatch: %+v", a2)
 	}
 }
@@ -178,7 +180,7 @@ func TestAttachments_SurviveSoftDelete(t *testing.T) {
 	s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "m1", Sender: "alice", Body: "file here", TS: 1, Room: "general",
 		Attachments: []StoredAttachment{
-			{FileID: "file_abc", Name: "doc.pdf", Size: 100, Mime: "application/pdf"},
+			{FileID: testutil.FileID("abc"), Name: "doc.pdf", Size: 100, Mime: "application/pdf"},
 		},
 	})
 
@@ -197,8 +199,8 @@ func TestSoftDelete_ReturnsFileIDs(t *testing.T) {
 	s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "m1", Sender: "alice", Body: "file here", TS: 1, Room: "general",
 		Attachments: []StoredAttachment{
-			{FileID: "file_abc", Name: "doc.pdf", Size: 100, Mime: "application/pdf"},
-			{FileID: "file_def", Name: "img.jpg", Size: 200, Mime: "image/jpeg"},
+			{FileID: testutil.FileID("abc"), Name: "doc.pdf", Size: 100, Mime: "application/pdf"},
+			{FileID: testutil.FileID("def"), Name: "img.jpg", Size: 200, Mime: "image/jpeg"},
 		},
 	})
 
@@ -209,7 +211,7 @@ func TestSoftDelete_ReturnsFileIDs(t *testing.T) {
 	if len(fileIDs) != 2 {
 		t.Fatalf("expected 2 file IDs, got %d", len(fileIDs))
 	}
-	if fileIDs[0] != "file_abc" || fileIDs[1] != "file_def" {
+	if fileIDs[0] != testutil.FileID("abc") || fileIDs[1] != testutil.FileID("def") {
 		t.Errorf("file IDs = %v", fileIDs)
 	}
 }

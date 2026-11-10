@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 // TestDefaultConfigDir_WithControlledHome verifies the helper
@@ -293,8 +295,8 @@ func TestFilesDir(t *testing.T) {
 
 // TestAttachmentPath verifies the `<dataDir>/files/<fileID>` join.
 func TestAttachmentPath(t *testing.T) {
-	got := AttachmentPath("/data", "file_abc123")
-	want := filepath.Join("/data", "files", "file_abc123")
+	got := AttachmentPath("/data", testutil.FileID("abc123"))
+	want := filepath.Join("/data", "files", testutil.FileID("abc123"))
 	if got != want {
 		t.Errorf("AttachmentPath = %q, want %q", got, want)
 	}
@@ -338,7 +340,7 @@ func TestHelpers_ComposeCorrectly(t *testing.T) {
 	if got, want := FilesDir(dataDir), "/etc/sshkey-term/chat.example.com/files"; got != want {
 		t.Errorf("FilesDir composed = %q, want %q", got, want)
 	}
-	if got, want := AttachmentPath(dataDir, "fid_xyz"), "/etc/sshkey-term/chat.example.com/files/fid_xyz"; got != want {
+	if got, want := AttachmentPath(dataDir, testutil.FileID("fid_xyz")), filepath.Join("/etc/sshkey-term/chat.example.com/files", testutil.FileID("fid_xyz")); got != want {
 		t.Errorf("AttachmentPath composed = %q, want %q", got, want)
 	}
 	if got, want := MessagesDBPath(dataDir), "/etc/sshkey-term/chat.example.com/messages.db"; got != want {
@@ -367,31 +369,31 @@ func TestValidFileID(t *testing.T) {
 	}
 
 	invalid := []string{
-		"",
-		".",
-		"..",
-		"../etc/passwd",
-		"../../../../etc/cron.d/evil",
-		"/etc/passwd",
-		"/absolute/path",
-		"sub/dir",
-		"foo/",            // trailing separator
-		"dir\\win",        // backslash (cross-platform defense-in-depth)
-		"..\\..\\windows", // windows-style traversal
-		"a/../../b",
-		"file_\x00evil", // embedded NUL
+		"",                            // malformed: empty ID has no required prefix or suffix
+		".",                           // malformed: dot path is not a file ID
+		"..",                          // malformed: dot path is not a file ID
+		"../etc/passwd",               // malformed: path separators or traversal are not permitted in a file ID
+		"../../../../etc/cron.d/evil", // malformed: path separators or traversal are not permitted in a file ID
+		"/etc/passwd",                 // malformed: absolute filesystem path is not a file ID
+		"/absolute/path",              // malformed: absolute filesystem path is not a file ID
+		"sub/dir",                     // malformed: path separators or traversal are not permitted in a file ID
+		"foo/",                        // malformed: trailing separator
+		"dir\\win",                    // malformed: backslash (cross-platform defense-in-depth)
+		"..\\..\\windows",             // malformed: windows-style traversal
+		"a/../../b",                   // malformed: path separators or traversal are not permitted in a file ID
+		"file_\x00evil",               // malformed: embedded NUL
 		// Step 3b: shape, not just safety.
-		"file_abc123",                     // short
-		"safename",                        // no prefix
-		"a-b_c.d",                         // no prefix, dotted
-		"FILE_V1StGXR8_Z5jdHi6B-myT",      // wrong prefix case
-		"file_V1StGXR8_Z5jdHi6B-myTX",     // 22 characters
-		"file_V1StGXR8_Z5jdHi6B-my",       // 20 characters
-		"file_V1StGXR8_Z5jdHi6B.myT",      // dot inside the body
-		"file_V1StGXR8_Z5jdHi6B+myT",      // outside the alphabet
-		"file_V1StGXR8_Z5jdHi6B myT",      // space
-		"file_V1StGXR8_Z5jdHi6B-myT.part", // a derived-file name
-		"file_V1StGXR8_Z5jdHi6Bé-my",      // multibyte, right byte length
+		"file_abc123",                     // malformed: short
+		"safename",                        // malformed: no prefix
+		"a-b_c.d",                         // malformed: no prefix, dotted
+		"FILE_V1StGXR8_Z5jdHi6B-myT",      // malformed: wrong prefix case
+		"file_V1StGXR8_Z5jdHi6B-myTX",     // malformed: 22 characters
+		"file_V1StGXR8_Z5jdHi6B-my",       // malformed: 20 characters
+		"file_V1StGXR8_Z5jdHi6B.myT",      // malformed: dot inside the body
+		"file_V1StGXR8_Z5jdHi6B+myT",      // malformed: outside the alphabet
+		"file_V1StGXR8_Z5jdHi6B myT",      // malformed: space
+		"file_V1StGXR8_Z5jdHi6B-myT.part", // malformed: a derived-file name
+		"file_V1StGXR8_Z5jdHi6Bé-my",      // malformed: multibyte, right byte length
 	}
 	for _, id := range invalid {
 		if ValidFileID(id) {

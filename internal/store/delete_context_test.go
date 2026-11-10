@@ -1,6 +1,10 @@
 package store
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
+)
 
 // F6 follow-up — DeleteMessageInContext is the context-scoped durable apply for a
 // verified remote `deleted` tombstone on the LIVE path. It must mutate only a row
@@ -12,7 +16,7 @@ func TestDeleteMessageInContext_DeletesMatchingContext(t *testing.T) {
 	s := openTestStore(t)
 	s.InsertMessage(StoredMessage{
 		ServerOrder: 1, ID: "m1", Sender: "bob", Body: "delete me", TS: 1, Room: "general",
-		Attachments: []StoredAttachment{{FileID: "file_abc", Name: "a.bin", Size: 1, Mime: "application/octet-stream"}},
+		Attachments: []StoredAttachment{{FileID: testutil.FileID("abc"), Name: "a.bin", Size: 1, Mime: "application/octet-stream"}},
 	})
 	s.InsertReaction(StoredReaction{ReactionID: "r1", MessageID: "m1", User: "carol", Emoji: "👍", TS: 2})
 
@@ -20,7 +24,7 @@ func TestDeleteMessageInContext_DeletesMatchingContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("matching-context delete: %v", err)
 	}
-	if len(fileIDs) != 1 || fileIDs[0] != "file_abc" {
+	if len(fileIDs) != 1 || fileIDs[0] != testutil.FileID("abc") {
 		t.Errorf("expected the attachment's file ID back, got %v", fileIDs)
 	}
 	got, _ := s.GetMessageByID("m1")
@@ -36,7 +40,7 @@ func TestDeleteMessageInContext_WrongContextNoop(t *testing.T) {
 	s := openTestStore(t)
 	s.InsertMessage(StoredMessage{
 		ServerOrder: 1, ID: "m1", Sender: "bob", Body: "keep me", TS: 1, Room: "general",
-		Attachments: []StoredAttachment{{FileID: "file_abc", Name: "a.bin", Size: 1, Mime: "application/octet-stream"}},
+		Attachments: []StoredAttachment{{FileID: testutil.FileID("abc"), Name: "a.bin", Size: 1, Mime: "application/octet-stream"}},
 	})
 	s.InsertReaction(StoredReaction{ReactionID: "r1", MessageID: "m1", User: "carol", Emoji: "👍", TS: 2})
 

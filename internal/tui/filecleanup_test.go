@@ -1,6 +1,10 @@
 package tui
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
+)
 
 func TestMarkDeleted_ClearsAttachmentsFromDisplay(t *testing.T) {
 	m := NewMessages()
@@ -8,8 +12,8 @@ func TestMarkDeleted_ClearsAttachmentsFromDisplay(t *testing.T) {
 		{
 			ID: "msg_1", FromID: "usr_a", From: "Alice", Body: "see attached", TS: 1000,
 			Attachments: []DisplayAttachment{
-				{FileID: "file_abc", Name: "doc.pdf"},
-				{FileID: "file_def", Name: "photo.jpg"},
+				{FileID: testutil.FileID("abc"), Name: "doc.pdf"},
+				{FileID: testutil.FileID("def"), Name: "photo.jpg"},
 			},
 		},
 	}

@@ -1,6 +1,8 @@
 package client
 
-import "testing"
+import (
+	"testing"
+)
 
 // TestValidFileID guards the audit-F12 fix: the download cache write uses
 // a server-relayed fileID as the local filename, so validFileID must reject
@@ -23,23 +25,23 @@ func TestValidFileID(t *testing.T) {
 	}
 
 	invalid := []string{
-		"",
-		".",
-		"..",
-		"../etc/passwd",
-		"../../../../etc/cron.d/evil",
-		"/etc/passwd",
-		"/absolute/path",
-		"sub/dir",
-		"foo/",            // trailing separator
-		"dir\\win",        // backslash (cross-platform defense-in-depth)
-		"..\\..\\windows", // windows-style traversal
-		"a/../../b",
-		"file_\x00evil",                   // embedded NUL
-		"file_abc123",                     // short
-		"safename",                        // no prefix
-		"a-b_c.d",                         // dotted, no prefix
-		"file_V1StGXR8_Z5jdHi6B-myT.part", // a derived-file name
+		"",                                // malformed: empty ID has no required prefix or suffix
+		".",                               // malformed: dot path is not a file ID
+		"..",                              // malformed: dot path is not a file ID
+		"../etc/passwd",                   // malformed: path separators or traversal are not permitted in a file ID
+		"../../../../etc/cron.d/evil",     // malformed: path separators or traversal are not permitted in a file ID
+		"/etc/passwd",                     // malformed: absolute filesystem path is not a file ID
+		"/absolute/path",                  // malformed: absolute filesystem path is not a file ID
+		"sub/dir",                         // malformed: path separators or traversal are not permitted in a file ID
+		"foo/",                            // malformed: trailing separator
+		"dir\\win",                        // malformed: backslash (cross-platform defense-in-depth)
+		"..\\..\\windows",                 // malformed: windows-style traversal
+		"a/../../b",                       // malformed: path separators or traversal are not permitted in a file ID
+		"file_\x00evil",                   // malformed: embedded NUL
+		"file_abc123",                     // malformed: short
+		"safename",                        // malformed: no prefix
+		"a-b_c.d",                         // malformed: dotted, no prefix
+		"file_V1StGXR8_Z5jdHi6B-myT.part", // malformed: a derived-file name
 	}
 	for _, id := range invalid {
 		if validFileID(id) {

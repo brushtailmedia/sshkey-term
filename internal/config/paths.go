@@ -296,13 +296,9 @@ func ValidFileID(fileID string) bool {
 	return true
 }
 
-// MessagesDBPath returns `<dataDir>/messages.db`, the per-server
-// SQLite database that holds local message history, attachments
-// metadata, epoch keys, and identity state. Single-site drift
-// today (`internal/client/client.go:227` + the corresponding test
-// fixture in `internal/testutil/fixtures.go:157`) but centralized
-// here so Phase 4's grep gate doesn't need a test-fixture
-// exception.
+// MessagesDBPath returns <dataDir>/messages.db, the per-server SQLite cache
+// for message history, attachment metadata, epoch keys and identity state.
+// Client code and local test setup share this path convention.
 func MessagesDBPath(dataDir string) string {
 	return filepath.Join(dataDir, "messages.db")
 }

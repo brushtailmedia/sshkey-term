@@ -10,6 +10,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 // TestPurgeRoomMessages_ReturnsAttachmentFileIDs verifies that the
@@ -25,8 +27,8 @@ func TestPurgeRoomMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		ID: "msg_a", Sender: "alice", Body: "two attachments", TS: 1,
 		Room: "room_target",
 		Attachments: []StoredAttachment{
-			{FileID: "file_1", Name: "one.png", Mime: "image/png"},
-			{FileID: "file_2", Name: "two.png", Mime: "image/png"},
+			{FileID: testutil.FileID("1"), Name: "one.png", Mime: "image/png"},
+			{FileID: testutil.FileID("2"), Name: "two.png", Mime: "image/png"},
 		},
 	}); err != nil {
 		t.Fatalf("insert msg_a: %v", err)
@@ -35,7 +37,7 @@ func TestPurgeRoomMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		ID: "msg_b", Sender: "bob", Body: "one attachment", TS: 2,
 		Room: "room_target",
 		Attachments: []StoredAttachment{
-			{FileID: "file_3", Name: "three.pdf", Mime: "application/pdf"},
+			{FileID: testutil.FileID("3"), Name: "three.pdf", Mime: "application/pdf"},
 		},
 	}); err != nil {
 		t.Fatalf("insert msg_b: %v", err)
@@ -51,7 +53,7 @@ func TestPurgeRoomMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		ID: "msg_other", Sender: "alice", Body: "other room", TS: 4,
 		Room: "room_other",
 		Attachments: []StoredAttachment{
-			{FileID: "file_other", Name: "other.png", Mime: "image/png"},
+			{FileID: testutil.FileID("other"), Name: "other.png", Mime: "image/png"},
 		},
 	}); err != nil {
 		t.Fatalf("insert msg_other: %v", err)
@@ -64,7 +66,7 @@ func TestPurgeRoomMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 
 	// Should return file_1, file_2, file_3 (in some order — DB
 	// row iteration order is unspecified).
-	want := map[string]bool{"file_1": true, "file_2": true, "file_3": true}
+	want := map[string]bool{testutil.FileID("1"): true, testutil.FileID("2"): true, testutil.FileID("3"): true}
 	if len(fileIDs) != len(want) {
 		t.Fatalf("got %d fileIDs, want %d: %v", len(fileIDs), len(want), fileIDs)
 	}
@@ -72,7 +74,7 @@ func TestPurgeRoomMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		if !want[fid] {
 			t.Errorf("unexpected fileID returned: %q (want subset of %v)", fid, want)
 		}
-		if fid == "file_other" {
+		if fid == testutil.FileID("other") {
 			t.Errorf("PurgeRoomMessages leaked file_other from a different room")
 		}
 	}
@@ -87,7 +89,7 @@ func TestPurgeGroupMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		ID: "gmsg_a", Sender: "alice", Body: "x", TS: 1,
 		Group: "group_target",
 		Attachments: []StoredAttachment{
-			{FileID: "g_file_1", Name: "a.png"},
+			{FileID: testutil.FileID("g_file_1"), Name: "a.png"},
 		},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -96,8 +98,8 @@ func TestPurgeGroupMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		ID: "gmsg_b", Sender: "bob", Body: "y", TS: 2,
 		Group: "group_target",
 		Attachments: []StoredAttachment{
-			{FileID: "g_file_2", Name: "b.png"},
-			{FileID: "g_file_3", Name: "c.png"},
+			{FileID: testutil.FileID("g_file_2"), Name: "b.png"},
+			{FileID: testutil.FileID("g_file_3"), Name: "c.png"},
 		},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -106,7 +108,7 @@ func TestPurgeGroupMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "gmsg_other", Sender: "alice", Body: "z", TS: 3,
 		Group:       "group_other",
-		Attachments: []StoredAttachment{{FileID: "g_file_other"}},
+		Attachments: []StoredAttachment{{FileID: testutil.FileID("g_file_other")}},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -116,7 +118,7 @@ func TestPurgeGroupMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		t.Fatalf("PurgeGroupMessages: %v", err)
 	}
 
-	want := map[string]bool{"g_file_1": true, "g_file_2": true, "g_file_3": true}
+	want := map[string]bool{testutil.FileID("g_file_1"): true, testutil.FileID("g_file_2"): true, testutil.FileID("g_file_3"): true}
 	if len(fileIDs) != len(want) {
 		t.Fatalf("got %d fileIDs, want %d: %v", len(fileIDs), len(want), fileIDs)
 	}
@@ -135,7 +137,7 @@ func TestPurgeDMMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		ID: "dmsg_a", Sender: "alice", Body: "x", TS: 1,
 		DM: "dm_target",
 		Attachments: []StoredAttachment{
-			{FileID: "d_file_1", Name: "a.png"},
+			{FileID: testutil.FileID("d_file_1"), Name: "a.png"},
 		},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -144,7 +146,7 @@ func TestPurgeDMMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		ID: "dmsg_b", Sender: "bob", Body: "y", TS: 2,
 		DM: "dm_target",
 		Attachments: []StoredAttachment{
-			{FileID: "d_file_2", Name: "b.png"},
+			{FileID: testutil.FileID("d_file_2"), Name: "b.png"},
 		},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -153,7 +155,7 @@ func TestPurgeDMMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 	if _, err := s.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "dmsg_other", Sender: "alice", Body: "z", TS: 3,
 		DM:          "dm_other",
-		Attachments: []StoredAttachment{{FileID: "d_file_other"}},
+		Attachments: []StoredAttachment{{FileID: testutil.FileID("d_file_other")}},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -163,7 +165,7 @@ func TestPurgeDMMessages_ReturnsAttachmentFileIDs(t *testing.T) {
 		t.Fatalf("PurgeDMMessages: %v", err)
 	}
 
-	want := map[string]bool{"d_file_1": true, "d_file_2": true}
+	want := map[string]bool{testutil.FileID("d_file_1"): true, testutil.FileID("d_file_2"): true}
 	if len(fileIDs) != len(want) {
 		t.Fatalf("got %d fileIDs, want %d: %v", len(fileIDs), len(want), fileIDs)
 	}

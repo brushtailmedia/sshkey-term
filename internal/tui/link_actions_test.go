@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 // captureLinkSeams swaps the clipboard and browser seams for recorders and
@@ -25,7 +27,7 @@ func linkMessages() []DisplayMessage {
 		{ID: "one", From: "Bob", FromID: "usr_bob", Body: "read https://example.com/post today", TS: 1001},
 		{ID: "two", From: "Carol", FromID: "usr_carol", Body: "https://a.example/1 or https://b.example/2", TS: 1002},
 		{ID: "file", From: "Dave", FromID: "usr_dave", Body: "notes.pdf https://c.example/3", TS: 1003,
-			Attachments: []DisplayAttachment{{FileID: "f1", Name: "notes.pdf", Size: 2048}}},
+			Attachments: []DisplayAttachment{{FileID: testutil.FileID("f1"), Name: "notes.pdf", Size: 2048}}},
 	}
 }
 

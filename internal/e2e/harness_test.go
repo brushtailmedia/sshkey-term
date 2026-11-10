@@ -9,7 +9,6 @@ package e2e
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -30,6 +29,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 // Binaries resolved once by TestMain.
@@ -410,15 +410,7 @@ func (e *Env) ResolveIDs(users ...*User) {
 
 // deviceID derives a production-shape device id (dev_ + 21 alphabet
 // characters) from a label, so a test can name devices "a1", "b2".
-func deviceID(label string) string {
-	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-"
-	sum := sha256.Sum256([]byte(label))
-	b := make([]byte, 21)
-	for i := range b {
-		b[i] = alphabet[int(sum[i])%len(alphabet)]
-	}
-	return "dev_" + string(b)
-}
+func deviceID(label string) string { return testutil.DeviceID(label) }
 
 // ----- sessions: a real client with a frame recorder -----
 

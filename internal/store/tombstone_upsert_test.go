@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 // S2b: remote `deleted` tombstones must be durable even when the original
@@ -54,7 +56,7 @@ func TestUpsertDeletedMessage_KnownRowSoftDeletesAndReturnsFileIDs(t *testing.T)
 	// Cache an original message with an attachment, plus a reaction.
 	if _, err := s.InsertMessage(StoredMessage{
 		ServerOrder: 5, ID: "known", Sender: "bob", Body: "with file", TS: 1, Room: "general",
-		Attachments: []StoredAttachment{{FileID: "file_abc", Name: "x.png", Size: 10, Mime: "image/png"}},
+		Attachments: []StoredAttachment{{FileID: testutil.FileID("abc"), Name: "x.png", Size: 10, Mime: "image/png"}},
 	}); err != nil {
 		t.Fatalf("insert original: %v", err)
 	}
@@ -68,7 +70,7 @@ func TestUpsertDeletedMessage_KnownRowSoftDeletesAndReturnsFileIDs(t *testing.T)
 	if err != nil {
 		t.Fatalf("upsert known: %v", err)
 	}
-	if len(fileIDs) != 1 || fileIDs[0] != "file_abc" {
+	if len(fileIDs) != 1 || fileIDs[0] != testutil.FileID("abc") {
 		t.Fatalf("known-row tombstone should return its attachment file IDs, got %v", fileIDs)
 	}
 

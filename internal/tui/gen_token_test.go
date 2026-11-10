@@ -22,6 +22,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-term/internal/client"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 // newGenTokenApp builds the minimum App state the gen-check cases
@@ -372,7 +373,7 @@ func TestStaleAttachmentReadyEvent_DoesNotInvalidatePreview(t *testing.T) {
 	a.sidebar.previewRenderKey = previewRenderKey{path: "/files/abc", maxCols: 40, maxRows: 10}
 	a.sidebar.previewRenderValue = "rendered"
 
-	stale := AttachmentReadyEvent{FileID: "abc", gen: 1}
+	stale := AttachmentReadyEvent{FileID: testutil.FileID("abc"), gen: 1}
 	a2 := runUpdate(t, a, stale)
 
 	if a2.sidebar.previewRenderValue != "rendered" {

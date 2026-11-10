@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 func makeTestClient(t *testing.T) *Client {
@@ -89,7 +90,7 @@ func TestDispatchCorrID_DownloadErrorRoutesToError(t *testing.T) {
 
 	raw, _ := json.Marshal(protocol.DownloadError{
 		Type:    "download_error",
-		FileID:  "file_x",
+		FileID:  testutil.FileID("x"),
 		Code:    "not_found",
 		Message: "missing",
 		CorrID:  corrID,

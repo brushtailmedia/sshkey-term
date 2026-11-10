@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 func TestMarkDeleted_FlagsMessage(t *testing.T) {
@@ -62,7 +64,7 @@ func TestMarkDeleted_ClearsAttachments(t *testing.T) {
 	m.messages = []DisplayMessage{
 		{
 			ID: "msg_1", From: "Alice", Body: "see attached", TS: 1000,
-			Attachments: []DisplayAttachment{{FileID: "f1", Name: "doc.pdf"}},
+			Attachments: []DisplayAttachment{{FileID: testutil.FileID("f1"), Name: "doc.pdf"}},
 		},
 	}
 

@@ -3,6 +3,8 @@ package store
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 // TestSoftDelete_RoundTrip verifies the full cycle: insert → delete → close →
@@ -85,8 +87,8 @@ func TestAttachment_RoundTrip(t *testing.T) {
 	s1.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "m1", Sender: "alice", Body: "see attached", TS: 1000, Room: "general",
 		Attachments: []StoredAttachment{
-			{FileID: "file_abc", Name: "report.pdf", Size: 45000, Mime: "application/pdf", DecryptKey: "dGVzdGtleTE="},
-			{FileID: "file_def", Name: "photo.jpg", Size: 230000, Mime: "image/jpeg", DecryptKey: "dGVzdGtleTI="},
+			{FileID: testutil.FileID("abc"), Name: "report.pdf", Size: 45000, Mime: "application/pdf", DecryptKey: "dGVzdGtleTE="},
+			{FileID: testutil.FileID("def"), Name: "photo.jpg", Size: 230000, Mime: "image/jpeg", DecryptKey: "dGVzdGtleTI="},
 		},
 	})
 	s1.InsertMessage(StoredMessage{ServerOrder: 2,
@@ -114,7 +116,7 @@ func TestAttachment_RoundTrip(t *testing.T) {
 	if len(m1.Attachments) != 2 {
 		t.Fatalf("m1 expected 2 attachments, got %d", len(m1.Attachments))
 	}
-	if m1.Attachments[0].FileID != "file_abc" {
+	if m1.Attachments[0].FileID != testutil.FileID("abc") {
 		t.Errorf("att[0] file_id = %q", m1.Attachments[0].FileID)
 	}
 	if m1.Attachments[0].Name != "report.pdf" {
@@ -129,7 +131,7 @@ func TestAttachment_RoundTrip(t *testing.T) {
 	if m1.Attachments[0].DecryptKey != "dGVzdGtleTE=" {
 		t.Errorf("att[0] decrypt_key = %q", m1.Attachments[0].DecryptKey)
 	}
-	if m1.Attachments[1].FileID != "file_def" {
+	if m1.Attachments[1].FileID != testutil.FileID("def") {
 		t.Errorf("att[1] file_id = %q", m1.Attachments[1].FileID)
 	}
 	if m1.Attachments[1].DecryptKey != "dGVzdGtleTI=" {
@@ -162,14 +164,14 @@ func TestDeletedAttachment_RoundTrip(t *testing.T) {
 	s1.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "m1", Sender: "alice", Body: "file here", TS: 1000, Room: "general",
 		Attachments: []StoredAttachment{
-			{FileID: "file_xyz", Name: "doc.txt", Size: 100, Mime: "text/plain", DecryptKey: "a2V5"},
+			{FileID: testutil.FileID("xyz"), Name: "doc.txt", Size: 100, Mime: "text/plain", DecryptKey: "a2V5"},
 		},
 	})
 	fileIDs, err := s1.DeleteMessage("m1", "alice")
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if len(fileIDs) != 1 || fileIDs[0] != "file_xyz" {
+	if len(fileIDs) != 1 || fileIDs[0] != testutil.FileID("xyz") {
 		t.Errorf("delete should return file IDs, got %v", fileIDs)
 	}
 	s1.Close()
@@ -249,7 +251,7 @@ func TestGroupAttachment_RoundTrip(t *testing.T) {
 	s1.InsertMessage(StoredMessage{ServerOrder: 1,
 		ID: "d1", Sender: "alice", Body: "group file", TS: 1000, Group: "group_abc",
 		Attachments: []StoredAttachment{
-			{FileID: "file_grp1", Name: "secret.pdf", Size: 5000, Mime: "application/pdf", DecryptKey: "Z3Jwa2V5"},
+			{FileID: testutil.FileID("grp1"), Name: "secret.pdf", Size: 5000, Mime: "application/pdf", DecryptKey: "Z3Jwa2V5"},
 		},
 	})
 	s1.Close()

@@ -14,6 +14,7 @@ import (
 
 	"github.com/brushtailmedia/sshkey-term/internal/crypto"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
+	"github.com/brushtailmedia/sshkey-term/internal/testutil"
 )
 
 // seedHistoricalRoomEpochKey seeds a HISTORY-ONLY epoch key (historyEpochKeys
@@ -121,7 +122,7 @@ func TestStoreRoomMessageFromCatchup_HistoricalAttachmentKeyBaked(t *testing.T) 
 		Seq:      1,
 		DeviceID: "dev_bob_test",
 		Attachments: []protocol.Attachment{{
-			FileID:    "file_hist",
+			FileID:    testutil.FileID("hist"),
 			Name:      "old.png",
 			Size:      10,
 			Mime:      "image/png",
