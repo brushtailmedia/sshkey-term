@@ -53,11 +53,11 @@ The unit suite tests client behavior locally with fakes and local stores and nev
 ## Coverage Policy
 
 - Coverage thresholds are enforced by `.github/scripts/check_coverage.sh` and `docs/testing/coverage_thresholds.txt`.
-- Baseline thresholds are set to realistic current branch coverage and ratcheted as focused tests land.
+- Coverage thresholds never decrease. Recalculate them after focused tests land and at the end of each implementation plan, using the greater of the existing threshold and floor(measured coverage − 3 percentage points).
 
 ## Phase 22b Deferral Registry
 
 No open deferrals remain after the 2026-04-24 deferred-items pass.
 
 - Launch-gate support is covered from the server integration side (`sshkey-chat/cmd/sshkey-server/auto_revoke_integration_test.go`) and remains part of the client release checklist.
-- B.15 ratchet is applied in CI thresholds: `internal/client` 20.0, `internal/tui` 33.0, `internal/protocol` 55.0.
+- Current CI minimums include: `internal/client` 51.0, `internal/tui` 70.0, `internal/protocol` 78.0.
