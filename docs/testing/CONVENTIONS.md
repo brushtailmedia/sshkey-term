@@ -18,6 +18,21 @@ The unit suite tests client behavior locally with fakes and local stores and nev
 - Use model-level `App.Update` calls for TUI logic tests (capture and rebind returned model value).
 - Use `client.SetStoreForTesting` / `client.SetProfileForTesting` for controlled cross-package tests.
 
+## Reachability and Absence Checks
+
+- New code is proven through a production entry point. New behaviour needs at
+  least one test that reaches it the way the running app does:
+  `handleInternal` for an inbound frame, `App.Update` for a key press or a
+  server message in the TUI, the exported client method for something sent,
+  and `internal/e2e` for what only the two real implementations together can
+  show. A direct call to a new helper shows that it works, not that anything
+  calls it.
+- An absence assertion needs a positive control. A check that something did
+  not happen (no frame, no stored row, no counter, no log record) counts only
+  beside a case in which the same check finds that thing: a sibling case, an
+  earlier step of the same test, or a well-shaped control row. Without one, a
+  wrong type name, a wrong path or a dead channel passes as absence.
+
 ## SQLCipher / Key Material
 
 - Open encrypted test databases with a real Ed25519 key seed, `store.DeriveDBKey`, and `store.Open` under `t.TempDir()`. Fail on any derivation or open error; never silently fall back to an unencrypted store.

@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Changed
+- **Testing conventions: reachability and absence checks (2026-11-12).** New
+  behaviour needs at least one test through a production entry point
+  (`handleInternal`, `App.Update`, an exported client method, or the
+  end-to-end suite); a direct call to a new helper does not show that
+  anything calls it. An assertion that something did not happen needs a
+  positive control beside it. Documentation only; no test or runtime change.
 - **S3 follow-up (2026-11-11).** Fixture lint now checks raw JSON `file_ids`
   arrays and reports unsupported ID-bearing JSON templates instead of silently
   skipping their static fields. Add shared regressions for array elements,
