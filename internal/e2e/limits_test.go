@@ -28,6 +28,34 @@ func (s *Session) generalRoom() string {
 	return rooms[0]
 }
 
+// waitEpochAbove polls the real client on the harness ticker until it holds
+// an epoch for room above epoch, and returns the epoch it holds.
+func (s *Session) waitEpochAbove(room string, epoch int64) int64 {
+	t := s.t
+	t.Helper()
+	deadline := time.Now().Add(defaultWait)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		cur := s.C.CurrentEpoch(room)
+		if cur > epoch {
+			return cur
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: epoch for %s is %d after %s, want above %d; frames seen: %s\n%s", s.User.Name, room, cur, defaultWait, epoch, s.rec.summary(), s.env.tailLog())
+		}
+		<-tick.C
+	}
+}
+
+// roomMessageFrom matches a message frame in room sent by user.
+func roomMessageFrom(room, user string) func(json.RawMessage) bool {
+	return func(raw json.RawMessage) bool {
+		var m protocol.Message
+		return decodeOK(raw, &m) && m.Room == room && m.From == user
+	}
+}
+
 // fillGeneral approves n extra users into general so their profiles reach
 // every connected member, and returns them with IDs resolved.
 func fillGeneral(env *Env, n int) []*User {
@@ -123,6 +151,9 @@ func TestLimits_TypingSizeRule(t *testing.T) {
 	}
 	b.WaitAfter(markB, "typing", typingFromAlice)
 
+	// The room has a key before the 101st member exists.
+	epochBefore := a.waitEpochAbove(general, 0)
+
 	// The 101st member joins general; both clients learn it from the
 	// server's room event (the add-to-room queue drains within seconds).
 	extra := env.NewUser("u101", false, "general")
@@ -147,6 +178,30 @@ func TestLimits_TypingSizeRule(t *testing.T) {
 		if r.ID == general && r.Typing {
 			t.Fatalf("room_list says typing=true for a %d-member room", len(r.Members))
 		}
+	}
+
+	// The join asked a connected member for a rotation, which carries 101
+	// wrapped keys: one more than the group cap. Rooms have no member limit,
+	// so the server takes it. Both members move to a newer epoch, and the
+	// 101st member holds a key and reads what alice sends after the join.
+	a.waitEpochAbove(general, epochBefore)
+	b.waitEpochAbove(general, epochBefore)
+	x := env.Connect(extra, "x1")
+	epoch := x.waitEpochAbove(general, 0)
+	// Alice sends from her second device, which took the room's key from
+	// the server when it connected. Her first device and bob's answered a
+	// burst of rotation requests, one per queued join; which key such a
+	// device keeps is not what this test asserts.
+	a2.waitEpochAbove(general, epoch-1)
+	markX := x.Mark()
+	const body = "sent after the 101st member joined"
+	if err := a2.C.SendRoomMessage(general, body, "", nil); err != nil {
+		t.Fatalf("send to the 101-member room: %v", err)
+	}
+	msg := decode[protocol.Message](t, x.WaitAfter(markX, "message", roomMessageFrom(general, alice.ID)))
+	got, err := x.C.DecryptRoomMessage(general, msg.Epoch, msg.Payload)
+	if err != nil || got.Body != body {
+		t.Fatalf("the 101st member could not read a message sent after the join (epoch %d): body %+v, err %v", msg.Epoch, got, err)
 	}
 }
 

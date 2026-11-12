@@ -72,6 +72,10 @@
 
 ### Added
 - **An end-to-end suite that runs the real client against the real server.** `internal/e2e`, behind the `e2e` build tag, starts a real `sshkey-server` on port 0 for every test, approves users through the real `sshkey-ctl`, connects real clients over SSH with real keys, and asserts on the frames they receive and on what their local stores hold after decryption. Nothing like it existed: the server's integration tests drive a bare SSH client of their own and the client's tests never met a server, which is how a group at the member cap could ship unable to send a message. Today it proves the group lifecycle (create, add, send, react, edit, kick, leave, retire), a 100-member group with real wrapped keys sending a full-size body, the typing size rule flipping at the 101st room member, an oversized frame refused by the server and refused earlier by the client, a rate limiter answering with `retry_after_ms`, the pending-key path (connect, be queued, be approved under the requested name, connect), and a clean server shutdown that leaves the data directory readable. Run it with `make e2e` (the server binaries are built from `SSHKEY_CHAT_REPO`, default `../sshkey-chat`); the ordinary `go test ./...` never touches it and it skips when no binaries are given; CI runs it as its own job against the server repo's `main`. A failed test keeps its server log, config, data directory and client stores under `sshkey-e2e-*` in the temp dir. The testing conventions and the coupling guard now name `internal/e2e` as the one sanctioned cross-product suite, binaries not imports, with no server test anywhere else.
+- **The end-to-end suite checks that a room above the group cap rotates its
+  key.** `TestLimits_TypingSizeRule` already builds a 101-member room; it now
+  also waits for the rotation the 101st member's join asks for, connects that
+  member and has them read a message sent after they joined.
 
 ## [v0.5.0] - 2026-06-02
 
