@@ -94,7 +94,7 @@ t.Cleanup(func() { _ = db.Close() })
 No open deferrals remain after the 2026-04-24 deferred-items pass.
 
 - Launch-gate support is covered from the server integration side (`sshkey-chat/cmd/sshkey-server/auto_revoke_integration_test.go`) and remains part of the client release checklist.
-- Current CI minimums include: `internal/client` 52.0, `internal/tui` 70.0, `internal/protocol` 78.0.
+- Current CI minimums include: `internal/client` 53.0, `internal/tui` 70.0, `internal/protocol` 78.0.
 
 ## Identifier Fixtures
 

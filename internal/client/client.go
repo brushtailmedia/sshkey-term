@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -128,12 +129,13 @@ type Client struct {
 	// historical epochs (epoch < currentEpoch). Never feeds live/current
 	// decryption — see docs/planning/open/f7-phase-d-scoped-key-model.md.
 	historyEpochKeys map[string]map[int64][]byte // room -> epoch -> unwrapped history-only key
-	// pendingEpochAtt (F7) stashes a signature-verified epoch_key whose member
-	// hash didn't match the local roster (or whose roster wasn't loaded yet),
-	// while we request a fresh room_members_list. Drained — single-shot — when
-	// that list arrives (drainPendingEpochAttestation): match → adopt, else
-	// fail-closed. room ID -> stashed key. Protected by c.mu.
-	pendingEpochAtt map[string]protocol.EpochKey
+	// pendingEpochAtt (F7) stashes a signature-verified epoch_key, with the key
+	// it carried, whose member hash didn't match the local roster (or whose
+	// roster wasn't loaded yet), while we request a fresh room_members_list.
+	// Drained — single-shot — when that list arrives
+	// (drainPendingEpochAttestation): match → adopt, else fail-closed.
+	// room ID -> stashed key. Protected by c.mu.
+	pendingEpochAtt map[string]verifiedEpochKey
 	// rotatedEpoch (F7) records the epoch THIS client generated in
 	// handleEpochTrigger and is awaiting epoch_confirmed for. Only the rotator
 	// may advance currentEpoch via epoch_confirmed (it trusts its own
@@ -197,7 +199,7 @@ func New(cfg Config) *Client {
 		epochKeys:        make(map[string]map[int64][]byte),
 		currentEpoch:     make(map[string]int64),
 		historyEpochKeys: make(map[string]map[int64][]byte),
-		pendingEpochAtt:  make(map[string]protocol.EpochKey),
+		pendingEpochAtt:  make(map[string]verifiedEpochKey),
 		rotatedEpoch:     make(map[string]int64),
 		seqCounters:      make(map[string]int64),
 		roomMemberCache:  make(map[string][]string),
@@ -1518,46 +1520,43 @@ func (c *Client) handleInternal(msgType string, raw json.RawMessage) {
 	}
 }
 
-// storeEpochKey unwraps and stores a VERIFIED (adopted) epoch key in memory AND
-// persists it to the local encrypted DB so it survives across app restarts, and
-// advances currentEpoch when this is a newer epoch. This is the adopted/live
-// path (verified epoch_key); the history-only sync/history path is the separate
-// storeEpochKeyHistorical (F7 Phase D) — the two key scopes never mix.
+// storeEpochKey stores a VERIFIED (adopted) epoch key in memory AND persists it
+// to the local encrypted DB so it survives across app restarts, and advances
+// currentEpoch when this is a newer epoch. The caller has already opened the
+// key and checked the generator's attestation against it. This is the
+// adopted/live path (verified epoch_key); the history-only sync/history path is
+// the separate storeEpochKeyHistorical (F7 Phase D) — the two key scopes never
+// mix.
 //
-// If the key is already in memory for this (room, epoch), the unwrap and DB
-// write are skipped entirely — avoids redundant ECDH+HKDF work when the server
-// re-sends a key the client already has (common on reconnect).
-func (c *Client) storeEpochKey(room string, epoch int64, wrappedKey string) {
-	// Skip if already adopted (server re-sent a key we already have).
-	c.mu.RLock()
-	existing := c.epochKeys[room][epoch]
-	c.mu.RUnlock()
-	if existing != nil {
-		// Still advance currentEpoch in case this is a newer epoch number.
-		c.mu.Lock()
-		if epoch > c.currentEpoch[room] {
-			c.currentEpoch[room] = epoch
-		}
-		c.mu.Unlock()
-		return
-	}
-
-	key, err := c.UnwrapKey(wrappedKey)
-	if err != nil {
-		c.logger.Warn("failed to unwrap epoch key", "room", room, "epoch", epoch, "error", err)
-		return
-	}
-
+// The server sends the current key again on every connect, so the usual case
+// is the key this client already holds for this (room, epoch): nothing is
+// written. When the key held differs, the verified one replaces it. The held
+// one is then a key this client generated for a rotation that was not the
+// accepted one, or an earlier key for the same epoch number; the one the
+// attestation covers is the one the room uses.
+func (c *Client) storeEpochKey(room string, epoch int64, key []byte) {
 	c.mu.Lock()
-	if c.epochKeys[room] == nil {
-		c.epochKeys[room] = make(map[int64][]byte)
+	existing := c.epochKeys[room][epoch]
+	same := existing != nil && bytes.Equal(existing, key)
+	if !same {
+		if c.epochKeys[room] == nil {
+			c.epochKeys[room] = make(map[int64][]byte)
+		}
+		c.epochKeys[room][epoch] = key
 	}
-	c.epochKeys[room][epoch] = key
 	if epoch > c.currentEpoch[room] {
 		c.currentEpoch[room] = epoch
 	}
 	store := c.store
 	c.mu.Unlock()
+
+	if same {
+		return // the server re-sent a key we already have
+	}
+	if existing != nil {
+		c.logger.Warn("the key held for an epoch differed from the verified one and was replaced",
+			"room", room, "epoch", epoch)
+	}
 
 	// Persist to local DB (survives restart). Failure here is non-fatal —
 	// the in-memory copy is usable for this session.

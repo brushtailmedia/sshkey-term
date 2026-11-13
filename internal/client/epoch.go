@@ -1,14 +1,20 @@
 package client
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/brushtailmedia/sshkey-term/internal/crypto"
 	"github.com/brushtailmedia/sshkey-term/internal/protocol"
 )
 
-// handleEpochTrigger generates a new epoch key, wraps it for all members, and sends epoch_rotate.
+// handleEpochTrigger generates a new epoch key, wraps it for all members, and
+// sends epoch_rotate. It answers only a request whose member keys are the keys
+// this client holds for those members (memberKeysForWrap).
 func (c *Client) handleEpochTrigger(raw json.RawMessage) {
 	// Offline-browse R18: only ever invoked from readLoop today, but the
 	// guard lives at the source so a future caller cannot rotate an epoch
@@ -28,6 +34,14 @@ func (c *Client) handleEpochTrigger(raw json.RawMessage) {
 		"members", len(trigger.Members),
 	)
 
+	// The member keys in the request come from the server. Check them against
+	// the keys we hold before any key is made: a request that fails is not
+	// answered at all.
+	memberKeys, ok := c.memberKeysForWrap(trigger.Members)
+	if !ok {
+		return
+	}
+
 	// Generate new epoch key
 	epochKey, err := crypto.GenerateKey()
 	if err != nil {
@@ -37,14 +51,8 @@ func (c *Client) handleEpochTrigger(raw json.RawMessage) {
 
 	// Wrap for each member
 	wrappedKeys := make(map[string]string)
-	for _, member := range trigger.Members {
-		pubKey, err := crypto.ParseSSHPubKey(member.PubKey)
-		if err != nil {
-			c.logger.Error("parse member pubkey", "user", member.User, "error", err)
-			return
-		}
-
-		wrapped, err := crypto.WrapKey(epochKey, pubKey)
+	for i, member := range trigger.Members {
+		wrapped, err := crypto.WrapKey(epochKey, memberKeys[i])
 		if err != nil {
 			c.logger.Error("wrap key for member", "user", member.User, "error", err)
 			return
@@ -53,17 +61,23 @@ func (c *Client) handleEpochTrigger(raw json.RawMessage) {
 	}
 
 	// Compute member hash + F7 attestation: sign (room, epoch, member_hash)
-	// with our identity key so verifying members can confirm — against our
-	// pinned key — that we wrapped the epoch key for exactly this member set,
-	// and the relaying server cannot rewrite the hash to match a victim's
-	// roster (an unsigned hash is forgeable). The sig travels base64-encoded.
+	// and a commitment to the key with our identity key, so verifying members
+	// can confirm — against our pinned key — that we wrapped this epoch key
+	// for exactly this member set. The relaying server can then neither
+	// rewrite the hash to match a victim's roster (an unsigned hash is
+	// forgeable) nor keep the attestation and hand out a key of its own. The
+	// sig travels base64-encoded.
 	var memberNames []string
 	for _, m := range trigger.Members {
 		memberNames = append(memberNames, m.User)
 	}
 	memberHash := crypto.MemberHash(memberNames)
-	memberSig := base64.StdEncoding.EncodeToString(
-		crypto.SignEpochRoster(c.privKey, trigger.Room, trigger.NewEpoch, memberHash))
+	sigBytes, err := crypto.SignEpochRoster(c.privKey, trigger.Room, trigger.NewEpoch, memberHash, epochKey)
+	if err != nil {
+		c.logger.Error("sign epoch attestation", "error", err)
+		return
+	}
+	memberSig := base64.StdEncoding.EncodeToString(sigBytes)
 
 	// Send epoch_rotate
 	err = c.enc.Encode(protocol.EpochRotate{
@@ -109,6 +123,70 @@ func (c *Client) handleEpochTrigger(raw json.RawMessage) {
 		"epoch", trigger.NewEpoch,
 		"members", len(wrappedKeys),
 	)
+}
+
+// memberKeysForWrap returns, in the order of the request, the key the new room
+// key is wrapped with for each member, or false when the request must not be
+// answered.
+//
+// The request and the keys in it come from the server. Wrapping for whatever
+// key it lists would hand the room key to anyone the server names: it could
+// list a key of its own under a member's name, open that copy, and pass the
+// real member a copy of its own making, with every check passing. So a listed
+// key has to be the key this client already holds for that user. A user's key
+// never changes (a new key is a new account), so a different one is never an
+// honest event: it raises the same alarm as a profile that arrives with a
+// changed key, and the request is refused. A member this client has never seen
+// is taken at first sight and pinned, as a first profile is: existing members
+// learn a new member's key from the rotation request that follows the join.
+// Nothing is pinned from a request that is refused.
+func (c *Client) memberKeysForWrap(members []protocol.MemberKey) ([]ed25519.PublicKey, bool) {
+	keys := make([]ed25519.PublicKey, len(members))
+	var firstSeen []int
+	for i, member := range members {
+		listed, err := crypto.ParseSSHPubKey(member.PubKey)
+		if err != nil {
+			c.logger.Error("parse member pubkey", "user", member.User, "error", err)
+			return nil, false
+		}
+		keys[i] = listed
+		held := c.pubKeyForUser(member.User)
+		if held == nil {
+			firstSeen = append(firstSeen, i)
+			continue
+		}
+		if !bytes.Equal(held, listed) {
+			oldFP, newFP := keyFingerprint(held), keyFingerprint(listed)
+			c.logger.Warn("rotation request lists a different key for a known member — request refused",
+				"user", member.User, "old_fingerprint", oldFP, "new_fingerprint", newFP)
+			if c.store != nil {
+				c.store.ClearVerified(member.User)
+			}
+			if c.cfg.OnKeyWarning != nil {
+				c.cfg.OnKeyWarning(member.User, oldFP, newFP)
+			}
+			return nil, false
+		}
+	}
+	if c.store != nil {
+		for _, i := range firstSeen {
+			if err := c.store.PinKey(members[i].User, keyFingerprint(keys[i]), members[i].PubKey); err != nil {
+				c.logger.Warn("failed to pin a member key first seen in a rotation request",
+					"user", members[i].User, "error", err)
+			}
+		}
+	}
+	return keys, true
+}
+
+// keyFingerprint is the SSH SHA256 fingerprint of a public key, the form
+// profiles carry and the pinned-key store holds.
+func keyFingerprint(pub ed25519.PublicKey) string {
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		return ""
+	}
+	return ssh.FingerprintSHA256(sshPub)
 }
 
 // handleEpochConfirmed activates the confirmed epoch key.

@@ -3,6 +3,45 @@
 ## [Unreleased]
 
 ### Security
+- **A room key's attestation now covers the key.** The member who generates
+  a room's new key signs a statement naming the room, the epoch and the
+  members the key was shared with. The key itself was not part of what was
+  signed, and anyone can wrap a key for a member's public key. A server could
+  keep a member's genuine attestation and hand every other member a key of
+  its own under it. They adopted it, and the server could read what the room
+  sent under that key, with nobody added to any member list. The signature
+  now also covers a commitment to the key, derived from it under a label of
+  its own with the room and the epoch (signing tag `epoch_roster:v2`). A
+  member opens its copy first and checks the signature against it. A swapped
+  key is refused with the "Room membership could not be verified" warning,
+  and so is a copy that does not open, which used to fail with a log line
+  only. When a verified key differs from one the app already holds for that
+  epoch, the verified one replaces it. There is no fallback to the earlier
+  form: a room keyed before this change needs one fresh rotation, and a
+  development server is best wiped. Tests:
+  `TestEpochKey_SwappedKeyUnderGenuineAttestationRefused`,
+  `TestEpochKey_CopyThatDoesNotOpenRaisesTheWarning`,
+  `TestEpochKey_VerifiedKeyReplacesADifferentHeldKey`,
+  `TestEpochKey_SameKeyDeliveredAgainChangesNothing`,
+  `TestEpochKey_AttestationWithoutTheKeyRefused`,
+  `TestEpochTrigger_AnswerSignsTheKeyItWrapped`,
+  `TestEpochKeyCommitment_BoundToKeyRoomAndEpoch`,
+  `TestSignEpochRoster_FormWithoutTheKeyDoesNotVerify`,
+  `TestEpochRoster_FixedVectors`.
+- **A rotating app wraps a new room key only for keys it holds.** A rotation
+  request lists the room's members with a public key each, and both come from
+  the server. The app wrapped the new key for whatever keys were listed. A
+  server could list a key of its own under a member's name, open that copy,
+  and pass the real member a copy it made itself; every check passed and
+  nothing showed. The app now compares each listed key with the key it holds
+  for that user. A different key raises the "Account Key Changed" warning,
+  clears that user's verified mark, and the request is not answered. A member
+  the app has never seen is accepted at first sight and pinned, as a first
+  profile is. Tests: `TestEpochTrigger_DifferentKeyForKnownMemberRefused`,
+  `TestEpochTrigger_DifferentKeyForSelfRefused`,
+  `TestEpochTrigger_NeverSeenMemberTakenAtFirstSightAndPinned`,
+  `TestEpochTrigger_NothingPinnedFromARefusedRequest`,
+  `TestEpochTrigger_MemberKnownOnlyFromThePinnedStoreAnswered`.
 - **A room key is only accepted from a member of the room.** A new room key
   comes with a signed statement by the member who generated it, naming the
   members it was shared with, and the app checked that this list is the
@@ -46,6 +85,11 @@
   member and has them read a message sent after they joined.
 
 ### Changed
+- **Raised the client coverage minimum to 53% (2026-11-13).** Up from 52%:
+  the tests for the attestation that covers the key and for the rotation
+  request, listed under Security, bring the client package's measured
+  coverage to 56.9%. Updated the threshold file and the testing conventions'
+  summary.
 - **Raised the client coverage minimum (2026-11-13).** CI now requires 52%
   for the client package, up from 51%. The room-key tests listed under
   Security bring its measured coverage to 55.1%, and the coverage policy sets

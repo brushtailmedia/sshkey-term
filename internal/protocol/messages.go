@@ -953,7 +953,7 @@ type EpochKey struct {
 	// Mirror of the sshkey-chat struct — keep in sync.
 	Generator  string `json:"generator,omitempty"`   // userID that generated this epoch
 	MemberHash string `json:"member_hash,omitempty"` // SHA256(sort(member usernames))
-	MemberSig  string `json:"member_sig,omitempty"`  // generator's SignEpochRoster(room,epoch,member_hash)
+	MemberSig  string `json:"member_sig,omitempty"`  // generator's SignEpochRoster over (room,epoch,member_hash) and the key
 }
 
 type EpochTrigger struct {
@@ -974,7 +974,7 @@ type EpochRotate struct {
 	Epoch       int64             `json:"epoch"`
 	WrappedKeys map[string]string `json:"wrapped_keys"`
 	MemberHash  string            `json:"member_hash"`
-	MemberSig   string            `json:"member_sig,omitempty"` // F7: SignEpochRoster(room,epoch,member_hash)
+	MemberSig   string            `json:"member_sig,omitempty"` // F7: SignEpochRoster over (room,epoch,member_hash) and the key
 }
 
 type EpochConfirmed struct {

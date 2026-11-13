@@ -48,7 +48,11 @@ func (h *editVerifyHarness) buildAttestedEpochKey(t *testing.T, generator string
 		t.Fatalf("wrap: %v", err)
 	}
 	mh := crypto.MemberHash(hashRoster)
-	sig := base64.StdEncoding.EncodeToString(crypto.SignEpochRoster(signer, evRoom, evEpoch, mh))
+	sigBytes, err := crypto.SignEpochRoster(signer, evRoom, evEpoch, mh, epochKey)
+	if err != nil {
+		t.Fatalf("sign attestation: %v", err)
+	}
+	sig := base64.StdEncoding.EncodeToString(sigBytes)
 	return protocol.EpochKey{
 		Type:       "epoch_key",
 		Room:       evRoom,

@@ -483,44 +483,87 @@ func MemberHash(members []string) string {
 	return fmt.Sprintf("SHA256:%x", h.Sum(nil))
 }
 
-// SignEpochRoster signs a room epoch's member attestation (F7). The rotating
-// client signs the MemberHash it computed over the set it wrapped the epoch key
-// for, binding it to (room, epoch). Verifiers check it against the generator's
-// pinned key, then compare MemberHash to their own roster — so a relay cannot
-// rewrite the hash to match a victim's roster (an unsigned hash is forgeable).
+// EpochKeyCommitment derives the value that stands for a room epoch key in the
+// member attestation (SignEpochRoster). The attestation has to cover the key:
+// anyone can wrap a key for a member's public key, so a relay that kept a
+// genuine attestation could otherwise hand a member a key of its own under it.
+// The key is not signed directly and not hashed bare. The commitment is derived
+// from it under a label of its own, with the room and the epoch, so that the
+// encryption key has no second use and the same key committed for two rooms or
+// epochs gives unrelated values.
 //
-// Canonical form (domain-separated + length-prefixed, per the F2 lesson; the
-// "v1" tag is the version hook for a future device-set hash under Tier 2):
-//
-//	Sign("epoch_roster:v1" || uint32_be(len(room)) || room || uint64_be(epoch) || uint32_be(len(memberHash)) || memberHash)
-func SignEpochRoster(privKey ed25519.PrivateKey, room string, epoch int64, memberHash string) []byte {
-	return ed25519.Sign(privKey, buildEpochRosterCanonical(room, epoch, memberHash))
+//	HKDF-SHA256(secret = epochKey, salt = none,
+//	            info = "epoch_key_commit:v1" || u32_be(len(room)) || room || u64_be(epoch)) -> 32 bytes
+func EpochKeyCommitment(epochKey []byte, room string, epoch int64) ([]byte, error) {
+	if len(epochKey) != keySize {
+		return nil, fmt.Errorf("epoch key commitment: key must be %d bytes, got %d", keySize, len(epochKey))
+	}
+	const tag = "epoch_key_commit:v1"
+	info := make([]byte, 0, len(tag)+4+len(room)+8)
+	info = append(info, tag...)
+	info = appendField(info, []byte(room))
+	var epochBytes [8]byte
+	binary.BigEndian.PutUint64(epochBytes[:], uint64(epoch))
+	info = append(info, epochBytes[:]...)
+
+	commitment := make([]byte, sha256.Size)
+	if _, err := hkdf.New(sha256.New, epochKey, nil, info).Read(commitment); err != nil {
+		return nil, err
+	}
+	return commitment, nil
 }
 
-// VerifyEpochRoster verifies a SignEpochRoster signature. Returns false on any
-// mismatch (wrong room/epoch/hash, or a signature from a different domain).
-func VerifyEpochRoster(pubKey ed25519.PublicKey, room string, epoch int64, memberHash string, sig []byte) bool {
-	return ed25519.Verify(pubKey, buildEpochRosterCanonical(room, epoch, memberHash), sig)
+// SignEpochRoster signs a room epoch's member attestation (F7). The rotating
+// client signs the MemberHash it computed over the set it wrapped the epoch key
+// for, and a commitment to that key, binding both to (room, epoch). A verifier
+// opens its copy of the key, checks the signature against the generator's
+// pinned key with it, then compares MemberHash to its own roster. So a relay
+// can neither rewrite the hash to match a victim's roster (an unsigned hash is
+// forgeable) nor keep the attestation and swap the key under it.
+//
+// Canonical form (domain-separated + length-prefixed, per the F2 lesson; "v2"
+// added the key commitment, and the tag stays the version hook for a future
+// device-set hash under Tier 2):
+//
+//	Sign("epoch_roster:v2" || u32_be(len(room)) || room || u64_be(epoch) || u32_be(len(memberHash)) || memberHash || u32_be(len(commitment)) || commitment)
+//
+// with commitment = EpochKeyCommitment(epochKey, room, epoch). It fails only
+// for a key of the wrong length.
+func SignEpochRoster(privKey ed25519.PrivateKey, room string, epoch int64, memberHash string, epochKey []byte) ([]byte, error) {
+	canonical, err := buildEpochRosterCanonical(room, epoch, memberHash, epochKey)
+	if err != nil {
+		return nil, err
+	}
+	return ed25519.Sign(privKey, canonical), nil
+}
+
+// VerifyEpochRoster verifies a SignEpochRoster signature for the given key.
+// Returns false on any mismatch (wrong room/epoch/hash, a different key, a key
+// of the wrong length, or a signature from a different domain or version).
+func VerifyEpochRoster(pubKey ed25519.PublicKey, room string, epoch int64, memberHash string, epochKey, sig []byte) bool {
+	canonical, err := buildEpochRosterCanonical(room, epoch, memberHash, epochKey)
+	if err != nil {
+		return false
+	}
+	return ed25519.Verify(pubKey, canonical, sig)
 }
 
 // buildEpochRosterCanonical constructs the SignEpochRoster / VerifyEpochRoster
 // input bytes. Shared so Sign and Verify cannot drift.
-func buildEpochRosterCanonical(room string, epoch int64, memberHash string) []byte {
-	const tag = "epoch_roster:v1"
-	out := make([]byte, 0, len(tag)+4+len(room)+8+4+len(memberHash))
+func buildEpochRosterCanonical(room string, epoch int64, memberHash string, epochKey []byte) ([]byte, error) {
+	commitment, err := EpochKeyCommitment(epochKey, room, epoch)
+	if err != nil {
+		return nil, err
+	}
+	const tag = "epoch_roster:v2"
+	out := make([]byte, 0, len(tag)+4+len(room)+8+4+len(memberHash)+4+len(commitment))
 	out = append(out, tag...)
-	var roomLen [4]byte
-	binary.BigEndian.PutUint32(roomLen[:], uint32(len(room)))
-	out = append(out, roomLen[:]...)
-	out = append(out, []byte(room)...)
+	out = appendField(out, []byte(room))
 	var epochBytes [8]byte
 	binary.BigEndian.PutUint64(epochBytes[:], uint64(epoch))
 	out = append(out, epochBytes[:]...)
-	var mhLen [4]byte
-	binary.BigEndian.PutUint32(mhLen[:], uint32(len(memberHash)))
-	out = append(out, mhLen[:]...)
-	out = append(out, []byte(memberHash)...)
-	return out
+	out = appendField(out, []byte(memberHash))
+	return appendField(out, commitment), nil
 }
 
 // ParseSSHPubKey extracts an ed25519.PublicKey from an SSH authorized_key format string.
