@@ -2,7 +2,7 @@
 # Format:
 #   ./package/path | min_percent | rationale
 
-./internal/client | 51.0 | client dispatch and sync integration baseline
+./internal/client | 52.0 | client dispatch and sync integration baseline
 ./internal/config | 93.0 | config parsing and validation baseline
 ./internal/crypto | 79.0 | cryptographic helper correctness
 ./internal/keygen | 79.0 | key generation and storage behavior
